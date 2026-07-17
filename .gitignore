@@ -1,0 +1,41 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# Runtime data and generated files
+runtime/
+*.log
+*.log.*
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Local/agent/editor state
+.agents/
+.claude/
+.codex/
+.gemini/
+.idea/
+.vscode/
+
+# Historical copies and vendored upstream source
+老程序（仅留档）/
+老程序v2（仅供了解功能）/
+_upstream_astrbot/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
