@@ -27,6 +27,13 @@ class MessageContext:
 
 
 class ChatService:
+    AFFINITY_CHANGE_MESSAGES = {
+        "enabled_increase": "诶，好感度从{old}涨到{new}了，云萤今天表现不错嘛",
+        "enabled_decrease": "呜，好感度从{old}掉到{new}了，云萤刚刚是不是哪里惹你不开心了",
+        "locked_increase": "诶，好感度涨了一点，云萤有在好好表现哦",
+        "locked_decrease": "呜，好感度掉了一点，云萤是不是哪里说错话了",
+    }
+
     def __init__(self, config, db):
         self.config = config
         self.db = db
@@ -131,8 +138,9 @@ class ChatService:
         user_info_lines = ["## 当前用户信息"]
         for uid, cfg in user_configs.items():
             parts = []
-            if cfg.get("affinity_enabled"):
-                parts.append(f"好感度: {cfg.get('affinity_value', 50)}/100")
+            # 锁定只影响传给 AI 的快照，不影响数据库中的真实好感度。
+            affinity_value = cfg.get("affinity_value", 50) if cfg.get("affinity_enabled") else 50
+            parts.append(f"好感度: {affinity_value}/100")
             if parts:
                 user_info_lines.append(f"[{uid}]: {' | '.join(parts)}")
 
@@ -452,8 +460,20 @@ class ChatService:
         }
 
     async def apply_decision(self, ctx: MessageContext, decision: dict) -> None:
-        for uid, score in (decision.get("affinity_updates") or {}).items():
+        affinity_updates = decision.get("affinity_updates") or {}
+        previous_configs = self.db.get_user_configs_batch(list(affinity_updates))
+        affinity_notices = []
+        for uid, score in affinity_updates.items():
+            previous = previous_configs.get(str(uid), {})
+            old_score = int(previous.get("affinity_value", 50))
+            new_score = int(score)
             self.db.update_affinity(uid, score)
+            if new_score == old_score:
+                continue
+            direction = "increase" if new_score > old_score else "decrease"
+            mode = "enabled" if previous.get("affinity_enabled") else "locked"
+            template = self.AFFINITY_CHANGE_MESSAGES[f"{mode}_{direction}"]
+            affinity_notices.append(template.format(old=old_score, new=new_score))
 
         sticker_name = decision.get("sticker_name")
         if decision.get("should_reply") and sticker_name:
@@ -469,3 +489,5 @@ class ChatService:
         reply_text = (decision.get("reply_text") or "").strip()
         if decision.get("should_reply") and reply_text:
             await send_group_text(self.config, ctx.group_id, reply_text)
+        for notice in affinity_notices:
+            await send_group_text(self.config, ctx.group_id, notice)

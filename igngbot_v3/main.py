@@ -366,7 +366,7 @@ class App:
 
                 logger.info("Starting chat analysis for group %s msg %s", group_id, ctx.msg_id)
                 decision = await self.chat_service.maybe_reply(ctx, history_start_msg_id)
-                if decision.get("should_reply"):
+                if decision.get("should_reply") or decision.get("affinity_updates"):
                     if group_id in self._plus_one_states:
                         self._plus_one_queued_decisions.setdefault(group_id, []).append((ctx, decision))
                         logger.info("Queued bot reply during auto +1 in group %s", group_id)
