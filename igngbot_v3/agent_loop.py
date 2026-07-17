@@ -142,6 +142,23 @@ class OpenAIToolAgent:
             if isinstance(value, (int, float)):
                 total[key] = total.get(key, 0) + value
 
+        # Different OpenAI-compatible providers expose prompt-cache usage under
+        # different names. Keep one normalized field for reporting and retain
+        # the provider-specific top-level fields handled above.
+        cache_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+        if isinstance(cache_details, dict):
+            cached_tokens = cache_details.get("cached_tokens")
+            if isinstance(cached_tokens, (int, float)):
+                total["cached_tokens"] = total.get("cached_tokens", 0) + cached_tokens
+
+        cache_hit_tokens = usage.get("prompt_cache_hit_tokens")
+        if isinstance(cache_hit_tokens, (int, float)):
+            total["cached_tokens"] = total.get("cached_tokens", 0) + cache_hit_tokens
+
+        cache_miss_tokens = usage.get("prompt_cache_miss_tokens")
+        if isinstance(cache_miss_tokens, (int, float)):
+            total["cache_miss_tokens"] = total.get("cache_miss_tokens", 0) + cache_miss_tokens
+
     async def _chat_completion(
         self,
         *,
