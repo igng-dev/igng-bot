@@ -38,6 +38,7 @@ async def ensure_call_logs_table():
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     group_id VARCHAR(50) NOT NULL DEFAULT '',
                     sender_id VARCHAR(50) NOT NULL DEFAULT '',
+                    task_id BIGINT DEFAULT NULL,
                     sender_name VARCHAR(100) DEFAULT '',
                     message_text TEXT,
                     call_type VARCHAR(20) NOT NULL COMMENT 'filter=消息过滤, agent=正式回复',
@@ -54,16 +55,30 @@ async def ensure_call_logs_table():
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     INDEX idx_group_time (group_id, created_at),
                     INDEX idx_sender (sender_id),
+                    INDEX idx_task (task_id),
                     INDEX idx_call_type (call_type),
                     INDEX idx_created (created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
             )
+            try:
+                await cur.execute(
+                    "ALTER TABLE call_logs ADD COLUMN task_id BIGINT DEFAULT NULL AFTER sender_id"
+                )
+            except Exception:
+                pass
+            try:
+                await cur.execute(
+                    "ALTER TABLE call_logs ADD INDEX idx_task (task_id)"
+                )
+            except Exception:
+                pass
     logger.info("[云萤] call_logs 表已就绪")
 
 
 async def insert_call_log(
     group_id: str = "",
     sender_id: str = "",
+    task_id: int | None = None,
     sender_name: str = "",
     message_text: str = "",
     call_type: str = "filter",
@@ -84,13 +99,14 @@ async def insert_call_log(
         async with conn.cursor() as cur:
             await cur.execute(
                 """INSERT INTO call_logs
-                   (group_id, sender_id, sender_name, message_text, call_type, model,
+                   (group_id, sender_id, task_id, sender_name, message_text, call_type, model,
                     system_prompt, user_prompt, thinking_content, response_content,
                     tool_calls, token_usage, duration_ms, success, error_message)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     str(group_id),
                     str(sender_id),
+                    task_id,
                     sender_name,
                     message_text,
                     call_type,

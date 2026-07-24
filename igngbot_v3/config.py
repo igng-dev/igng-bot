@@ -99,11 +99,17 @@ class Config:
     )
     OPENAI_IMAGE_MODEL = os.getenv(
         "OPENAI_IMAGE_MODEL",
-        os.getenv("CCODE_IMAGE_MODEL", "grok-imagine-image-quality"),
+        os.getenv("CCODE_IMAGE_MODEL", "gpt-image-2-plus"),
     )
     OPENAI_IMAGE_FALLBACK_MODEL = os.getenv(
         "OPENAI_IMAGE_FALLBACK_MODEL",
-        os.getenv("CCODE_IMAGE_FALLBACK_MODEL", "grok-imagine-image-quality"),
+        os.getenv("CCODE_IMAGE_FALLBACK_MODEL", "gpt-image-2-plus"),
+    )
+    IMAGE_PRO_MODELS = ("gpt-image-2-plus", "gpt-image-2-fast")
+    IMAGE_STANDARD_MODELS = tuple(
+        item.strip()
+        for item in os.getenv("IMAGE_STANDARD_MODELS", "").split(",")
+        if item.strip()
     )
     OPENAI_DEFAULT_IMAGE_SIZE = os.getenv(
         "OPENAI_DEFAULT_IMAGE_SIZE",
@@ -113,8 +119,22 @@ class Config:
     CLOUD_LLM_BASE_URL = OPENAI_BASE_URL
     CLOUD_LLM_API_KEY = OPENAI_API_KEY
     CLOUD_LLM_MODEL = OPENAI_CHAT_MODEL
+    LLM_CLOUD_BASE_URL = OPENAI_BASE_URL
+    LLM_CLOUD_API_KEY = OPENAI_API_KEY
+    LLM_CLOUD_MODEL = os.getenv("LLM_CLOUD_MODEL", CLOUD_LLM_MODEL)
     CLOUD_LLM_TIMEOUT = int(os.getenv("CLOUD_LLM_TIMEOUT", "120"))
     CLOUD_LLM_MAX_STEPS = int(os.getenv("CLOUD_LLM_MAX_STEPS", "8"))
+    SEARXNG_ENABLED = os.getenv("SEARXNG_ENABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
+    SEARXNG_TIMEOUT = float(os.getenv("SEARXNG_TIMEOUT", "20"))
+    SEARXNG_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "zh-CN")
+    SEARXNG_CATEGORIES = os.getenv("SEARXNG_CATEGORIES", "general")
+    SEARXNG_ENGINES = os.getenv("SEARXNG_ENGINES", "")
+    SEARXNG_CHAT_RESULTS = int(os.getenv("SEARXNG_CHAT_RESULTS", "5"))
+    SEARXNG_TASK_RESULTS = int(os.getenv("SEARXNG_TASK_RESULTS", "8"))
+    SEARXNG_MAX_QUERY_LENGTH = int(os.getenv("SEARXNG_MAX_QUERY_LENGTH", "500"))
     CONTENT_REVIEW_ENABLED = os.getenv("CONTENT_REVIEW_ENABLED", "0").strip().lower() in (
         "1", "true", "yes", "on"
     )
@@ -129,35 +149,21 @@ class Config:
         "CONTEXT_SUMMARY_PROMPT",
         """# 群聊上下文总结\n你负责维护云萤的群聊长期上下文。请把已有摘要和新增记录合并成一份紧凑、可继续使用的摘要。\n\n## 总结要求\n- 使用中文，保留当前正在讨论的主要话题、事实、结论、未解决的问题和下一步。\n- 区分不同群友的发言，保留必要的 QQ 号、玩家名、服务器名、工具查询结果和云萤已经说过的内容。\n- 记录群聊中的梗、图片或表情只有在记录明确提供了含义时才记录，不要猜测图片内容。\n- 明确标记已经完成的事情与仍然待处理的事情。\n- 不要把普通闲聊扩写成正式报告，不要编造记录中没有的事实。\n- 摘要要服务于下一次群聊回复：帮助云萤判断最新消息是否需要回应，以及避免重复自己已经说过的话。\n- 只输出摘要正文，不要输出分析过程、Markdown 代码块或额外说明。""",
     )
-    CCODE_BASE_URL = OPENAI_BASE_URL
-    CCODE_API_KEY = OPENAI_API_KEY
+    CCODE_BASE_URL = os.getenv("CCODE_BASE_URL", OPENAI_BASE_URL).rstrip("/")
+    CCODE_API_KEY = os.getenv("CCODE_API_KEY", "")
     CCODE_IMAGE_MODEL = OPENAI_IMAGE_MODEL
     CCODE_IMAGE_FALLBACK_MODEL = OPENAI_IMAGE_FALLBACK_MODEL
     CCODE_DEFAULT_IMAGE_SIZE = OPENAI_DEFAULT_IMAGE_SIZE
+    CCODE_IMAGE_TIMEOUT = int(os.getenv("CCODE_IMAGE_TIMEOUT", "900"))
 
     BOT_USER_ID = int(os.getenv("BOT_USER_ID", "1000000001"))
-    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "1000000002"))
-    _ADMIN_USER_IDS_RAW = os.getenv(
-        "ADMIN_USER_IDS",
-        "1000000002,1000000003",
-    )
-    ADMIN_USER_IDS = set(
-        int(item.strip())
-        for item in _ADMIN_USER_IDS_RAW.split(",")
-        if item.strip()
-    )
-
-    @classmethod
-    def is_admin_user(cls, user_id):
-        try:
-            return int(user_id) in cls.ADMIN_USER_IDS
-        except (TypeError, ValueError):
-            return False
-
     LOCAL_STORAGE = os.getenv("LOCAL_STORAGE", str(_PROJECT_DIR / "runtime"))
     PROMPT_DIR = os.getenv("PROMPT_DIR", str(_PROJECT_DIR / "prompts"))
     AVATAR_STORAGE_PATH = os.getenv("AVATAR_STORAGE_PATH", "/mnt/media/avatar_storage")
     STICKER_STORAGE_PATH = os.getenv("STICKER_STORAGE_PATH", "/mnt/media/sticker_storage")
+    IMAGE_STORAGE_PATH = os.getenv("IMAGE_STORAGE_PATH", "/mnt/media/igngbot/images")
+    IMAGE_REPOSITORY_POLL_INTERVAL = float(os.getenv("IMAGE_REPOSITORY_POLL_INTERVAL", "5"))
+    IMAGE_ANALYSIS_MODEL = os.getenv("IMAGE_ANALYSIS_MODEL", OPENAI_CHAT_MODEL)
     MAX_FILE_SIZE = 50 * 1024 * 1024
 
     REPORT_WS_URL = os.getenv("REPORT_WS_URL", "ws://192.0.2.17:8001")
@@ -176,6 +182,14 @@ class Config:
     MC_REPORTS_URL = os.getenv("MC_REPORTS_URL", "https://mc.igng.net/reports")
     MC_REPORT_TIMEZONE = os.getenv("MC_REPORT_TIMEZONE", "Asia/Shanghai")
     MC_REPORT_DAILY_REMINDER_HOUR = int(os.getenv("MC_REPORT_DAILY_REMINDER_HOUR", "10"))
+    MC_REPORT_IDENTITY_DB_HOST = os.getenv(
+        "MC_REPORT_IDENTITY_DB_HOST",
+        "db-us.example.internal",
+    )
+    MC_REPORT_IDENTITY_DB_PORT = int(os.getenv("MC_REPORT_IDENTITY_DB_PORT", "3306"))
+    MC_REPORT_IDENTITY_DB_USER = os.getenv("MC_REPORT_IDENTITY_DB_USER", DB_USER)
+    MC_REPORT_IDENTITY_DB_PASSWORD = os.getenv("MC_REPORT_IDENTITY_DB_PASSWORD", DB_PASSWORD)
+    MC_REPORT_IDENTITY_DB_NAME = os.getenv("MC_REPORT_IDENTITY_DB_NAME", "igng_sites")
     OLLAMA_BASE_URL = OPENAI_BASE_URL
     OLLAMA_MODEL = OPENAI_CHAT_MODEL
     NTFY_REPORT_URL = os.getenv("NTFY_REPORT_URL", "https://ntfy.example.org/reports")

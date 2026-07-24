@@ -27,11 +27,13 @@ BBS_QUEUE_CMD = re.compile(r"/BBS队列")
 LAND_LIST_CMD = re.compile(r"/领地列表\s+(.+)")
 NOTIFY_CMD = re.compile(r"/通知\s+(.+)")
 SUMMARY_CMD = re.compile(r"/总结\s+(\S+)(?:\s+(.+))?")
+IGNG_ACCOUNT_CMD = re.compile(r"/IGNG账户")
 
 
 class IGNGQueryHandler:
-    def __init__(self, config):
+    def __init__(self, config, db=None):
         self.config = config
+        self.db = db
         self._conn1 = None  # DB1: mc_status, mc_account
         self._conn2 = None  # DB2: igng_sites
         self._lock = threading.Lock()
@@ -62,13 +64,16 @@ class IGNGQueryHandler:
 
     def _send_reply(self, group_id, text):
         try:
+            group_id = int(group_id)
+            endpoint = "send_private_msg" if group_id < 0 else "send_group_msg"
+            target = {"user_id": -group_id} if group_id < 0 else {"group_id": group_id}
             headers = {
                 "Authorization": f"Bearer {self.config.ONEBOT_HTTP_TOKEN}",
                 "Content-Type": "application/json",
             }
             r = requests.post(
-                f"{self.config.ONEBOT_HTTP_URL}/send_group_msg",
-                json={"group_id": group_id, "message": text},
+                f"{self.config.ONEBOT_HTTP_URL}/{endpoint}",
+                json={**target, "message": text},
                 headers=headers,
                 timeout=10,
             )
@@ -85,7 +90,17 @@ class IGNGQueryHandler:
         if not group_id:
             return False
 
-        is_admin = self.config.is_admin_user(sender_id)
+        is_admin = self.db.is_bot_admin(sender_id) if self.db else False
+
+        # /IGNG账户
+        if IGNG_ACCOUNT_CMD.fullmatch(content):
+            logger.info(f"IGNG cmd: IGNG账户 from {sender_id}")
+            threading.Thread(
+                target=self._cmd_igng_account,
+                args=(group_id, sender_id),
+                daemon=True,
+            ).start()
+            return True
 
         # /服务器列表
         if SERVER_LIST_CMD.search(content):
@@ -157,6 +172,41 @@ class IGNGQueryHandler:
         return False
 
     # --- Command implementations ---
+
+    def _cmd_igng_account(self, group_id, sender_id):
+        try:
+            with self._lock:
+                conn = self._ensure_conn2()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT u.id, u.nickname, u.username, COALESCE(e.exp, 0) AS exp
+                    FROM igng_sites.user_qqs AS qq
+                    INNER JOIN igng_sites.users AS u ON u.id = qq.user_id
+                    LEFT JOIN igng_sites.igng_user_exp AS e ON e.user_id = u.id
+                    WHERE qq.qq_number = %s
+                    LIMIT 1
+                    """,
+                    (str(sender_id),),
+                )
+                row = cur.fetchone()
+            if not row:
+                self._send_reply(
+                    group_id,
+                    "当前 QQ 尚未绑定 IGNG 账户，请先在 IGNG 网站绑定 QQ。",
+                )
+                return
+
+            exp = int(row.get("exp") or 0)
+            level = exp // 100 + 1
+            nickname = row.get("nickname") or row.get("username") or "未设置"
+            self._send_reply(
+                group_id,
+                f"IGNG账户信息：\n用户ID：{row['id']}\n昵称：{nickname}\n等级：{level}",
+            )
+        except Exception as e:
+            logger.error(f"IGNG账户查询失败: {e}", exc_info=True)
+            self._send_reply(group_id, "IGNG账户查询失败，请稍后再试。")
 
     def _cmd_server_list(self, group_id):
         self._send_reply(group_id, "正在查询服务器列表...")
@@ -516,20 +566,68 @@ class IGNGQueryHandler:
 
     # --- Admin commands ---
 
-    def _send_group_msg(self, group_id, text):
+    def _can_mention_all(self, group_id):
+        try:
+            headers = {"Authorization": f"Bearer {self.config.ONEBOT_HTTP_TOKEN}"}
+            response = requests.post(
+                f"{self.config.ONEBOT_HTTP_URL}/get_group_member_info",
+                json={
+                    "group_id": int(group_id),
+                    "user_id": int(self.config.BOT_USER_ID),
+                    "no_cache": False,
+                },
+                headers=headers,
+                timeout=10,
+            )
+            response.raise_for_status()
+            result = response.json()
+            role = ((result.get("data") or {}).get("role") or "").lower()
+            return result.get("retcode") in (None, 0) and role in {"admin", "owner"}
+        except Exception as exc:
+            logger.warning("Failed to check @all permission in group %s: %s", group_id, exc)
+            return False
+
+    def _send_group_msg(self, group_id, text, mention_all=False):
         """Send message to any group (for admin commands like notify/summary)."""
         try:
             headers = {
                 "Authorization": f"Bearer {self.config.ONEBOT_HTTP_TOKEN}",
                 "Content-Type": "application/json",
             }
+            message = text
+            if mention_all:
+                message = [
+                    {"type": "at", "data": {"qq": "all"}},
+                    {"type": "text", "data": {"text": text}},
+                ]
             r = requests.post(
                 f"{self.config.ONEBOT_HTTP_URL}/send_group_msg",
-                json={"group_id": int(group_id), "message": text},
+                json={"group_id": int(group_id), "message": message},
                 headers=headers,
                 timeout=10,
             )
             r.raise_for_status()
+            try:
+                result = r.json()
+            except ValueError:
+                result = None
+            if isinstance(result, dict):
+                retcode = result.get("retcode")
+                status = result.get("status")
+                if retcode not in (None, 0) or status not in (None, "ok"):
+                    logger.error(
+                        "OneBot rejected group %s notification: %s",
+                        group_id,
+                        result,
+                    )
+                    return False
+            else:
+                logger.warning(
+                    "OneBot returned a non-JSON response for group %s: HTTP %s %s",
+                    group_id,
+                    r.status_code,
+                    r.text[:500],
+                )
             return True
         except Exception as e:
             logger.error(f"Failed to send to group {group_id}: {e}")
@@ -566,9 +664,11 @@ class IGNGQueryHandler:
     def _cmd_notify(self, source_group_id, raw_args):
         """Admin command: /通知 <消息> [群号列表]"""
         try:
+            mention_all = bool(re.search(r"(?:^|\s)全员(?:\s|$)", raw_args))
+            raw_args = re.sub(r"(?:^|\s)全员(?=\s|$)", " ", raw_args).strip()
             msg, target_ids = self._parse_group_ids_from_tail(raw_args)
             if not msg:
-                self._send_reply(source_group_id, "用法：/通知 通知内容 [群号,群号...]")
+                self._send_reply(source_group_id, "用法：/通知 通知内容 [全员] [群号,群号...]")
                 return
 
             if target_ids is None:
@@ -576,8 +676,12 @@ class IGNGQueryHandler:
 
             success_groups = []
             failed_groups = []
+            mention_failed_groups = []
             for gid in target_ids:
-                if self._send_group_msg(gid, msg):
+                can_mention_all = not mention_all or self._can_mention_all(gid)
+                if mention_all and not can_mention_all:
+                    mention_failed_groups.append(str(gid))
+                if self._send_group_msg(gid, msg, mention_all=mention_all and can_mention_all):
                     success_groups.append(str(gid))
                 else:
                     failed_groups.append(str(gid))
@@ -585,6 +689,11 @@ class IGNGQueryHandler:
             feedback = f"通知已发送至: {', '.join(success_groups)}"
             if failed_groups:
                 feedback += f"\n发送失败: {', '.join(failed_groups)}"
+            if mention_failed_groups:
+                feedback += (
+                    "\n以下群机器人不是管理员，无法发送@全体成员，已仅发送正文: "
+                    + ", ".join(mention_failed_groups)
+                )
             self._send_reply(source_group_id, feedback)
         except Exception as e:
             logger.error(f"通知 error: {e}", exc_info=True)
