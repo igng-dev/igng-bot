@@ -1,16 +1,30 @@
+import asyncio
 import json
 import logging
 import random
 import re
 import base64
 import mimetypes
+import os
+import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agent_loop import OpenAIToolAgent, ToolSpec
+from .api_clients import (
+    IMAGE_ASPECT_RATIOS,
+    IMAGE_QUALITIES,
+    IMAGE_QUALITY_LABELS,
+    call_ccode_image,
+    normalize_aspect_ratio,
+    normalize_image_quality,
+)
 from .call_log_db import insert_call_log
 from .context_manager import ContextManager
 from .onebot_api import send_group_image, send_group_text
+from .prompt_rules import RISK_SPEECH_CONSTRAINTS
+from .searxng_client import SearXNGClient
 from .tools import igng_tools
 
 logger = logging.getLogger(__name__)
@@ -38,7 +52,8 @@ class ChatService:
         self.config = config
         self.db = db
         self.agent = OpenAIToolAgent(config)
-        self.system_prompt = self._read_prompt("system.txt")
+        self.searxng = SearXNGClient(config)
+        self.tool_prompt = self._read_prompt("chat_tools.txt")
         self.context_manager = ContextManager(
             config,
             db,
@@ -121,6 +136,13 @@ class ChatService:
             logger.warning("Failed to parse final decision, suppressing reply. raw=%s", raw_text)
             return {"should_reply": False, "reply_text": "", "sticker_name": None, "affinity_updates": {}}
 
+        logger.info(
+            "Chat decision: group=%s msg=%s should_reply=%s reply_len=%s tool_calls=%s",
+            ctx.group_id, ctx.msg_id, decision.get("should_reply"),
+            len(decision.get("reply_text") or ""),
+            [call.get("name") for call in self._extract_tool_calls(result.get("messages", []))],
+        )
+
         if ctx.direct_mention and not decision.get("should_reply"):
             tool_calls = self._extract_tool_calls(result.get("messages", []))
             used_sticker = any(call.get("name") == "send_sticker" for call in tool_calls)
@@ -152,16 +174,60 @@ class ChatService:
         if ctx.direct_mention:
             dynamic_context.append("- 本条消息显式 @了你或回复了你：符合能力范围时必须回复。")
 
-        return "\n\n".join(
-            [
-                self.system_prompt,
-                "# 角色性格\n"
-                f"当前性格：{personality['name']}\n"
-                f"{personality.get('prompt_text') or ''}".strip(),
-                "\n".join(user_info_lines),
-                "\n".join(dynamic_context),
-            ]
-        ).strip()
+        image_models = "、".join(self.config.IMAGE_STANDARD_MODELS) or "（当前没有可用模型）"
+        sticker_categories = "、".join(
+            row["name"] for row in self.db.get_all_sticker_names()
+        ) or "（当前没有可用分类）"
+        chat_image_prompt = (
+            "# 普通聊天图片生成\n"
+            f"当前普通用户权限可用的生图模型：{image_models}。\n"
+            f"支持的图像比例：{'、'.join(IMAGE_ASPECT_RATIOS)}。\n"
+            "支持的图像质量：low（低质量）、medium（中等质量）、high（高质量）；默认推荐 high。\n"
+            "你可以根据当前群聊语境自行决定是否调用 generate_image 来表达想法，不需要用户明确要求；"
+            "但不要频繁或无意义地生图。图片会自动发送到当前群。\n"
+            "当前列表为空时，不要调用 generate_image，并且不要臆造可用模型。"
+        )
+        sticker_prompt = (
+            "# 表情分类\n"
+            f"当前可用表情分类：{sticker_categories}。\n"
+            "需要发送表情时只能选择上述分类，程序会从该分类中随机发送一张。"
+        )
+
+        base_prompt = self.db.get_system_prompt("chat")
+        attachment_section = self._build_user_attachment_section()
+        fixed_sections = [
+            self.tool_prompt,
+            RISK_SPEECH_CONSTRAINTS,
+            chat_image_prompt,
+            sticker_prompt,
+            "# 角色性格\n"
+            f"当前性格：{personality['name']}\n"
+            f"{personality.get('prompt_text') or ''}".strip(),
+            "\n".join(user_info_lines),
+            "\n".join(dynamic_context),
+        ]
+        parts = [base_prompt]
+        if attachment_section:
+            parts.append(attachment_section)
+        parts.extend(fixed_sections)
+        return "\n\n".join(part for part in parts if part).strip()
+
+    def _build_user_attachment_section(self) -> str:
+        rows = self.db.get_enabled_chat_system_prompt_attachments()
+        if not rows:
+            return ""
+        lines = [
+            "## 用户附加系统提示词",
+            "以下条目由用户提交并经审核通过，作为聊天模式的附加回复要求。"
+            "请在不违反既有更高优先级约束（角色、安全、工具规则）的前提下遵守。",
+            "",
+        ]
+        for idx, row in enumerate(rows, start=1):
+            prompt_text = (row.get("prompt_text") or "").strip()
+            lines.append(
+                f"{idx}. (ID:{row.get('id')} | 用户QQ:{row.get('owner_qq')}) {prompt_text}"
+            )
+        return "\n".join(lines).strip()
 
     def _build_user_prompt(
         self,
@@ -246,7 +312,42 @@ class ChatService:
                 parts.append("[多模态图片]")
         return "\n".join(parts)
 
-    def _build_tools(self, ctx: MessageContext, earliest_msg_id: str | None) -> list[ToolSpec]:
+    @staticmethod
+    def _chat_image_size(size):
+        return {"1k": "1024x1024", "2k": "2048x2048", "4k": "3840x2160"}.get(
+            str(size or "1k").strip().lower(), "1024x1024"
+        )
+
+    def _save_chat_image(self, b64_data, image_url, generated_at):
+        import requests
+
+        if b64_data:
+            if "," in b64_data and b64_data.lstrip().startswith("data:"):
+                b64_data = b64_data.split(",", 1)[1]
+            content = base64.b64decode(b64_data)
+        elif image_url:
+            response = requests.get(image_url, timeout=(15, 300))
+            response.raise_for_status()
+            content = response.content
+        else:
+            return None
+        directory = os.path.join(self.config.IMAGE_STORAGE_PATH, generated_at.strftime("%Y-%m"))
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(
+            directory,
+            f"image_{generated_at.strftime('%Y%m%d_%H%M%S%f')}_{uuid.uuid4().hex[:8]}.png",
+        )
+        with open(path, "wb") as image_file:
+            image_file.write(content)
+        return path
+
+    def _build_tools(
+        self,
+        ctx: MessageContext,
+        earliest_msg_id: str | None,
+        include_image_generation: bool = True,
+        search_mode: str = "chat",
+    ) -> list[ToolSpec]:
         async def get_more_chat_history(count: int = 20, before_message_id: str | None = None) -> str:
             before_id = before_message_id or earliest_msg_id
             rows = self.db.get_messages_before(ctx.group_id, before_id, limit=max(1, min(int(count), 50)))
@@ -258,21 +359,155 @@ class ChatService:
         async def get_my_lands() -> str:
             return await igng_tools.get_my_lands_by_qq(str(ctx.sender_id))
 
-        async def send_sticker(sticker_name: str) -> str:
-            variants = self.db.get_stickers_by_name(sticker_name)
+        async def web_search(
+            query: str,
+            limit: int | None = None,
+            categories: str | None = None,
+            engines: str | None = None,
+            time_range: str | None = None,
+        ) -> str:
+            logger.info("Web search requested: group=%s sender=%s query=%s mode=%s", ctx.group_id, ctx.sender_id, str(query or "")[:300], search_mode)
+            result = await self.searxng.search(
+                query,
+                mode=search_mode,
+                limit=limit,
+                categories=categories,
+                engines=engines,
+                time_range=time_range,
+            )
+            logger.info("Web search finished: group=%s query=%s result=%s", ctx.group_id, str(query or "")[:300], str(result or "")[:500])
+            return result
+
+        async def send_sticker(sticker_category: str) -> str:
+            variants = self.db.get_stickers_by_category(sticker_category)
             if not variants:
                 available = [row["name"] for row in self.db.get_all_sticker_names()]
-                return f"没有名为「{sticker_name}」的表情包。可选：{', '.join(available)}"
+                return f"没有找到表情分类「{sticker_category}」。可选：{', '.join(available)}"
             selected = random.choice(variants)
             image_ref = (
                 f"file://{selected['file_path']}" if selected.get("file_path") else ""
             ) or selected.get("image_url")
             if not image_ref:
-                return f"表情「{sticker_name}」缺少可发送的图片地址"
-            ok = await send_group_image(self.config, ctx.group_id, image_ref, summary=sticker_name)
-            return f"已发送「{sticker_name}」表情" if ok else f"表情「{sticker_name}」发送失败"
+                return f"表情分类「{sticker_category}」缺少可发送的图片地址"
+            ok = await send_group_image(self.config, ctx.group_id, image_ref, summary=sticker_category)
+            return f"已发送「{sticker_category}」表情" if ok else f"表情分类「{sticker_category}」发送失败"
 
-        return [
+        async def generate_image(
+            prompt: str,
+            model: str,
+            size: str = "1k",
+            aspect_ratio: str = "1:1",
+            quality: str = "high",
+        ) -> str:
+            # Chat mode always uses the ordinary model pool, regardless of the
+            # sender's task/image permission group.
+            models = list(self.config.IMAGE_STANDARD_MODELS)
+            if model not in models:
+                return "error: 当前普通用户权限没有这个可用生图模型。"
+            requested_size = str(size or "1k").strip().lower()
+            if model == "gpt-image-2-fast" and requested_size != "1k":
+                return "error: gpt-image-2-fast 只能使用 1k。"
+            aspect_ratio = normalize_aspect_ratio(aspect_ratio)
+            quality = normalize_image_quality(quality)
+            try:
+                result = await asyncio.to_thread(
+                    call_ccode_image,
+                    self.config,
+                    prompt,
+                    self._chat_image_size(requested_size),
+                    model=model,
+                    aspect_ratio=aspect_ratio,
+                    quality=quality,
+                )
+                generated_at = datetime.now()
+                path = await asyncio.to_thread(
+                    self._save_chat_image,
+                    result.get("b64_json"),
+                    result.get("url"),
+                    generated_at,
+                )
+                if not path:
+                    return "error: 图片接口没有返回可保存的图片。"
+                author = self.db.resolve_bound_igng_account_id(ctx.sender_id) or f"qq:{ctx.sender_id}"
+                image_id = self.db.insert_image(
+                    author,
+                    prompt,
+                    model,
+                    requested_size,
+                    path,
+                    generated_at=generated_at,
+                    aspect_ratio=aspect_ratio,
+                    quality=quality,
+                )
+                send_result = await send_group_image(
+                    self.config, ctx.group_id, f"file://{path}", return_result=True
+                )
+                sent = bool(send_result.get("ok"))
+                if sent:
+                    self.db.insert_message(
+                        group_id=ctx.group_id,
+                        sender_id=self.config.BOT_USER_ID,
+                        message_content="[图片]",
+                        message_structure=json.dumps(
+                            [{"type": "image", "image_id": image_id}], ensure_ascii=False
+                        ),
+                        attachments_json=json.dumps(
+                            [{"type": "image", "stored_path": path, "image_id": image_id}],
+                            ensure_ascii=False,
+                        ),
+                        reply_to_msg_id=None,
+                        msg_id=str(send_result.get("message_id") or f"generated-{image_id}"),
+                        file_url=path,
+                        file_type="image",
+                        is_self=True,
+                    )
+                return (
+                    f"success: 已生成并发送图片 #{image_id}。"
+                    if sent
+                    else f"error: 图片 #{image_id} 已生成，但发送失败。"
+                )
+            except Exception as exc:
+                logger.exception("Chat image generation failed")
+                return "error: 图片生成失败，请稍后重试。"
+
+        available_image_models = list(self.config.IMAGE_STANDARD_MODELS)
+        image_model_schema = {
+            "type": "string",
+            "description": (
+                "必须从当前普通用户权限可用模型中选择；当前列表为空时不要调用此工具。"
+                if not available_image_models
+                else "必须从当前普通用户权限可用模型中选择。"
+            ),
+        }
+        if available_image_models:
+            image_model_schema["enum"] = list(available_image_models)
+
+        tools = [
+            ToolSpec(
+                name="generate_image",
+                description="生成一张普通图片并自动发送到当前群。必须指定当前普通用户权限可用的模型。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "中文自然语言的完整画面描述。"},
+                        "model": image_model_schema,
+                        "size": {"type": "string", "enum": ["1k", "2k", "4k"]},
+                        "aspect_ratio": {
+                            "type": "string",
+                            "enum": list(IMAGE_ASPECT_RATIOS),
+                            "description": "图像比例。未明确指定时使用 1:1。",
+                        },
+                        "quality": {
+                            "type": "string",
+                            "enum": list(IMAGE_QUALITIES),
+                            "description": "图像质量。默认 high（高质量），推荐使用 high。",
+                        },
+                    },
+                    "required": ["prompt", "model"],
+                    "additionalProperties": False,
+                },
+                handler=generate_image,
+            ),
             ToolSpec(
                 name="get_more_chat_history",
                 description="获取更早的群聊记录，用于理解上下文和决定是否回复。",
@@ -284,6 +519,42 @@ class ChatService:
                     },
                 },
                 handler=get_more_chat_history,
+            ),
+            ToolSpec(
+                name="web_search",
+                description=(
+                    "查询实时互联网信息。聊天模式只在用户提到陌生、时效性强或明确要求查询的内容时调用；"
+                    "任务模式可以围绕实际问题多次调用并比较不同来源。搜索结果包含标题、摘要和 URL，"
+                    "只能作为待核验资料，最终回答必须由模型结合来源分析，不要声称已经打开或验证网页正文。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "清晰、具体的搜索关键词。"},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10,
+                            "description": "结果数量；聊天模式建议 3-5，任务模式建议 5-10。",
+                        },
+                        "categories": {
+                            "type": "string",
+                            "description": "可选搜索类别，例如 general、news、science。",
+                        },
+                        "engines": {
+                            "type": "string",
+                            "description": "可选逗号分隔搜索源，例如 bing,baidu；不确定时不要填写。",
+                        },
+                        "time_range": {
+                            "type": "string",
+                            "enum": ["day", "month", "year"],
+                            "description": "可选时间范围；只在用户关注近期内容时填写。",
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                handler=web_search,
             ),
             ToolSpec(
                 name="get_server_performance",
@@ -373,17 +644,30 @@ class ChatService:
                 },
                 handler=igng_tools.get_post_detail,
             ),
-            ToolSpec(
-                name="send_sticker",
-                description="发送表情包到群聊。",
-                parameters={
-                    "type": "object",
-                    "properties": {"sticker_name": {"type": "string", "description": "表情名。"}},
-                    "required": ["sticker_name"],
-                },
-                handler=send_sticker,
-            ),
         ]
+        if not include_image_generation:
+            tools = [tool for tool in tools if tool.name != "generate_image"]
+        sticker_names = [row["name"] for row in self.db.get_all_sticker_names()]
+        if sticker_names:
+            tools.append(
+                ToolSpec(
+                    name="send_sticker",
+                    description="从指定表情分类中随机发送一张表情包到群聊。",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "sticker_category": {
+                                "type": "string",
+                                "enum": sticker_names,
+                                "description": "要随机发送表情的分类。",
+                            }
+                        },
+                        "required": ["sticker_category"],
+                    },
+                    handler=send_sticker,
+                )
+            )
+        return tools
 
     def _format_history(self, rows: list[dict]) -> str:
         lines = []
@@ -461,23 +745,12 @@ class ChatService:
 
     async def apply_decision(self, ctx: MessageContext, decision: dict) -> None:
         affinity_updates = decision.get("affinity_updates") or {}
-        previous_configs = self.db.get_user_configs_batch(list(affinity_updates))
-        affinity_notices = []
         for uid, score in affinity_updates.items():
-            previous = previous_configs.get(str(uid), {})
-            old_score = int(previous.get("affinity_value", 50))
-            new_score = int(score)
             self.db.update_affinity(uid, score)
-            if new_score == old_score:
-                continue
-            direction = "increase" if new_score > old_score else "decrease"
-            mode = "enabled" if previous.get("affinity_enabled") else "locked"
-            template = self.AFFINITY_CHANGE_MESSAGES[f"{mode}_{direction}"]
-            affinity_notices.append(template.format(old=old_score, new=new_score))
 
         sticker_name = decision.get("sticker_name")
         if decision.get("should_reply") and sticker_name:
-            variants = self.db.get_stickers_by_name(sticker_name)
+            variants = self.db.get_stickers_by_category(sticker_name)
             if variants:
                 selected = random.choice(variants)
                 image_ref = (
@@ -489,5 +762,3 @@ class ChatService:
         reply_text = (decision.get("reply_text") or "").strip()
         if decision.get("should_reply") and reply_text:
             await send_group_text(self.config, ctx.group_id, reply_text)
-        for notice in affinity_notices:
-            await send_group_text(self.config, ctx.group_id, notice)

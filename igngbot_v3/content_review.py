@@ -370,6 +370,12 @@ class ContentReviewer:
         logger.info(f"Marked {len(ids)} messages as approved")
 
     def _send_admin_report(self, violations):
+        self._ensure_db()
+        admin_qqs = self._db.get_bot_admin_qqs()
+        if not admin_qqs:
+            logger.warning("No bot administrator is configured in user_groups; skipping content review report")
+            return
+        admin_user_id = int(admin_qqs[0])
         lines = [
             "=== 内容审核处理报告 ===",
             f"处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -402,7 +408,7 @@ class ContentReviewer:
                 self._onebot_action(
                     "send_private_msg",
                     {
-                        "user_id": self.config.ADMIN_USER_ID,
+                        "user_id": admin_user_id,
                         "message": [
                             {
                                 "type": "image",
@@ -427,7 +433,7 @@ class ContentReviewer:
             chunk = report_text[i : i + max_len]
             self._onebot_action(
                 "send_private_msg",
-                {"user_id": self.config.ADMIN_USER_ID, "message": chunk},
+                {"user_id": admin_user_id, "message": chunk},
             )
         logger.info("Admin report sent as text (fallback)")
 

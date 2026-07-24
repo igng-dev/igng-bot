@@ -194,6 +194,52 @@ class McReportNotifier:
                 await cursor.execute(sql, params)
                 return await cursor.fetchall()
 
+    async def create_public_report(self, user_id, reporter_name, target_name, reason):
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await conn.begin()
+                try:
+                    await cursor.execute(
+                        """
+                        INSERT INTO mc_reports (
+                            title, content, visibility, target_visibility, status,
+                            reporter_user_id, reporter_name, handled_by_user_id, handled_at
+                        )
+                        VALUES ('', %s, 'ADMIN', 'PUBLIC', 'PENDING', %s, %s, NULL, NULL)
+                        """,
+                        (reason, int(user_id), reporter_name),
+                    )
+                    report_id = cursor.lastrowid
+                    await cursor.execute(
+                        """
+                        INSERT INTO mc_report_targets (report_id, mc_username)
+                        VALUES (%s, %s)
+                        """,
+                        (report_id, target_name),
+                    )
+                    await conn.commit()
+                    return int(report_id)
+                except Exception:
+                    await conn.rollback()
+                    raise
+
+    async def get_pending_reports_for_user(self, user_id):
+        return await self._fetch(
+            """
+            SELECT report.created_at,
+                   MAX(reply.created_at) AS latest_reply_at
+            FROM mc_reports AS report
+            LEFT JOIN mc_report_replies AS reply
+              ON reply.report_id = report.id
+             AND reply.deleted_at IS NULL
+            WHERE report.reporter_user_id = %s
+              AND report.status = 'PENDING'
+            GROUP BY report.id, report.created_at
+            ORDER BY report.created_at DESC, report.id DESC
+            """,
+            (int(user_id),),
+        )
+
     def _format_new_report(self, report):
         server = report.get("source_server_name") or "未指定"
         return (

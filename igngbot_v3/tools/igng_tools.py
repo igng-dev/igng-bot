@@ -949,7 +949,10 @@ async def load_stickers() -> list[dict]:
     try:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT id, name, image_url, file_path, avatar_id FROM stickers ORDER BY name, id"
+                "SELECT s.image_id, s.category, NULL, i.file_path, NULL "
+                "FROM stickers AS s "
+                "JOIN images AS i ON i.id = s.image_id "
+                "ORDER BY s.category, s.image_id"
             )
             rows = await cur.fetchall()
             stickers = []

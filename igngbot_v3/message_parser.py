@@ -69,19 +69,35 @@ def _try_parse_json(text):
 
 def parse_message(data):
     message_type = data.get("message_type")
-    if message_type != "group":
+    if message_type not in ("group", "private"):
         return None
-
-    # Detect self-sent messages
+    is_private = message_type == "private"
     is_self = (
         data.get("post_type") == "message_sent"
         or data.get("message_sent_type") == "self"
     )
+    sender_id = data.get("user_id")
+    conversation_id = (
+        data.get("group_id")
+        if not is_private
+        else (data.get("target_id") if is_self else sender_id)
+    )
+    # Negative IDs keep private conversations isolated in the existing
+    # group-oriented message/context tables without colliding with QQ groups.
+    storage_group_id = (
+        int(conversation_id)
+        if not is_private and conversation_id is not None
+        else (-int(sender_id) if sender_id is not None else 0)
+    )
 
+    # Detect self-sent messages
     message_array = data.get("message", [])
     if isinstance(message_array, str):
         # Plain text fallback — try to extract CQ code info
         content = message_array
+        reply_match = re.search(r"\[CQ:reply,[^\]]*id=([^,\]]+)", content)
+        reply_to_msg_id = reply_match.group(1) if reply_match else None
+        content = re.sub(r"\[CQ:reply,[^\]]*\]", "", content).strip()
         # Try to extract title from CQ:json / CQ:share patterns
         for pattern in [r'\[CQ:json,data=(.*?)\]', r'\[CQ:share,[^\]]*title=([^,\]]+)']:
             m = re.search(pattern, content, re.DOTALL)
@@ -92,12 +108,15 @@ def parse_message(data):
                     break
         sender = data.get("sender", {})
         return {
-            "group_id": data.get("group_id"),
-            "sender_id": data.get("user_id"),
+            "group_id": storage_group_id,
+            "sender_id": sender_id,
+            "conversation_type": message_type,
+            "conversation_id": conversation_id,
+            "sender_name": (sender.get("card") or sender.get("nickname") or str(data.get("user_id"))) if isinstance(sender, dict) else str(data.get("user_id")),
             "sender_role": sender.get("role", "member") if isinstance(sender, dict) else "member",
             "msg_id": str(data.get("message_id", "")),
             "message_content": content,
-            "reply_to_msg_id": None,
+            "reply_to_msg_id": reply_to_msg_id,
             "files": [],
             "created_at": data.get("time"),
             "is_self": is_self,
@@ -105,8 +124,11 @@ def parse_message(data):
 
     sender = data.get("sender", {})
     result = {
-        "group_id": data.get("group_id"),
-        "sender_id": data.get("user_id"),
+        "group_id": storage_group_id,
+        "sender_id": sender_id,
+        "conversation_type": message_type,
+        "conversation_id": conversation_id,
+        "sender_name": (sender.get("card") or sender.get("nickname") or str(data.get("user_id"))) if isinstance(sender, dict) else str(data.get("user_id")),
         "sender_role": sender.get("role", "member") if isinstance(sender, dict) else "member",
         "msg_id": str(data.get("message_id", "")),
         "message_content": "",
