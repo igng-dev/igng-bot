@@ -798,8 +798,8 @@ class DBHandler:
         effective_group_ids = {int(row["id"]) for row in memberships}
         if legacy_global_admin and "platform.superadmin" in group_by_id.values():
             effective_group_ids.add(next(group_id for group_id, code in group_by_id.items() if code == "platform.superadmin"))
-        if legacy_mc_admin and legacy_mc_admin.get("role") == "ADMIN" and "mc.report.admin" in group_by_id.values():
-            effective_group_ids.add(next(group_id for group_id, code in group_by_id.items() if code == "mc.report.admin"))
+        if legacy_mc_admin and legacy_mc_admin.get("role") == "ADMIN" and "mc.admin" in group_by_id.values():
+            effective_group_ids.add(next(group_id for group_id, code in group_by_id.items() if code == "mc.admin"))
         if legacy_mc_admin and legacy_mc_admin.get("role") == "SUPERADMIN" and "platform.superadmin" in group_by_id.values():
             effective_group_ids.add(next(group_id for group_id, code in group_by_id.items() if code == "platform.superadmin"))
 
