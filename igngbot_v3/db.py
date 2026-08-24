@@ -719,8 +719,147 @@ class DBHandler:
         row["prompt_text"] = prompt_text
         return row
 
+    def _permission_user_id(self, user_id):
+        """Resolve QQ input to the canonical IGNG user ID for permission checks."""
+        return self.resolve_bound_igng_account_id(user_id) or str(user_id)
+
+    def _get_unified_permission_snapshot(self, user_id):
+        """Read the central permission center from the shared identity database.
+
+        None means the new tables are not available yet. An empty snapshot is a
+        valid account with no elevated group and is deliberately different from
+        a database/schema failure so administrator checks can fail closed.
+        """
+        igng_user_id = self._permission_user_id(user_id)
+        try:
+            with self._identity_lock:
+                conn = self._identity_connection()
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT id, status FROM users WHERE id = %s LIMIT 1", (str(igng_user_id),))
+                    user = cursor.fetchone()
+                    if not user:
+                        return {"user_id": str(igng_user_id), "status": None, "groups": set(), "permissions": set(), "denied_permissions": set(), "is_superadmin": False}
+
+                    cursor.execute(
+                        """
+                        SELECT pg.id, pg.code
+                        FROM user_permission_groups upg
+                        INNER JOIN permission_groups pg ON pg.id = upg.group_id
+                        WHERE upg.user_id = %s
+                          AND upg.status = 'ACTIVE'
+                          AND pg.enabled = 1
+                          AND (upg.expires_at IS NULL OR upg.expires_at > UTC_TIMESTAMP())
+                        """,
+                        (str(igng_user_id),),
+                    )
+                    memberships = cursor.fetchall()
+
+                    cursor.execute(
+                        "SELECT id, code FROM permission_groups WHERE enabled = 1"
+                    )
+                    groups = cursor.fetchall()
+                    cursor.execute(
+                        "SELECT child_group_id, parent_group_id FROM permission_group_inherits"
+                    )
+                    inherits = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT pgp.group_id, pd.code
+                        FROM permission_group_permissions pgp
+                        INNER JOIN permission_definitions pd ON pd.id = pgp.permission_id
+                        WHERE pd.enabled = 1
+                        """
+                    )
+                    group_permissions = cursor.fetchall()
+                    cursor.execute(
+                        """
+                        SELECT pd.code, upo.effect
+                        FROM user_permission_overrides upo
+                        INNER JOIN permission_definitions pd ON pd.id = upo.permission_id
+                        WHERE upo.user_id = %s
+                          AND (upo.expires_at IS NULL OR upo.expires_at > UTC_TIMESTAMP())
+                          AND pd.enabled = 1
+                        """,
+                        (str(igng_user_id),),
+                    )
+                    overrides = cursor.fetchall()
+
+                    # Compatibility reads only; new assignments are written to
+                    # user_permission_groups by the shared permission center.
+                    cursor.execute("SELECT 1 FROM global_admins WHERE user_id = %s LIMIT 1", (str(igng_user_id),))
+                    legacy_global_admin = cursor.fetchone() is not None
+                    cursor.execute("SELECT role FROM mc_report_admins WHERE user_id = %s LIMIT 1", (str(igng_user_id),))
+                    legacy_mc_admin = cursor.fetchone()
+        except Exception as exc:
+            logger.warning("Unified permission center unavailable for user %s: %s", igng_user_id, exc)
+            return None
+
+        group_by_id = {int(row["id"]): row["code"] for row in groups}
+        effective_group_ids = {int(row["id"]) for row in memberships}
+        if legacy_global_admin and "platform.superadmin" in group_by_id.values():
+            effective_group_ids.add(next(group_id for group_id, code in group_by_id.items() if code == "platform.superadmin"))
+        if legacy_mc_admin and legacy_mc_admin.get("role") == "ADMIN" and "mc.report.admin" in group_by_id.values():
+            effective_group_ids.add(next(group_id for group_id, code in group_by_id.items() if code == "mc.report.admin"))
+        if legacy_mc_admin and legacy_mc_admin.get("role") == "SUPERADMIN" and "platform.superadmin" in group_by_id.values():
+            effective_group_ids.add(next(group_id for group_id, code in group_by_id.items() if code == "platform.superadmin"))
+
+        parents_by_child = {}
+        for row in inherits:
+            parents_by_child.setdefault(int(row["child_group_id"]), set()).add(int(row["parent_group_id"]))
+        pending = list(effective_group_ids)
+        while pending:
+            group_id = pending.pop()
+            for parent_id in parents_by_child.get(group_id, set()):
+                if parent_id not in effective_group_ids:
+                    effective_group_ids.add(parent_id)
+                    pending.append(parent_id)
+
+        permissions_by_group = {}
+        for row in group_permissions:
+            permissions_by_group.setdefault(int(row["group_id"]), set()).add(row["code"])
+        permission_codes = set()
+        for group_id in effective_group_ids:
+            permission_codes.update(permissions_by_group.get(group_id, set()))
+
+        denied_permissions = {row["code"] for row in overrides if row["effect"] == "DENY"}
+        allowed_permissions = {row["code"] for row in overrides if row["effect"] == "ALLOW"}
+        group_codes = {group_by_id[group_id] for group_id in effective_group_ids if group_id in group_by_id}
+        is_superadmin = "platform.superadmin" in group_codes
+
+        return {
+            "user_id": str(igng_user_id),
+            "status": user["status"],
+            "groups": group_codes,
+            "permissions": permission_codes,
+            "denied_permissions": denied_permissions,
+            "allowed_permissions": allowed_permissions,
+            "is_superadmin": is_superadmin,
+        }
+
+    def _snapshot_has_permission(self, snapshot, permission_code):
+        if not snapshot or snapshot.get("status") == "BANNED":
+            return False
+        if snapshot.get("is_superadmin"):
+            return True
+        if permission_code in snapshot.get("denied_permissions", set()):
+            return False
+        return permission_code in snapshot.get("permissions", set()) or permission_code in snapshot.get("allowed_permissions", set())
+
     def get_user_group(self, user_id):
-        """Return the canonical user's feature group, defaulting to plus."""
+        """Return the Yunying feature tier from the central permission center."""
+        snapshot = self._get_unified_permission_snapshot(user_id)
+        if snapshot is not None:
+            if snapshot.get("is_superadmin") or self._snapshot_has_permission(snapshot, "yunying.manage"):
+                return "admin"
+            if self._snapshot_has_permission(snapshot, "yunying.image.pro_models"):
+                return "pro"
+            if self._snapshot_has_permission(snapshot, "yunying.task.system_prompt"):
+                return "plus"
+            return "plus"
+
+        # Temporary compatibility fallback for an installation before the
+        # central migration has been applied. Elevated admin checks never use
+        # this fallback.
         igng_user_id = self.resolve_bound_igng_account_id(user_id)
         if igng_user_id is None:
             return "plus"
@@ -733,74 +872,100 @@ class DBHandler:
         return row.get("group_name") if row and row.get("group_name") in ("admin", "pro", "plus") else "plus"
 
     def is_bot_admin(self, user_id):
-        igng_user_id = self.resolve_bound_igng_account_id(user_id)
-        if igng_user_id is None:
+        snapshot = self._get_unified_permission_snapshot(user_id)
+        if snapshot is None:
             return False
-        with self.conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT group_name FROM user_groups "
-                "WHERE igng_user_id = %s AND group_name = 'admin' LIMIT 1",
-                (str(igng_user_id),),
-            )
-            return cursor.fetchone() is not None
+        return self._snapshot_has_permission(snapshot, "yunying.manage")
 
     def get_bot_admin_qqs(self):
-        with self.conn.cursor() as cursor:
-            cursor.execute("SELECT igng_user_id FROM user_groups WHERE group_name = 'admin'")
-            user_ids = [str(row["igng_user_id"]) for row in cursor.fetchall()]
-        if not user_ids:
-            return []
-        placeholders = ",".join(["%s"] * len(user_ids))
-        with self._identity_lock:
-            with self._identity_connection().cursor() as cursor:
-                cursor.execute(
-                    f"SELECT qq_number FROM user_qqs WHERE user_id IN ({placeholders})",
-                    tuple(user_ids),
-                )
-                return [str(row["qq_number"]) for row in cursor.fetchall()]
-
-    def _seed_default_user_groups(self, bot_cursor):
-        """Keep the current built-in administrators in the database identity model."""
         try:
             with self._identity_lock:
-                identity_cursor = self._identity_connection().cursor()
-                identity_cursor.execute(
-                    "SELECT id FROM users WHERE nickname = %s OR username = %s LIMIT 1",
-                    ("IGNG", "IGNG"),
-                )
-                igng_admin = identity_cursor.fetchone()
-                if igng_admin:
-                    bot_cursor.execute(
-                        "INSERT INTO user_groups (igng_user_id, group_name) "
-                        "VALUES (%s, 'admin') ON DUPLICATE KEY UPDATE "
-                        "group_name = 'admin'",
-                        (str(igng_admin["id"]),),
+                with self._identity_connection().cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT upg.user_id
+                        FROM user_permission_groups upg
+                        INNER JOIN permission_groups pg ON pg.id = upg.group_id
+                        INNER JOIN users u ON u.id = upg.user_id
+                        WHERE upg.status = 'ACTIVE'
+                          AND u.status <> 'BANNED'
+                          AND pg.enabled = 1
+                          AND pg.code IN ('platform.superadmin', 'yunying.admin')
+                          AND (upg.expires_at IS NULL OR upg.expires_at > UTC_TIMESTAMP())
+                        UNION
+                        SELECT ga.user_id
+                        FROM global_admins ga
+                        INNER JOIN users u ON u.id = ga.user_id
+                        WHERE u.status <> 'BANNED'
+                        """
                     )
-                identity_cursor.execute(
-                    "SELECT id FROM users WHERE nickname LIKE %s OR username LIKE %s",
-                    ("%akcs%", "%akcs%"),
-                )
-                for row in identity_cursor.fetchall():
-                    bot_cursor.execute(
-                        "INSERT INTO user_groups (igng_user_id, group_name) VALUES (%s, 'pro') "
-                        "ON DUPLICATE KEY UPDATE group_name = 'pro'",
-                        (str(row["id"]),),
+                    user_ids = [str(row["user_id"]) for row in cursor.fetchall()]
+                    if not user_ids:
+                        return []
+                    placeholders = ",".join(["%s"] * len(user_ids))
+                    cursor.execute(
+                        f"SELECT qq_number FROM user_qqs WHERE user_id IN ({placeholders})",
+                        tuple(user_ids),
                     )
+                    return [str(row["qq_number"]) for row in cursor.fetchall()]
         except Exception as exc:
-            logger.warning("Failed to seed default IGNG user groups: %s", exc)
+            logger.warning("Failed to read unified bot administrators: %s", exc)
+            return []
+
+    def _seed_default_user_groups(self, bot_cursor):
+        """Do not assign permissions by username; the central table is authoritative."""
+        return None
 
     def set_user_group(self, igng_user_id, group_name):
+        """Assign a Yunying tier in the central permission center.
+
+        The old igng_bot.user_groups row is updated as a compatibility cache,
+        but it is not consulted when the central tables are available.
+        """
         group_name = str(group_name or "").strip().lower()
         if group_name not in ("pro", "plus"):
             return False
-        with self.conn.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO user_groups (igng_user_id, group_name) VALUES (%s, %s) "
-                "ON DUPLICATE KEY UPDATE group_name = VALUES(group_name)",
-                (str(igng_user_id), group_name),
-            )
-        self.conn.commit()
-        return True
+        target_id = str(igng_user_id)
+        try:
+            with self._identity_lock:
+                identity_conn = self._identity_connection()
+                with identity_conn.cursor() as identity_cursor:
+                    identity_cursor.execute("SELECT id FROM users WHERE id = %s LIMIT 1", (target_id,))
+                    if not identity_cursor.fetchone():
+                        return False
+                    identity_cursor.execute(
+                        "SELECT id, code FROM permission_groups WHERE code IN ('yunying.plus', 'yunying.pro')"
+                    )
+                    group_ids = {row["code"]: int(row["id"]) for row in identity_cursor.fetchall()}
+                    target_group_id = group_ids.get(f"yunying.{group_name}")
+                    if not target_group_id:
+                        return False
+                    if group_name == "plus" and group_ids.get("yunying.pro"):
+                        identity_cursor.execute(
+                            "DELETE FROM user_permission_groups WHERE user_id = %s AND group_id = %s",
+                            (target_id, group_ids["yunying.pro"]),
+                        )
+                    identity_cursor.execute(
+                        """
+                        INSERT INTO user_permission_groups (user_id, group_id, status, source)
+                        VALUES (%s, %s, 'ACTIVE', 'yunying:command')
+                        ON DUPLICATE KEY UPDATE status = 'ACTIVE', expires_at = NULL, updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (target_id, target_group_id),
+                    )
+                identity_conn.commit()
+
+            with self.conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO user_groups (igng_user_id, group_name) VALUES (%s, %s) "
+                    "ON DUPLICATE KEY UPDATE group_name = VALUES(group_name)",
+                    (target_id, group_name),
+                )
+            self.conn.commit()
+            return True
+        except Exception as exc:
+            logger.warning("Failed to assign Yunying group %s to IGNG user %s: %s", group_name, target_id, exc)
+            return False
 
     def get_image_models_for_user(self, user_id):
         models = list(self.config.IMAGE_STANDARD_MODELS)
