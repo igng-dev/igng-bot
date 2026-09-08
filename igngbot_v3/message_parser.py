@@ -69,26 +69,17 @@ def _try_parse_json(text):
 
 def parse_message(data):
     message_type = data.get("message_type")
-    if message_type not in ("group", "private"):
+    if message_type != "group":
         return None
-    is_private = message_type == "private"
     is_self = (
         data.get("post_type") == "message_sent"
         or data.get("message_sent_type") == "self"
     )
     sender_id = data.get("user_id")
-    conversation_id = (
-        data.get("group_id")
-        if not is_private
-        else (data.get("target_id") if is_self else sender_id)
-    )
-    # Negative IDs keep private conversations isolated in the existing
-    # group-oriented message/context tables without colliding with QQ groups.
-    storage_group_id = (
-        int(conversation_id)
-        if not is_private and conversation_id is not None
-        else (-int(sender_id) if sender_id is not None else 0)
-    )
+    conversation_id = data.get("group_id")
+    if conversation_id is None:
+        return None
+    storage_group_id = int(conversation_id)
 
     # Detect self-sent messages
     message_array = data.get("message", [])
