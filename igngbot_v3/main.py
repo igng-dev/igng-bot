@@ -405,13 +405,12 @@ class App:
             return
 
         group_config = self.db.get_group_config(parsed["group_id"]) or {}
-        if parsed.get("conversation_type") != "private" and not group_config.get("is_chat_mode"):
+        if not group_config.get("is_chat_mode"):
             return
 
         textual_direct_alias = self._has_textual_direct_alias(parsed)
         direct_mention = (
-            parsed.get("conversation_type") == "private"
-            or self._is_direct_mention(parsed)
+            self._is_direct_mention(parsed)
             or textual_direct_alias
         )
         mentioned_user_ids = {
@@ -622,7 +621,7 @@ class App:
         direct_mention: bool,
         mentioned_user_ids: set[str],
     ) -> bool:
-        if parsed.get("conversation_type") == "private" or direct_mention:
+        if direct_mention:
             return False
         # In group chat, a question or a topic continuation is still a message
         # between group members unless the sender explicitly addressed Yunying.
