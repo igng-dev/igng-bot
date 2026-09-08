@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import threading
-from datetime import datetime
+import time
 from concurrent.futures import Future
 from logging.handlers import RotatingFileHandler
 
@@ -14,17 +14,15 @@ from .content_review import ContentReviewer
 from .chat_service import ChatService, MessageContext
 from .config import Config
 from .db import DBHandler
-from .igng_query import IGNGQueryHandler
-from .image_catalog import AvatarCatalog, StickerCatalog
-from .image_task_service import ImageTaskService
 from .media_repository_worker import MediaRepositoryWorker
 from .message_parser import parse_message
-from .mc_report_notifications import McReportNotifier
-from .mc_report_commands import McReportCommandHandler
+from .mc_ticket_notifications import McTicketNotifier
 from .system_prompt_commands import SystemPromptCommandHandler
 from .onebot_client import OneBotClient
 from .onebot_api import send_group_text
 from .storage import StorageHandler
+from .media_text import MediaTextExtractor, MediaTextResult, append_media_text
+from .timeutil import unix_to_utc_naive
 from .user_config_db import close_pool as close_user_config_pool
 from .user_config_db import ensure_group_configs_table, ensure_user_config_table
 
@@ -54,29 +52,15 @@ logger = logging.getLogger("igngbot_v3")
 
 class App:
     _HELP_CATEGORIES = {
-        "任务": "任务对话、连续对话和任务总结",
         "聊天": "群聊模式和性格设置",
         "系统提示词": "聊天模式附加系统提示词",
-        "图片": "头像、表情查询和图片生成说明",
-        "工具": "服务器、假人、领地和 IGNG 查询",
-        "反馈": "服务器反馈工单",
         "管理": "通知和群聊总结等管理员功能",
     }
 
     _HELP_DETAILS = {
-        "任务": (
-            "任务帮助\n"
-            "/任务 创建 <任务名>\n创建一个持久任务。\n"
-            "/任务 #id <内容>\n向任务发送对话。\n"
-            "/任务 命名 #id <名称>\n修改任务名称。\n"
-            "/任务 总结 #id\n总结任务并覆盖名称。\n"
-            "/任务 列表\n查看自己的任务。\n"
-            "/任务 连续 #id\n进入连续对话模式。\n"
-            "/任务 退出\n退出当前连续对话模式。\n"
-            "也可以引用任务消息继续对话。"
-        ),
         "聊天": (
             "聊天帮助\n"
+            "聊天模式使用本地模型；在群聊中负责自然对话。\n"
             "/聊天模式\n切换当前群聊天模式，仅群主、群管理员或 bot 管理员可用。\n"
             "/性格\n查看当前性格和可用性格。\n"
             "/性格 <名称>\n切换当前群性格，仅管理员可用。"
@@ -102,30 +86,6 @@ class App:
             "/系统提示词 修改 #3 更毒舌一点\n"
             "/系统提示词 关闭 #3"
         ),
-        "图片": (
-            "图片帮助\n"
-            "/头像查询\n查看自己创建的头像列表。\n"
-            "/头像查询 #id\n查看并发送指定头像。\n"
-            "/表情列表\n查看已有表情分类。\n"
-            "/表情查看 <分类>\n查看并发送自己的表情图片。\n"
-            "聊天模式和任务模式中的普通图片生成由 AI 根据当前可用模型自主决定。"
-        ),
-        "工具": (
-            "工具帮助\n"
-            "/服务器列表\n查看服务器列表。\n"
-            "/服务器状态 [服务器名]\n查询服务器状态。\n"
-            "/假人列表 [服务器名]\n查看服务器假人。\n"
-            "/我的假人 [服务器名]\n查看自己名下的假人。\n"
-            "/领地列表 <玩家名>\n查看玩家公开领地。\n"
-            "/BBS队列\n查看 BBS 审核队列。\n"
-            "/IGNG账户\n查询当前 QQ 的 IGNG 绑定信息。"
-        ),
-        "反馈": (
-            "反馈帮助\n"
-            "/服务器反馈\n查看服务器反馈帮助。\n"
-            "/服务器反馈 创建 <目标玩家> <原因>\n创建反馈工单。\n"
-            "/服务器反馈 待办\n查看自己发起的未结单工单。"
-        ),
         "管理": (
             "管理帮助\n"
             "/通知 <内容>\n向默认通知群发送通知。\n"
@@ -143,19 +103,16 @@ class App:
         self.db = DBHandler(self.config)
         self.chat_service = ChatService(self.config, self.db)
         self.storage = StorageHandler(self.config)
+        self.media_text = MediaTextExtractor(self.config)
         self.reviewer = ContentReviewer(self.config)
-        self.avatar_gen = AvatarCatalog(self.config, self.db)
-        self.sticker_gen = StickerCatalog(self.config, self.db)
-        self.image_tasks = ImageTaskService(self.config, self.db)
         self.media_repository = MediaRepositoryWorker(self.config, self.db)
-        self.igng_query = IGNGQueryHandler(self.config, self.db)
-        self.mc_report_notifier = McReportNotifier(self.config)
-        self.mc_report_commands = McReportCommandHandler(self.config, self.mc_report_notifier)
+        self.mc_ticket_notifier = McTicketNotifier(self.config)
         self.system_prompt_commands = SystemPromptCommandHandler(self.config, self.db)
         self.content_review_groups = []
         self._chat_workers = {}
         self._chat_pending = {}
         self._chat_pending_boundaries = {}
+        self._chat_last_reply_at = {}
         self._plus_one_states = {}
         self._plus_one_queued_decisions = {}
         self.loop = asyncio.new_event_loop()
@@ -182,9 +139,6 @@ class App:
         if self.config.CONTENT_REVIEW_ENABLED:
             self.reviewer.mark_all_existing_approved()
             self.reviewer.start()
-        self.avatar_gen.start()
-        self.sticker_gen.start()
-        self.image_tasks.start()
         self.media_repository.start()
         self.loop_thread.start()
         self._run_coro_sync(self._startup_async()).result()
@@ -202,7 +156,7 @@ class App:
         await ensure_call_logs_table()
         await close_user_config_pool()
         await close_call_log_pool()
-        await self.mc_report_notifier.start()
+        await self.mc_ticket_notifier.start()
 
     def handle_raw_message(self, data: dict):
         future = self._run_coro_sync(self._handle_raw_message_async(data))
@@ -224,15 +178,14 @@ class App:
             parsed["group_id"], parsed["msg_id"]
         ):
             return
-        content = parsed.get("message_content", "").strip()
-        normalized_content = self._normalize_command_text(content)
-
         # Persist incoming messages and download attachments before command or
-        # task handling so continuous task mode can use stable NAS paths.
+        # task handling so continuous task mode can use stable NAS paths and
+        # media-derived text can be included in the same LLM turn.
         file_url = None
         file_type = None
         audio_file_path = None
         stored_attachments = []
+        extracted_media = []
         if parsed.get("files"):
             for file_info in parsed["files"]:
                 if not file_info.get("url"):
@@ -247,6 +200,44 @@ class App:
                 )
                 if stored_path:
                     file_info["stored_path"] = stored_path
+                    media_result = None
+                    try:
+                        if file_info["type"] == "image":
+                            media_result = await asyncio.to_thread(
+                                self.media_text.extract,
+                                file_info["type"],
+                                stored_path,
+                            )
+                        elif file_info["type"] in ("audio", "record"):
+                            existing_transcript = str(file_info.get("transcript") or "").strip()
+                            if existing_transcript:
+                                media_result = MediaTextResult(
+                                    text=existing_transcript,
+                                    status="provided",
+                                    backend="onebot",
+                                )
+                            else:
+                                media_result = await asyncio.to_thread(
+                                    self.media_text.extract,
+                                    file_info["type"],
+                                    stored_path,
+                                )
+                    except Exception as exc:
+                        logger.exception("Media text extraction failed for %s", stored_path)
+                        media_result = MediaTextResult(
+                            status="unavailable",
+                            backend="error",
+                            error=str(exc),
+                        )
+                    if media_result:
+                        file_info["text_extraction_status"] = media_result.status
+                        file_info["text_extraction_backend"] = media_result.backend
+                        if media_result.text and media_result.backend != "onebot":
+                            if file_info["type"] == "image":
+                                file_info["ocr_text"] = media_result.text
+                            else:
+                                file_info["transcript"] = media_result.text
+                            extracted_media.append((file_info, media_result))
                     attachment = {
                         "type": file_info["type"],
                         "original_file": file_info.get("file", ""),
@@ -254,13 +245,21 @@ class App:
                         "stored_path": stored_path,
                         "name": file_info.get("name", ""),
                         "transcript": file_info.get("transcript", ""),
+                        "ocr_text": file_info.get("ocr_text", ""),
                     }
+                    if media_result:
+                        attachment["text_extraction_status"] = media_result.status
+                        attachment["text_extraction_backend"] = media_result.backend
                     stored_attachments.append(attachment)
                     if file_url is None:
                         file_url = stored_path
                         file_type = file_info["type"]
                     if file_info["type"] in ("audio", "record") and audio_file_path is None:
                         audio_file_path = stored_path
+
+        append_media_text(parsed, extracted_media)
+        content = parsed.get("message_content", "").strip()
+        normalized_content = self._normalize_command_text(content)
 
         if not self.db.get_message_by_msg_id(parsed["group_id"], parsed["msg_id"]):
             self.db.insert_message(
@@ -275,7 +274,7 @@ class App:
                 file_url=file_url,
                 file_type=file_type,
                 created_at=(
-                    datetime.fromtimestamp(parsed["created_at"])
+                    unix_to_utc_naive(parsed["created_at"])
                     if parsed.get("created_at")
                     else None
                 ),
@@ -283,6 +282,14 @@ class App:
                 audio_file_path=audio_file_path,
                 audio_transcript=parsed.get("audio_transcript", ""),
             )
+
+        if self._is_disabled_mc_ticket_command(normalized_content):
+            logger.info(
+                "Ignoring disabled MC ticket command from QQ %s in group %s",
+                parsed["sender_id"],
+                parsed["group_id"],
+            )
+            return
 
         help_match = re.fullmatch(r"/(?:help|帮助)(?:\s+(.+))?", normalized_content, re.IGNORECASE)
         if help_match:
@@ -324,13 +331,8 @@ class App:
                 await send_group_text(self.config, parsed["group_id"], f"当前用户组：{group_name}")
             return
 
-        # Task commands and replies take precedence over every other command path.
-        # A quoted task message is ordinary text, so later handlers must not consume it first.
-        is_command = bool(self.image_tasks.handle(parsed))
+        is_command = False
 
-        if content and not is_command:
-            if await self.mc_report_commands.handle({**parsed, "message_content": normalized_content}):
-                is_command = True
 
         if content and not is_command:
             if await self.system_prompt_commands.handle(parsed, normalized_content):
@@ -386,12 +388,7 @@ class App:
                     )
                 is_command = True
 
-        if not is_command:
-            is_command = bool(self.sticker_gen.handle_command(parsed))
-        if not is_command:
-            is_command = bool(self.avatar_gen.handle_command(parsed))
-        if not is_command:
-            is_command = bool(self.igng_query.handle_command(parsed))
+
 
         if self.config.CONTENT_REVIEW_ENABLED and parsed["group_id"] in self.content_review_groups:
             self.reviewer.trigger()
@@ -411,14 +408,37 @@ class App:
         if parsed.get("conversation_type") != "private" and not group_config.get("is_chat_mode"):
             return
 
+        textual_direct_alias = self._has_textual_direct_alias(parsed)
+        direct_mention = (
+            parsed.get("conversation_type") == "private"
+            or self._is_direct_mention(parsed)
+            or textual_direct_alias
+        )
+        mentioned_user_ids = {
+            str(item.get("qq"))
+            for item in parsed.get("message_structure", [])
+            if item.get("type") == "at" and item.get("qq") is not None
+        }
+        if textual_direct_alias:
+            # Keep the structured field useful to the model even when a client
+            # sent a plain-text @云萤/莹宝 instead of a real OneBot at segment.
+            mentioned_user_ids.add(str(self.config.BOT_USER_ID))
+        if self._should_skip_non_direct_chat_message(parsed, direct_mention, mentioned_user_ids):
+            logger.info(
+                "Skipping non-directed chat message in group %s: msg=%s mentions=%s files=%s",
+                parsed["group_id"], parsed["msg_id"], sorted(mentioned_user_ids), bool(parsed.get("files")),
+            )
+            return
+
         ctx = MessageContext(
             group_id=parsed["group_id"],
             sender_id=parsed["sender_id"],
             sender_name=self._get_sender_name(data),
             msg_id=parsed["msg_id"],
             rich_text=content,
-            direct_mention=self._is_direct_mention(parsed),
+            direct_mention=direct_mention,
             files=parsed.get("files", []),
+            mentioned_user_ids=mentioned_user_ids,
         )
         self._enqueue_chat(ctx)
 
@@ -472,7 +492,8 @@ class App:
     async def _flush_plus_one_queue(self, group_id: int):
         queued = self._plus_one_queued_decisions.pop(group_id, [])
         for ctx, decision in queued:
-            await self.chat_service.apply_decision(ctx, decision)
+            if await self.chat_service.apply_decision(ctx, decision):
+                self._chat_last_reply_at[group_id] = time.monotonic()
 
     def _enqueue_chat(self, ctx: MessageContext):
         """Serialize analysis and merge all messages during one run into one next task."""
@@ -502,6 +523,11 @@ class App:
     async def _run_chat_worker(self, group_id: int):
         try:
             while True:
+                if group_id not in self._chat_pending:
+                    return
+                debounce_seconds = max(0.0, self.config.CHAT_DEBOUNCE_SECONDS)
+                if debounce_seconds:
+                    await asyncio.sleep(debounce_seconds)
                 ctx = self._chat_pending.pop(group_id, None)
                 if ctx is None:
                     return
@@ -511,6 +537,17 @@ class App:
                 if not group_config.get("is_chat_mode"):
                     continue
 
+                if not ctx.direct_mention:
+                    last_reply_at = self._chat_last_reply_at.get(group_id)
+                    cooldown = max(0.0, self.config.CHAT_NON_DIRECT_COOLDOWN_SECONDS)
+                    if last_reply_at is not None and time.monotonic() - last_reply_at < cooldown:
+                        logger.info(
+                            "Skipping non-directed chat message during cooldown: group=%s msg=%s",
+                            group_id,
+                            ctx.msg_id,
+                        )
+                        continue
+
                 logger.info("Starting chat analysis for group %s msg %s", group_id, ctx.msg_id)
                 decision = await self.chat_service.maybe_reply(ctx, history_start_msg_id)
                 if decision.get("should_reply") or decision.get("affinity_updates"):
@@ -518,7 +555,8 @@ class App:
                         self._plus_one_queued_decisions.setdefault(group_id, []).append((ctx, decision))
                         logger.info("Queued bot reply during auto +1 in group %s", group_id)
                     else:
-                        await self.chat_service.apply_decision(ctx, decision)
+                        if await self.chat_service.apply_decision(ctx, decision):
+                            self._chat_last_reply_at[group_id] = time.monotonic()
                 logger.info("Finished chat analysis for group %s msg %s", group_id, ctx.msg_id)
         except Exception:
             logger.exception("Chat worker failed for group %s", group_id)
@@ -537,12 +575,69 @@ class App:
         reply_to = parsed.get("reply_to_msg_id")
         if not reply_to:
             return False
+        quoted = self.db.get_message_by_msg_id(parsed.get("group_id"), reply_to)
+        if quoted and (quoted.get("is_self") or str(quoted.get("sender_id")) == str(self.config.BOT_USER_ID)):
+            return True
         return False
+
+    def _has_textual_direct_alias(self, parsed: dict) -> bool:
+        """Recognize high-confidence plain-text calls to Yunying.
+
+        Some clients render a nickname-like @ as ordinary text, so OneBot does
+        not provide an ``at`` segment.  Do not treat every occurrence of the
+        bot's name as a call: ``你看莹宝也说抽哎`` is still a message to another
+        group member.  Accept explicit ``@alias`` anywhere and a bare alias only
+        at the start when the remainder looks like a direct request.
+        """
+        text = str(parsed.get("message_content") or parsed.get("plain_text_content") or "").strip()
+        if not text:
+            return False
+        aliases = tuple(
+            alias for alias in getattr(self.config, "CHAT_DIRECT_ALIASES", ()) if str(alias).strip()
+        )
+        if not aliases:
+            return False
+        alias_group = "|".join(re.escape(str(alias).strip()) for alias in aliases)
+        separator = r"(?=$|[\s,，。！？!?：:、])"
+        if re.search(rf"(?<!\S)@(?:{alias_group}){separator}", text, flags=re.IGNORECASE):
+            return True
+
+        direct_cues = (
+            "你", "能", "可以", "帮", "请", "问", "在吗", "在不", "告诉", "回答",
+            "为什么", "怎么", "什么", "是否", "有没有", "要不要", "会不会", "能否",
+            "抽", "看", "听", "来", "给我", "觉得", "认为",
+        )
+        cue_group = "|".join(re.escape(cue) for cue in direct_cues)
+        return bool(
+            re.match(
+                rf"^\s*(?:{alias_group})(?:\s*[,，:：]\s*|\s+|(?=(?:{cue_group})))",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _should_skip_non_direct_chat_message(
+        self,
+        parsed: dict,
+        direct_mention: bool,
+        mentioned_user_ids: set[str],
+    ) -> bool:
+        if parsed.get("conversation_type") == "private" or direct_mention:
+            return False
+        # In group chat, a question or a topic continuation is still a message
+        # between group members unless the sender explicitly addressed Yunying.
+        # Do this deterministically; the small chat model is not a reliable
+        # addressee classifier.
+        return True
 
     def _normalize_command_text(self, text: str) -> str:
         clean_text = (text or "").strip()
         clean_text = re.sub(r"^@[^\s/]+\s*", "", clean_text).strip()
         return clean_text
+
+    @staticmethod
+    def _is_disabled_mc_ticket_command(text: str) -> bool:
+        return bool(re.match(r"^/服务器反馈(?:\s|$)", text or "", re.IGNORECASE))
 
     def _get_sender_name(self, data: dict) -> str:
         sender = data.get("sender") or {}
