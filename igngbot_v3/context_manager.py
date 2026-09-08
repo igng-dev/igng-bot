@@ -7,10 +7,11 @@ logger = logging.getLogger(__name__)
 
 
 def estimate_tokens(text: str) -> int:
-    """Use the same conservative character estimate as AstrBot's fallback counter."""
+    """Estimate token count for mixed Chinese/English and punctuation."""
     text = str(text or "")
     chinese = sum("\u4e00" <= char <= "\u9fff" for char in text)
-    return max(1, int(chinese * 0.6 + (len(text) - chinese) * 0.3))
+    # Chinese chars roughly 1 token, English/symbols roughly 0.4 tokens
+    return max(1, int(chinese * 1.0 + (len(text) - chinese) * 0.4) + 4)
 
 
 def message_tokens(row: dict) -> int:
@@ -31,35 +32,61 @@ def message_tokens(row: dict) -> int:
 
 
 class ContextManager:
-    """Apply Codex/AstrBot-style summary compression to one group context."""
+    """Apply summary compression to one group context."""
 
-    def __init__(self, config, db, agent, summary_prompt: str):
+    MAX_SUMMARY_CHUNK_TOKENS = 2500
+    MAX_HISTORY_TOKENS = 1600
+    MAX_RECENT_MESSAGES = 12
+
+    def __init__(self, config, db, llm_client, summary_prompt: str, llm_options: dict | None = None):
         self.config = config
         self.db = db
-        self.agent = agent
+        self.llm_client = llm_client
         self.summary_prompt = summary_prompt
+        self.llm_options = llm_options or {}
+        self.max_history_tokens = int(
+            getattr(config, "CHAT_HISTORY_MAX_TOKENS", self.MAX_HISTORY_TOKENS)
+        )
+        self.max_recent_messages = int(
+            getattr(config, "CHAT_HISTORY_MAX_MESSAGES", self.MAX_RECENT_MESSAGES)
+        )
 
-    def should_compress(self, rows: list[dict], system_prompt: str, user_prompt: str, tools: list) -> bool:
-        used = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
-        used += sum(estimate_tokens(json.dumps(tool.to_openai_tool(), ensure_ascii=False)) for tool in tools)
+    def should_compress(self, rows: list[dict], system_prompt: str, user_prompt: str | list) -> bool:
+        user_prompt_str = user_prompt if isinstance(user_prompt, str) else str(user_prompt)
+        used = estimate_tokens(system_prompt) + estimate_tokens(user_prompt_str)
         return used >= self.config.CONTEXT_MAX_TOKENS * self.config.CONTEXT_SUMMARY_TRIGGER_RATIO
 
+    def clip_recent_rows(
+        self,
+        rows: list[dict],
+        max_tokens: int | None = None,
+        max_count: int | None = None,
+    ) -> list[dict]:
+        """Keep the most recent rows within a safe token and count budget."""
+        if not rows:
+            return []
+        token_budget = max_tokens or self.max_history_tokens
+        count_limit = max_count or self.max_recent_messages
+        used = 0
+        kept = []
+        for row in reversed(rows):
+            tok = message_tokens(row)
+            if kept and (used + tok > token_budget or len(kept) >= count_limit):
+                break
+            used += tok
+            kept.append(row)
+        kept.reverse()
+        return kept
+
     def split_for_summary(self, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+        """Split rows into old_rows (for summarization) and recent_rows (to keep in active prompt)."""
         if len(rows) < 2:
             return [], rows
-        total = sum(message_tokens(row) for row in rows)
-        recent_budget = max(1, int(total * self.config.CONTEXT_SUMMARY_KEEP_RECENT_RATIO))
-        used = 0
-        split_at = len(rows)
-        for index in range(len(rows) - 1, -1, -1):
-            row_tokens = message_tokens(rows[index])
-            if used and used + row_tokens > recent_budget:
-                break
-            used += row_tokens
-            split_at = index
-        if split_at <= 0:
-            split_at = 1
-        return rows[:split_at], rows[split_at:]
+        recent_rows = self.clip_recent_rows(rows)
+        if len(recent_rows) >= len(rows):
+            return [], rows
+        old_rows = rows[: len(rows) - len(recent_rows)]
+        return old_rows, recent_rows
 
     async def compress_if_needed(
         self,
@@ -68,17 +95,26 @@ class ContextManager:
         rows: list[dict],
         existing_summary: dict | None,
         system_prompt: str,
-        user_prompt: str,
-        tools: list,
+        user_prompt: str | list,
     ) -> tuple[dict | None, list[dict]]:
-        if not self.should_compress(rows, system_prompt, user_prompt, tools):
+        if not self.should_compress(rows, system_prompt, user_prompt):
             return existing_summary, rows
 
         old_rows, recent_rows = self.split_for_summary(rows)
         if not old_rows:
-            return existing_summary, rows
+            return existing_summary, recent_rows
 
-        old_text = self._format_rows(old_rows)
+        summary_chunk = []
+        chunk_tokens = 0
+        for row in reversed(old_rows):
+            tok = message_tokens(row)
+            if summary_chunk and (chunk_tokens + tok > self.MAX_SUMMARY_CHUNK_TOKENS or len(summary_chunk) >= 60):
+                break
+            chunk_tokens += tok
+            summary_chunk.append(row)
+        summary_chunk.reverse()
+
+        old_text = self._format_rows(summary_chunk)
         previous = (existing_summary or {}).get("summary_text") or "（暂无更早摘要）"
         summary_prompt = (
             f"[群号] {group_id}\n"
@@ -91,17 +127,22 @@ class ContextManager:
 
         self.db.mark_context_summary_status(group_id, "summarizing")
         try:
-            summary_text = await self.agent.summarize(
+            summary_text = await self.llm_client.generate_text(
                 system_prompt=self.summary_prompt,
                 user_prompt=summary_prompt,
                 max_tokens=self.config.CONTEXT_SUMMARY_MAX_TOKENS,
+                temperature=0.2,
+                **self.llm_options,
             )
             if not summary_text.strip():
                 raise RuntimeError("summary model returned empty content")
         except Exception:
-            logger.exception("Context summary failed for group %s; keeping original context", group_id)
+            logger.exception(
+                "Context summary failed for group %s; falling back to safe clipped recent context",
+                group_id,
+            )
             self.db.mark_context_summary_status(group_id, "failed")
-            return existing_summary, rows
+            return existing_summary, recent_rows
 
         boundary_id = int(old_rows[-1]["_db_id"])
         summary = self.db.save_context_summary(group_id, summary_text.strip(), boundary_id)

@@ -16,61 +16,6 @@ run_as_app_user() {
 
 cd "$APP_DIR"
 
-SEARXNG_COMPOSE_FILE="$APP_DIR/deploy/searxng/docker-compose.yml"
-SEARXNG_IMAGE="${SEARXNG_IMAGE:-dockerproxy.net/searxng/searxng:latest}"
-SEARXNG_CONFIG_DIR="$APP_DIR/deploy/searxng/searxng"
-SEARXNG_SETTINGS_FILE="$SEARXNG_CONFIG_DIR/settings.yml"
-mkdir -p "$SEARXNG_CONFIG_DIR"
-sudo chown -R "$APP_USER:$APP_USER" "$SEARXNG_CONFIG_DIR"
-if [ ! -f "$SEARXNG_SETTINGS_FILE" ]; then
-  SEARXNG_SECRET_KEY="$(openssl rand -hex 32)"
-  cat > "$SEARXNG_SETTINGS_FILE" <<EOF
-use_default_settings: true
-
-server:
-  secret_key: "$SEARXNG_SECRET_KEY"
-  limiter: false
-  image_proxy: true
-
-search:
-  formats: [html, json]
-
-engines:
-  - name: bing
-    disabled: false
-  - name: baidu
-    disabled: false
-EOF
-elif ! grep -q '^  limiter:' "$SEARXNG_SETTINGS_FILE"; then
-  printf '\n  limiter: false\n' >> "$SEARXNG_SETTINGS_FILE"
-fi
-if ! grep -q '^  formats:.*json' "$SEARXNG_SETTINGS_FILE"; then
-  cat >> "$SEARXNG_SETTINGS_FILE" <<'EOF'
-
-search:
-  formats: [html, json]
-EOF
-fi
-if ! grep -q '^  - name: bing$' "$SEARXNG_SETTINGS_FILE"; then
-  cat >> "$SEARXNG_SETTINGS_FILE" <<'EOF'
-
-engines:
-  - name: bing
-    disabled: false
-  - name: baidu
-    disabled: false
-EOF
-fi
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 && [ -f "$SEARXNG_COMPOSE_FILE" ]; then
-  if sudo SEARXNG_IMAGE="$SEARXNG_IMAGE" docker compose -f "$SEARXNG_COMPOSE_FILE" up -d; then
-    echo "SearXNG container is running."
-  else
-    echo "Warning: failed to start SearXNG; bot deployment will continue." >&2
-  fi
-else
-  echo "Warning: Docker Compose is unavailable; SearXNG was not started." >&2
-fi
-
 if [ ! -x ".venv/bin/python" ]; then
   run_as_app_user "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
 fi
