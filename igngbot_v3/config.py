@@ -8,10 +8,12 @@ load_dotenv()
 
 
 def _load_astrbot_deepseek_config() -> dict:
-    config_path = os.getenv(
-        "ASTRBOT_CONFIG_PATH",
-        "/home/serviceuser/astrbot/data/config/abconf_fbb8c746-e762-4090-a93b-9e1b0882788c.json",
-    )
+    """Optional legacy fallback that reads a DeepSeek provider out of an
+    AstrBot config file. It is disabled unless ASTRBOT_CONFIG_PATH is set
+    explicitly, so a container never depends on a path from another host."""
+    config_path = os.getenv("ASTRBOT_CONFIG_PATH", "")
+    if not config_path:
+        return {}
     try:
         with open(config_path, "r", encoding="utf-8-sig") as file:
             data = json.load(file)
@@ -67,9 +69,12 @@ _PROJECT_DIR = _BASE_DIR.parent
 
 
 class Config:
-    ONEBOT_WS_URL = os.getenv("ONEBOT_WS_URL", "ws://192.0.2.28:3001")
+    # OneBot endpoints. Inside the NAS compose network the QQ client is a
+    # sibling service named "napcat"; on the old VM the same URLs were reached
+    # through the host loopback. Both are overridable from .env.
+    ONEBOT_WS_URL = os.getenv("ONEBOT_WS_URL", "ws://napcat:3001")
     ONEBOT_ACCESS_TOKEN = os.getenv("ONEBOT_ACCESS_TOKEN", "")
-    ONEBOT_HTTP_URL = os.getenv("ONEBOT_HTTP_URL", "http://192.0.2.28:3200")
+    ONEBOT_HTTP_URL = os.getenv("ONEBOT_HTTP_URL", "http://napcat:3000")
     ONEBOT_HTTP_TOKEN = os.getenv("ONEBOT_HTTP_TOKEN", "")
     ONEBOT_NAME = os.getenv("ONEBOT_NAME", "SnowLuma OneBot")
 
@@ -79,6 +84,18 @@ class Config:
     DB_PASSWORD = os.getenv("DB_PASSWORD", "")
     DB_NAME = os.getenv("DB_NAME", "igng_bot")
 
+    # IGNG site AI records database (ai_jobs / ai_job_attempts). It lives on the
+    # same RDS instance as the bot database but in the dedicated site schema.
+    # Every bot LLM call is mirrored there in addition to call_logs.
+    SITE_AI_RECORDS_ENABLED = os.getenv("SITE_AI_RECORDS_ENABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    SITE_AI_DB_HOST = os.getenv("SITE_AI_DB_HOST", DB_HOST)
+    SITE_AI_DB_PORT = int(os.getenv("SITE_AI_DB_PORT", str(DB_PORT)))
+    SITE_AI_DB_USER = os.getenv("SITE_AI_DB_USER", DB_USER)
+    SITE_AI_DB_PASSWORD = os.getenv("SITE_AI_DB_PASSWORD", DB_PASSWORD)
+    SITE_AI_DB_NAME = os.getenv("SITE_AI_DB_NAME", "igng_sites")
+
     # Shared MC database. The bot application database above remains separate.
     MC_DB_HOST = os.getenv("MC_DB_HOST", DB_HOST)
     MC_DB_PORT = int(os.getenv("MC_DB_PORT", "3306"))
@@ -86,12 +103,32 @@ class Config:
     MC_DB_PASSWORD = os.getenv("MC_DB_PASSWORD", DB_PASSWORD)
     MC_DB_NAME = os.getenv("MC_DB_NAME", "mc")
 
-    SMB_HOST = os.getenv("SMB_HOST", "192.0.2.17")
-    SMB_USER = os.getenv("SMB_USER", "serviceuser")
-    SMB_PASSWORD = os.getenv("SMB_PASSWORD", "")
-    SMB_SHARE = os.getenv("SMB_SHARE", "IGNGbot")
-    NAS_MOUNT_BASE = os.getenv("NAS_MOUNT_BASE", "/mnt/media")
-    NAS_MOUNT_PATH = os.getenv("NAS_MOUNT_PATH", "/mnt/media/message_logs")
+    # Attachment storage root. Inside the container this is a bind mount onto
+    # the NAS data directory, so no CIFS/SMB client is involved any more.
+    # MESSAGE_ROOT is the authoritative name; NAS_MOUNT_* are kept working as
+    # deployment-time compatibility aliases for existing .env files and scripts.
+    MESSAGE_ROOT = os.getenv(
+        "MESSAGE_ROOT",
+        os.getenv("NAS_MOUNT_PATH", "/data/message_logs"),
+    )
+    NAS_MOUNT_PATH = MESSAGE_ROOT
+    # Legacy prefixes that may still appear in message_logs rows or in
+    # attachments_json written before the container migration. They are only
+    # used to normalise old values back to storage-root-relative paths.
+    LEGACY_PATH_PREFIXES = tuple(
+        item.strip()
+        for item in os.getenv(
+            "LEGACY_PATH_PREFIXES",
+            "/mnt/media/message_logs,/vol1/1000/IGNGbot/message_logs,/data/message_logs",
+        ).split(",")
+        if item.strip()
+    )
+    # Fail fast instead of silently falling back to local storage when the
+    # attachment root is missing: a silent fallback hides a misconfigured
+    # mount and makes every attachment invisible to the site afterwards.
+    STORAGE_REQUIRE_MOUNT = os.getenv(
+        "STORAGE_REQUIRE_MOUNT", "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
 
     LLM_CLOUD_BASE_URL = os.getenv(
         "LLM_CLOUD_BASE_URL",
@@ -111,6 +148,7 @@ class Config:
     LLM_LOCAL_MULTIMODAL = os.getenv("LLM_LOCAL_MULTIMODAL", "0").strip().lower() in (
         "1", "true", "yes", "on"
     )
+    LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "low").strip().lower()
     # Compatibility names for modules that still use the OpenAI naming.
     OPENAI_BASE_URL = LLM_CLOUD_BASE_URL
     OPENAI_API_KEY = LLM_CLOUD_API_KEY
@@ -139,19 +177,7 @@ class Config:
     CLOUD_LLM_MODEL = LLM_CLOUD_MODEL
     CLOUD_LLM_TIMEOUT = int(os.getenv("CLOUD_LLM_TIMEOUT", "120"))
 
-    CONTENT_REVIEW_ENABLED = os.getenv("CONTENT_REVIEW_ENABLED", "0").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-    CONTENT_REVIEW_BASE_URL = os.getenv(
-        "CONTENT_REVIEW_BASE_URL", "http://192.0.2.34:23334"
-    ).rstrip("/")
-    CONTENT_REVIEW_API_KEY = os.getenv("CONTENT_REVIEW_API_KEY", "")
-    CONTENT_REVIEW_MODEL = os.getenv("CONTENT_REVIEW_MODEL", "Qwen3Guard-0.6B")
-    CONTENT_REVIEW_TIMEOUT = float(os.getenv("CONTENT_REVIEW_TIMEOUT", "90"))
     ANIME_API_BASE_URL = os.getenv("ANIME_API_BASE_URL", "http://192.0.2.34:23335").rstrip("/")
-    IMAGE_REVIEW_ENABLED = os.getenv("IMAGE_REVIEW_ENABLED", "0").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
     FILTER_MODEL = os.getenv("FILTER_MODEL", CLOUD_LLM_MODEL)
     FILTER_MAX_TOKENS = int(os.getenv("FILTER_MAX_TOKENS", "500"))
     CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "8192"))
@@ -186,11 +212,19 @@ class Config:
     BOT_USER_ID = int(os.getenv("BOT_USER_ID", "1000000001"))
     LOCAL_STORAGE = os.getenv("LOCAL_STORAGE", str(_PROJECT_DIR / "runtime"))
     PROMPT_DIR = os.getenv("PROMPT_DIR", str(_PROJECT_DIR / "prompts"))
-    AVATAR_STORAGE_PATH = os.getenv("AVATAR_STORAGE_PATH", "/mnt/media/avatar_storage")
-    STICKER_STORAGE_PATH = os.getenv("STICKER_STORAGE_PATH", "/mnt/media/sticker_storage")
-    IMAGE_STORAGE_PATH = os.getenv("IMAGE_STORAGE_PATH", "/mnt/media/igngbot/images")
-    IMAGE_REPOSITORY_POLL_INTERVAL = float(os.getenv("IMAGE_REPOSITORY_POLL_INTERVAL", "5"))
-    IMAGE_ANALYSIS_MODEL = os.getenv("IMAGE_ANALYSIS_MODEL", OPENAI_CHAT_MODEL)
+    SYSTEM_PROMPT_CACHE_DIR = os.getenv(
+        "SYSTEM_PROMPT_CACHE_DIR",
+        str(_PROJECT_DIR / "runtime" / "system_prompts"),
+    )
+    SYSTEM_PROMPT_SYNC_INTERVAL_SECONDS = float(
+        os.getenv("SYSTEM_PROMPT_SYNC_INTERVAL_SECONDS", "60")
+    )
+    # Legacy image-generation output directory. The feature was removed, but the
+    # setting is kept so older deployments keep loading; it follows the current
+    # attachment root rather than a hardcoded host mount.
+    IMAGE_STORAGE_PATH = os.getenv(
+        "IMAGE_STORAGE_PATH", os.path.join(os.path.dirname(MESSAGE_ROOT), "igngbot", "images")
+    )
 
     # Incoming media text extraction.  The local providers are lazy-loaded so
     # a missing optional model package does not prevent ordinary bot startup.

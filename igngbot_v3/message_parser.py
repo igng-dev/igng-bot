@@ -1,3 +1,4 @@
+import ast
 import json as _json
 import logging
 import re
@@ -48,11 +49,8 @@ def _indent(text, prefix="  "):
 
 def _try_parse_json(text):
     """Attempt to parse JSON and extract a human-readable summary."""
-    if not text:
-        return None
-    try:
-        obj = _json.loads(text) if isinstance(text, str) else text
-    except (_json.JSONDecodeError, TypeError):
+    obj = _coerce_payload(text)
+    if obj is None:
         return None
     if isinstance(obj, dict):
         meta = obj.get("meta", obj)
@@ -67,19 +65,233 @@ def _try_parse_json(text):
     return str(obj)[:200]
 
 
-def parse_message(data):
-    message_type = data.get("message_type")
-    if message_type != "group":
+def _coerce_payload(raw):
+    if isinstance(raw, (dict, list)):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
         return None
+    value = raw.strip()
+    try:
+        return _json.loads(value)
+    except (_json.JSONDecodeError, TypeError):
+        pass
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError, TypeError):
+        return None
+
+
+def _extract_payload_dicts(raw):
+    if not isinstance(raw, str):
+        return []
+
+    payloads = []
+    start = None
+    depth = 0
+    quote = None
+    escaped = False
+    for index, char in enumerate(raw):
+        if start is None:
+            if char == "{":
+                start = index
+                depth = 1
+                quote = None
+                escaped = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth != 0:
+                continue
+            candidate = raw[start:index + 1]
+            try:
+                payload = _json.loads(candidate)
+            except (_json.JSONDecodeError, TypeError):
+                try:
+                    payload = ast.literal_eval(candidate)
+                except (ValueError, SyntaxError, TypeError):
+                    payload = None
+            if isinstance(payload, dict):
+                payloads.append(payload)
+            start = None
+            quote = None
+            escaped = False
+    return payloads
+
+
+def _card_text(value, limit=500):
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:limit]
+
+
+def _card_url(value):
+    value = _card_text(value, 1000)
+    return value if value.startswith(("http://", "https://")) else ""
+
+
+def _card_value(payloads, *keys):
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _normalize_card(raw, card_type):
+    payload = _coerce_payload(raw)
+    if not isinstance(payload, dict):
+        payloads = _extract_payload_dicts(raw)
+        payload = payloads[0] if payloads else None
+    if not isinstance(payload, dict):
+        return None
+
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    share_data = payload.get("shareTemplateData") if isinstance(payload.get("shareTemplateData"), dict) else {}
+    payloads = (payload, meta, share_data)
+    title = _card_text(_card_value(payloads, "title", "prompt", "app", "app_name"), 200)
+    description = _card_text(
+        _card_value(payloads, "desc", "description", "summary", "detail_1"),
+        1000,
+    )
+    preview_url = _card_url(
+        _card_value(payloads, "preview", "preview_url", "cover", "image", "pic", "thumb")
+    )
+    icon_url = _card_url(_card_value(payloads, "icon", "icon_url", "appicon", "app_icon"))
+    target_url = _card_url(
+        _card_value(payloads, "qqdocurl", "qdocurl", "url", "jump_url", "link")
+    )
+    summary = title or description or target_url or _try_parse_json(raw) or ""
+    card = {
+        "type": "card",
+        "card_type": card_type,
+        "title": title,
+        "description": description,
+        "summary": summary[:1000],
+        "preview_url": preview_url,
+        "icon_url": icon_url,
+        "url": target_url,
+        "media": [],
+    }
+    if preview_url:
+        card["media"].append({"type": "image", "role": "preview", "url": preview_url})
+    if icon_url and icon_url != preview_url:
+        card["media"].append({"type": "image", "role": "icon", "url": icon_url})
+    return card
+
+
+def normalize_message_structure(structure):
+    """Normalize legacy json/miniapp parts into persistable card parts."""
+    if not isinstance(structure, list):
+        return False
+
+    changed = False
+
+    def walk(parts):
+        nonlocal changed
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type in ("json", "miniapp"):
+                card_type = part_type
+                raw = next(
+                    (
+                        part.get(key)
+                        for key in ("data", "raw", "content", "summary")
+                        if part.get(key) not in (None, "")
+                    ),
+                )
+                card = _normalize_card(raw, card_type)
+                if card:
+                    for key in ("attachments", "children"):
+                        if part.get(key):
+                            card[key] = part[key]
+                    part.clear()
+                    part.update(card)
+                else:
+                    part["type"] = "card"
+                    part.setdefault("card_type", card_type)
+                changed = True
+            elif part_type == "card" and not part.get("media"):
+                raw = next(
+                    (
+                        part.get(key)
+                        for key in ("data", "raw", "content", "summary")
+                        if part.get(key) not in (None, "")
+                    ),
+                )
+                card = _normalize_card(raw, part.get("card_type", "json"))
+                if card:
+                    for key in ("attachments", "children"):
+                        if part.get(key):
+                            card[key] = part[key]
+                    part.clear()
+                    part.update(card)
+                    changed = True
+            walk(part.get("children") or [])
+
+    walk(structure)
+    return changed
+
+
+def parse_message(data):
+    if not isinstance(data, dict):
+        return None
+    message_type = data.get("message_type")
+    if message_type not in ("group", "private"):
+        return None
+
     is_self = (
         data.get("post_type") == "message_sent"
         or data.get("message_sent_type") == "self"
     )
-    sender_id = data.get("user_id")
-    conversation_id = data.get("group_id")
-    if conversation_id is None:
-        return None
-    storage_group_id = int(conversation_id)
+    self_id = data.get("self_id")
+    sender_id = self_id if is_self and self_id not in (None, "") else data.get("user_id")
+    sender = data.get("sender", {})
+
+    if message_type == "group":
+        conversation_id = data.get("group_id")
+        if conversation_id in (None, ""):
+            return None
+        try:
+            storage_group_id = int(conversation_id)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring message with invalid group_id=%r", conversation_id)
+            return None
+    else:
+        # OneBot private messages do not have a group_id. Use a negative
+        # conversation key so private history cannot collide with a group ID.
+        # For message_sent events target_id is the recipient; older clients may
+        # only expose user_id, which is the best available fallback.
+        conversation_id = data.get("target_id")
+        if conversation_id in (None, ""):
+            conversation_id = data.get("user_id")
+        if conversation_id in (None, "") and isinstance(sender, dict):
+            conversation_id = sender.get("user_id")
+        if conversation_id in (None, ""):
+            return None
+        try:
+            storage_group_id = -int(conversation_id)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring private message with invalid conversation_id=%r", conversation_id)
+            return None
+
+    message_source = "onebot_event" if is_self else "inbound"
 
     # Detect self-sent messages
     message_array = data.get("message", [])
@@ -111,9 +323,10 @@ def parse_message(data):
             "files": [],
             "created_at": data.get("time"),
             "is_self": is_self,
+            "message_source": message_source,
+            "message_structure": [],
         }
 
-    sender = data.get("sender", {})
     result = {
         "group_id": storage_group_id,
         "sender_id": sender_id,
@@ -130,6 +343,7 @@ def parse_message(data):
         "files": [],
         "created_at": data.get("time"),
         "is_self": is_self,
+        "message_source": message_source,
     }
 
     text_parts = []
@@ -188,12 +402,28 @@ def parse_message(data):
             _append_with_sep(plain_text_parts, at_text)
             structure.append({"type": "at", "qq": qq, "name": label})
         elif seg_type == "face":
-            face_id = seg_data.get("id", "")
+            face_id = str(seg_data.get("id", "")).strip()
+            face_url = seg_data.get("url", "")
+            result["files"].append({
+                "type": "face",
+                "id": face_id,
+                "file": f"face_{face_id}",
+                "url": face_url,
+            })
             text_parts.append(f"[表情:{face_id}]" if face_id else "[表情]")
             structure.append({"type": "face", "id": face_id})
         elif seg_type == "mface":
             summary = seg_data.get("summary", "")
-            emoji_id = seg_data.get("emoji_id", "")
+            emoji_id = str(seg_data.get("emoji_id", "")).strip()
+            mface_url = seg_data.get("url", "")
+            mface_file = seg_data.get("file", "") or (f"mface_{emoji_id}" if emoji_id else "mface")
+            result["files"].append({
+                "type": "mface",
+                "file": mface_file,
+                "url": mface_url,
+                "emoji_id": emoji_id,
+                "summary": summary,
+            })
             if summary:
                 text_parts.append(f"[贴纸: {summary}]")
             elif emoji_id:
@@ -238,23 +468,25 @@ def parse_message(data):
                 text_parts.append("[转发消息]")
                 structure.append({"type": "node"})
         elif seg_type == "json":
-            raw = seg_data.get("data", "")
-            if isinstance(raw, dict):
-                raw = _json.dumps(raw, ensure_ascii=False)
-            parsed = _try_parse_json(raw)
-            if parsed:
-                text_parts.append(f"[卡片: {parsed}]")
+            raw = seg_data.get("data", "") if isinstance(seg_data, dict) else seg_data
+            card = _normalize_card(raw, "json")
+            if card:
+                text_parts.append(f"[卡片] {card['summary']}" if card["summary"] else "[卡片]")
+                _append_with_sep(plain_text_parts, card["summary"])
+                structure.append(card)
             else:
-                text_parts.append(f"[卡片: {str(raw)[:200]}]" if raw else "[卡片]")
-            structure.append({"type": "json", "summary": parsed or str(raw)[:200]})
+                text_parts.append("[卡片]")
+                structure.append({"type": "card", "card_type": "json", "summary": ""})
         elif seg_type == "miniapp":
-            raw = seg_data.get("data", "")
-            parsed = _try_parse_json(raw)
-            if parsed:
-                text_parts.append(f"[小程序: {parsed}]")
+            raw = seg_data.get("data", "") if isinstance(seg_data, dict) else seg_data
+            card = _normalize_card(raw, "miniapp")
+            if card:
+                text_parts.append(f"[小程序] {card['summary']}" if card["summary"] else "[小程序]")
+                _append_with_sep(plain_text_parts, card["summary"])
+                structure.append(card)
             else:
-                text_parts.append(f"[小程序: {str(raw)[:200]}]" if raw else "[小程序]")
-            structure.append({"type": "miniapp", "summary": parsed or str(raw)[:200]})
+                text_parts.append("[小程序]")
+                structure.append({"type": "card", "card_type": "miniapp", "summary": ""})
         elif seg_type == "markdown":
             content = seg_data.get("content", "")
             text_parts.append(content if content else "[Markdown]")
@@ -302,6 +534,46 @@ def parse_message(data):
     return result
 
 
+def apply_forward_content(parsed, messages, forward_id=None, force=False):
+    if not isinstance(parsed, dict) or not isinstance(messages, list) or not messages:
+        return False
+
+    nested_lines, nested_structure = _parse_forward_content(messages, depth=1)
+    if not nested_structure:
+        return False
+
+    replaced = False
+    structure = []
+    for part in parsed.get("message_structure", []):
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "forward"
+            and (force or not part.get("children"))
+            and (forward_id is None or str(part.get("id")) == str(forward_id))
+        ):
+            expanded = dict(part)
+            expanded["children"] = nested_structure
+            structure.append(expanded)
+            replaced = True
+        else:
+            structure.append(part)
+    if not replaced:
+        return False
+
+    rendered = "[聊天记录]\n" + "\n".join(nested_lines)
+    content = str(parsed.get("message_content") or "")
+    if force and content.lstrip().startswith("[聊天记录]"):
+        parsed["message_content"] = rendered
+    elif "[转发消息]" in content:
+        parsed["message_content"] = content.replace("[转发消息]", rendered, 1)
+    elif "[聊天记录]" not in content:
+        parsed["message_content"] = f"{content}\n{rendered}".strip()
+    parsed["plain_text_content"] = re.sub(r"\s+", " ", parsed["message_content"]).strip()
+    parsed["message_structure"] = structure
+    parsed["_forward_content"] = messages
+    return True
+
+
 def _parse_forward_content(messages, depth=0):
     """Recursively parse nested forwarded messages into readable lines and structure."""
     lines = []
@@ -313,18 +585,19 @@ def _parse_forward_content(messages, depth=0):
             if isinstance(sender, dict):
                 nickname = sender.get("nickname", "") or sender.get("card", "") or str(sender.get("user_id", ""))
             msg_content = msg.get("content") or msg.get("message", "")
+            nested_parsed = None
             if isinstance(msg_content, list):
-                nested_parsed = {
+                nested_message = {
                     "message_type": "group",
                     "message": msg_content,
                     "sender": sender,
-                    "group_id": None,
+                    "group_id": 0,
                     "user_id": sender.get("user_id") if isinstance(sender, dict) else None,
                     "message_id": "",
                 }
-                parsed = parse_message(nested_parsed)
-                msg_content = parsed["message_content"]
-                child_structure = parsed.get("message_structure", [])
+                nested_parsed = parse_message(nested_message) or {}
+                msg_content = nested_parsed.get("message_content", "")
+                child_structure = nested_parsed.get("message_structure", [])
             elif isinstance(msg_content, str):
                 child_structure = [{"type": "text", "text": msg_content}]
             else:
@@ -335,7 +608,14 @@ def _parse_forward_content(messages, depth=0):
             lines.append(_indent(rendered, "  " * depth) if depth else rendered)
             structure.append({
                 "nickname": nickname,
+                "user_id": sender.get("user_id") if isinstance(sender, dict) else None,
                 "content": msg_content,
+                "plain_text_content": (
+                    nested_parsed.get("plain_text_content", "")
+                    if nested_parsed is not None
+                    else msg_content
+                ),
                 "children": child_structure,
+                "files": nested_parsed.get("files", []) if nested_parsed is not None else [],
             })
     return lines, structure

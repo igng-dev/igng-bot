@@ -8,9 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 class OneBotClient:
-    def __init__(self, config, message_callback):
+    def __init__(self, config, message_callback, recall_callback=None):
         self.config = config
         self.message_callback = message_callback
+        self.recall_callback = recall_callback
         self.ws = None
         self._running = False
         self.self_id = None
@@ -55,7 +56,8 @@ class OneBotClient:
             self.ws.close()
 
     def _connect(self):
-        headers = {"Authorization": f"Bearer {self.config.ONEBOT_ACCESS_TOKEN}"}
+        access_token = str(getattr(self.config, "ONEBOT_ACCESS_TOKEN", "") or "").strip()
+        headers = [f"Authorization: Bearer {access_token}"] if access_token else []
         self.ws = websocket.WebSocketApp(
             self.config.ONEBOT_WS_URL,
             header=headers,
@@ -109,12 +111,40 @@ class OneBotClient:
                 group_id = data.get("group_id", "?")
                 is_self = post_type == "message_sent" or data.get("message_sent_type") == "self"
                 if is_self and not self.self_id:
-                    self.self_id = data.get("user_id") or data.get("self_id")
+                    self.self_id = data.get("self_id") or data.get("user_id")
+                # Some OneBot implementations omit self_id from message_sent
+                # events even though it was provided by the lifecycle event.
+                # Pass the known identity downstream so persistence can use the
+                # bot QQ rather than a private-message recipient.
+                if self.self_id not in (None, ""):
+                    data.setdefault("self_id", self.self_id)
                 logger.info(
                     f"WS recv: post_type={post_type} message_type={msg_type} "
                     f"group_id={group_id} self={is_self}"
                 )
                 self.message_callback(data)
+            elif post_type == "notice" and data.get("notice_type") == "group_recall":
+                group_id = data.get("group_id")
+                message_id = data.get("message_id")
+                if group_id in (None, "") or message_id in (None, ""):
+                    logger.warning(
+                        "Ignoring malformed group_recall notice: group_id=%r message_id=%r",
+                        group_id,
+                        message_id,
+                    )
+                    return
+                logger.info(
+                    "WS recv: post_type=notice notice_type=group_recall "
+                    "group_id=%s message_id=%s operator_id=%s user_id=%s",
+                    group_id,
+                    message_id,
+                    data.get("operator_id"),
+                    data.get("user_id"),
+                )
+                if self.recall_callback is not None:
+                    self.recall_callback(data)
+                else:
+                    logger.debug("No group recall callback configured; notice ignored")
             else:
                 logger.debug(f"WS recv: post_type={post_type} (ignored)")
 
