@@ -1,16 +1,30 @@
-"""LLM 调用日志存储 — call_logs 表"""
+"""LLM 调用日志存储 — call_logs 表，并把每次调用镜像到站点 AI 记录库
+(ai_jobs / ai_job_attempts)。"""
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiomysql
 
+from .config import Config
 from .user_config_db import DB_CONFIG
 
 logger = logging.getLogger("yunying_chat")
 
+SITE_AI_DB_CONFIG = {
+    "host": Config.SITE_AI_DB_HOST,
+    "port": Config.SITE_AI_DB_PORT,
+    "user": Config.SITE_AI_DB_USER,
+    "password": Config.SITE_AI_DB_PASSWORD,
+    "db": Config.SITE_AI_DB_NAME,
+    "charset": "utf8mb4",
+}
+SITE_AI_SERVICE = "igng-bot"
+SITE_AI_OPERATOR_TYPE = "BOT"
+
 _pool = None
+_site_pool = None
 
 
 async def _get_pool():
@@ -137,9 +151,148 @@ async def insert_call_log(
             return cur.lastrowid
 
 
+def _extract_tokens(token_usage: dict | None) -> tuple[int, int, int, int]:
+    """从 OpenAI 风格 usage 中解析 (prompt, completion, total, cached) token。"""
+    usage = token_usage if isinstance(token_usage, dict) else {}
+    prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    total = int(usage.get("total_tokens") or (prompt + completion))
+    cached = 0
+    cache_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+    if isinstance(cache_details, dict):
+        cached += int(cache_details.get("cached_tokens") or 0)
+    cached += int(usage.get("prompt_cache_hit_tokens") or 0)
+    return prompt, completion, total, cached
+
+
+async def _get_site_pool():
+    global _site_pool
+    if _site_pool is None:
+        _site_pool = await aiomysql.create_pool(
+            host=SITE_AI_DB_CONFIG["host"],
+            port=SITE_AI_DB_CONFIG["port"],
+            user=SITE_AI_DB_CONFIG["user"],
+            password=SITE_AI_DB_CONFIG["password"],
+            db=SITE_AI_DB_CONFIG["db"],
+            charset=SITE_AI_DB_CONFIG["charset"],
+            autocommit=True,
+            maxsize=3,
+            minsize=1,
+        )
+    return _site_pool
+
+
+async def mirror_call_to_site(
+    *,
+    call_log_id: int | None,
+    group_id: str = "",
+    sender_id: str = "",
+    sender_name: str = "",
+    message_text: str = "",
+    call_type: str = "chat",
+    model: str = "",
+    system_prompt: str = "",
+    user_prompt: str = "",
+    response_content: str = "",
+    token_usage: dict = None,
+    duration_ms: int = 0,
+    success: bool = True,
+    error_message: str = "",
+    provider: str = "local",
+) -> None:
+    """把一次 LLM 调用镜像写入站点 AI 记录库。失败只记日志，绝不抛出。"""
+    if not Config.SITE_AI_RECORDS_ENABLED:
+        return
+    if call_log_id is None:
+        logger.warning("[云萤] 跳过站点 AI 记录镜像：缺少 call_logs id")
+        return
+    try:
+        prompt_tokens, completion_tokens, total_tokens, cached_tokens = _extract_tokens(
+            token_usage
+        )
+        ended_at = datetime.now()
+        started_at = ended_at - timedelta(milliseconds=max(0, int(duration_ms or 0)))
+        strategy = json.dumps(
+            {
+                "bot_call_log_id": call_log_id,
+                "group_id": str(group_id or ""),
+                "sender_id": str(sender_id or ""),
+                "sender_name": sender_name or "",
+                "message_text": (message_text or "")[:2000],
+                "duration_ms": int(duration_ms or 0),
+            },
+            ensure_ascii=False,
+        )
+        pool = await _get_site_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """INSERT INTO ai_jobs
+                       (service, task_type, task_key, operator_type, operator_id,
+                        strategy, system_prompt, user_prompt, status, attempt_count,
+                        prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                        round, last_error, final_result)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        SITE_AI_SERVICE,
+                        call_type,
+                        str(call_log_id),
+                        SITE_AI_OPERATOR_TYPE,
+                        None,
+                        strategy,
+                        system_prompt or None,
+                        user_prompt or None,
+                        "success" if success else "failed",
+                        1,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        cached_tokens,
+                        0,
+                        error_message[:2000] if error_message else None,
+                        response_content or None,
+                    ),
+                )
+                job_id = cur.lastrowid
+                await cur.execute(
+                    """INSERT INTO ai_job_attempts
+                       (job_id, provider, model, attempt_no, round, is_fallback,
+                        started_at, ended_at, ok, prompt_tokens, completion_tokens,
+                        total_tokens, cached_tokens, error_message, raw_response,
+                        selected)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        job_id,
+                        "local",
+                        model or None,
+                        1,
+                        0,
+                        0,
+                        started_at,
+                        ended_at,
+                        1 if success else 0,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        cached_tokens,
+                        error_message[:2000] if error_message else None,
+                        response_content or None,
+                        1,
+                    ),
+                )
+    except Exception:
+        logger.exception(
+            "[云萤] 站点 AI 记录镜像写入失败 call_log_id=%s", call_log_id
+        )
+
+
 async def close_call_log_pool():
-    global _pool
+    global _pool, _site_pool
     if _pool:
         _pool.close()
         await _pool.wait_closed()
         _pool = None
+    if _site_pool:
+        _site_pool.close()
+        await _site_pool.wait_closed()
+        _site_pool = None

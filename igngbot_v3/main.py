@@ -10,21 +10,25 @@ from concurrent.futures import Future
 from logging.handlers import RotatingFileHandler
 
 from .call_log_db import close_call_log_pool, ensure_call_logs_table
-from .content_review import ContentReviewer
 from .chat_service import ChatService, MessageContext
 from .config import Config
 from .db import DBHandler
-from .media_repository_worker import MediaRepositoryWorker
-from .message_parser import parse_message
+from .message_parser import apply_forward_content, parse_message
 from .mc_ticket_notifications import McTicketNotifier
-from .system_prompt_commands import SystemPromptCommandHandler
 from .onebot_client import OneBotClient
-from .onebot_api import send_group_text
+from .onebot_api import (
+    OUTBOUND_SOURCE_AUTO_PLUS_ONE,
+    OUTBOUND_SOURCE_COMMAND,
+    get_forward_msg,
+    send_group_text,
+)
 from .storage import StorageHandler
+from .system_prompt_store import SystemPromptStore
 from .media_text import MediaTextExtractor, MediaTextResult, append_media_text
+from .message_media import hydrate_structure_media
 from .timeutil import unix_to_utc_naive
 from .user_config_db import close_pool as close_user_config_pool
-from .user_config_db import ensure_group_configs_table, ensure_user_config_table
+from .user_config_db import ensure_group_configs_table
 
 
 def _build_log_handlers():
@@ -52,8 +56,7 @@ logger = logging.getLogger("igngbot_v3")
 
 class App:
     _HELP_CATEGORIES = {
-        "聊天": "群聊模式和性格设置",
-        "系统提示词": "聊天模式附加系统提示词",
+        "聊天": "群聊模式和自然对话",
         "管理": "通知和群聊总结等管理员功能",
     }
 
@@ -61,30 +64,7 @@ class App:
         "聊天": (
             "聊天帮助\n"
             "聊天模式使用本地模型；在群聊中负责自然对话。\n"
-            "/聊天模式\n切换当前群聊天模式，仅群主、群管理员或 bot 管理员可用。\n"
-            "/性格\n查看当前性格和可用性格。\n"
-            "/性格 <名称>\n切换当前群性格，仅管理员可用。"
-        ),
-        "系统提示词": (
-            "系统提示词帮助\n"
-            "本功能仅影响聊天模式。用户附加的提示词会拼接到 bot 系统提示词中段，"
-            "对所有群、所有聊天模式回复全局生效。\n"
-            "/系统提示词 附加 <内容>\n"
-            "提交一条附加系统提示词。不会直接入库，先调用云端 LLM 审核："
-            "检查是否合法（不得诱导违规行为），以及是否有意义（整活可以，乱填不行）。"
-            "审核通过后才会启用。\n"
-            "/系统提示词 列表\n"
-            "查看当前已拼接、处于启用状态的全部附加系统提示词（含 ID 与提交者）。\n"
-            "/系统提示词 修改 #id <内容>\n"
-            "修改自己提交的附加提示词；bot 管理员可修改任何人的。"
-            "修改同样需要审核，不通过则继续使用原版本。\n"
-            "/系统提示词 关闭 #id\n"
-            "关闭自己提交的附加提示词；bot 管理员可关闭任何人的。关闭后不再参与拼接。\n"
-            "示例：\n"
-            "/系统提示词 附加 偶尔说一句神了\n"
-            "/系统提示词 列表\n"
-            "/系统提示词 修改 #3 更毒舌一点\n"
-            "/系统提示词 关闭 #3"
+            "/聊天模式\n切换当前群聊天模式，仅群主、群管理员或 bot 管理员可用。"
         ),
         "管理": (
             "管理帮助\n"
@@ -101,14 +81,19 @@ class App:
     def __init__(self):
         self.config = Config()
         self.db = DBHandler(self.config)
-        self.chat_service = ChatService(self.config, self.db)
+        self.system_prompt_store = SystemPromptStore(self.config, self.db)
+        # Storage is constructed first so ChatService can re-anchor persisted
+        # media paths onto the current attachment root when building multimodal
+        # prompts (rows written on the old host carry a different prefix).
         self.storage = StorageHandler(self.config)
+        self.chat_service = ChatService(
+            self.config,
+            self.db,
+            system_prompt_store=self.system_prompt_store,
+            storage=self.storage,
+        )
         self.media_text = MediaTextExtractor(self.config)
-        self.reviewer = ContentReviewer(self.config)
-        self.media_repository = MediaRepositoryWorker(self.config, self.db)
-        self.mc_ticket_notifier = McTicketNotifier(self.config)
-        self.system_prompt_commands = SystemPromptCommandHandler(self.config, self.db)
-        self.content_review_groups = []
+        self.mc_ticket_notifier = McTicketNotifier(self.config, db=self.db)
         self._chat_workers = {}
         self._chat_pending = {}
         self._chat_pending_boundaries = {}
@@ -122,24 +107,28 @@ class App:
             daemon=True,
         )
 
+    async def _send_group_text(
+        self,
+        _config,
+        group_id,
+        text,
+        *,
+        message_source=OUTBOUND_SOURCE_COMMAND,
+    ):
+        """Send a command/automatic reply and persist it in message_logs."""
+        return await send_group_text(
+            self.config,
+            group_id,
+            text,
+            db=self.db,
+            message_source=message_source,
+        )
+
     def startup(self):
         self.db.connect()
         self.db.init_table()
         self.db.init_group_configs_table()
-        if self.config.CONTENT_REVIEW_ENABLED:
-            self.content_review_groups = self.db.get_content_review_groups()
-            for legacy_gid in (1000000004, 1000000005):
-                if legacy_gid not in self.content_review_groups:
-                    self.db.set_content_review(legacy_gid, True)
-                    self.content_review_groups.append(legacy_gid)
-        else:
-            self.content_review_groups = []
-            logger.info("Content review disabled by configuration")
         self.storage.check_available()
-        if self.config.CONTENT_REVIEW_ENABLED:
-            self.reviewer.mark_all_existing_approved()
-            self.reviewer.start()
-        self.media_repository.start()
         self.loop_thread.start()
         self._run_coro_sync(self._startup_async()).result()
 
@@ -151,7 +140,8 @@ class App:
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     async def _startup_async(self):
-        await ensure_user_config_table()
+        await self.system_prompt_store.initialize()
+        self.system_prompt_store.start()
         await ensure_group_configs_table()
         await ensure_call_logs_table()
         await close_user_config_pool()
@@ -162,18 +152,101 @@ class App:
         future = self._run_coro_sync(self._handle_raw_message_async(data))
         future.add_done_callback(self._log_future_error)
 
+    def handle_recall_event(self, data: dict):
+        """Schedule a OneBot group-recall notice without entering message handling."""
+        future = self._run_coro_sync(self._handle_recall_event_async(data))
+        future.add_done_callback(self._log_recall_future_error)
+
     def _log_future_error(self, future: Future):
         try:
             future.result()
         except Exception:
             logger.exception("Message processing failed")
 
+    def _log_recall_future_error(self, future: Future):
+        try:
+            future.result()
+        except Exception:
+            logger.exception("Recall event processing failed")
+
+    async def _handle_recall_event_async(self, data: dict):
+        if not isinstance(data, dict):
+            logger.warning("Ignoring malformed group_recall event: expected object, got %r", type(data))
+            return None
+
+        raw_group_id = data.get("group_id")
+        raw_message_id = data.get("message_id")
+        if raw_group_id in (None, "") or raw_message_id in (None, ""):
+            logger.warning(
+                "Ignoring malformed group_recall event: group_id=%r message_id=%r",
+                raw_group_id,
+                raw_message_id,
+            )
+            return None
+        try:
+            group_id = int(raw_group_id)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring malformed group_recall event: invalid group_id=%r", raw_group_id)
+            return None
+
+        message_id = str(raw_message_id).strip()
+        if not message_id:
+            logger.warning("Ignoring malformed group_recall event: empty message_id")
+            return None
+
+        raw_operator_id = data.get("operator_id")
+        operator_id = None
+        if raw_operator_id not in (None, ""):
+            try:
+                operator_id = int(raw_operator_id)
+            except (TypeError, ValueError):
+                # operator_id is auxiliary metadata; do not drop an otherwise
+                # valid recall just because the client sent it malformed.
+                logger.warning(
+                    "Ignoring invalid group_recall operator_id=%r for group=%s msg=%s",
+                    raw_operator_id,
+                    group_id,
+                    message_id,
+                )
+
+        result = self.db.mark_message_recalled(
+            group_id=group_id,
+            msg_id=message_id,
+            recall_operator_id=operator_id,
+            recalled_at=unix_to_utc_naive(data.get("time")),
+        )
+        logger.info(
+            "Recall event applied: group=%s msg=%s status=%s",
+            group_id,
+            message_id,
+            result.get("status") if isinstance(result, dict) else result,
+        )
+        return result
+
     async def _handle_raw_message_async(self, data: dict):
         parsed = parse_message(data)
         if parsed is None:
             return
+        # OneBot should always provide message_id for message events. Do not
+        # send an empty ID to the database: it would fail the schema contract
+        # and could make malformed self events look like duplicate messages.
+        if not str(parsed.get("msg_id") or "").strip():
+            logger.warning(
+                "Ignoring message event without message_id: type=%s conversation=%s self=%s",
+                parsed.get("conversation_type"),
+                parsed.get("group_id"),
+                parsed.get("is_self"),
+            )
+            return
 
-        self.db.ensure_group_exists(parsed["group_id"])
+        forward_id = str(parsed.get("_forward_id") or "").strip()
+        if forward_id and not parsed.get("_forward_content"):
+            forward_content = await get_forward_msg(self.config, forward_id)
+            if forward_content:
+                apply_forward_content(parsed, forward_content, forward_id=forward_id)
+
+        if parsed.get("conversation_type") == "group":
+            self.db.ensure_group_exists(parsed["group_id"])
         if parsed.get("is_self") and self.db.get_message_by_msg_id(
             parsed["group_id"], parsed["msg_id"]
         ):
@@ -188,18 +261,44 @@ class App:
         extracted_media = []
         if parsed.get("files"):
             for file_info in parsed["files"]:
-                if not file_info.get("url"):
+                storage_res = None
+                if file_info.get("type") == "face":
+                    face_id = file_info.get("id")
+                    if face_id:
+                        storage_res = await asyncio.to_thread(
+                            self.storage.store_face_if_missing,
+                            face_id,
+                            file_info.get("url", ""),
+                        )
+                elif file_info.get("url"):
+                    name = file_info.get("file") or file_info.get("name", "unknown")
+                    file_name = f"{parsed['msg_id']}_{name}"
+                    storage_res = await asyncio.to_thread(
+                        self.storage.download_and_store,
+                        file_info["url"],
+                        parsed["group_id"],
+                        file_name,
+                        file_info["type"],
+                    )
+                else:
                     continue
-                name = file_info.get("file") or file_info.get("name", "unknown")
-                file_name = f"{parsed['msg_id']}_{name}"
-                stored_path = self.storage.download_and_store(
-                    file_info["url"],
-                    parsed["group_id"],
-                    file_name,
-                    file_info["type"],
-                )
+
+                if not storage_res:
+                    continue
+
+                if isinstance(storage_res, dict):
+                    stored_path = storage_res.get("stored_path")
+                    thumb_path = storage_res.get("thumb_path")
+                    meta = storage_res.get("meta") or {}
+                else:
+                    stored_path = str(storage_res)
+                    thumb_path = None
+                    meta = {}
+
                 if stored_path:
                     file_info["stored_path"] = stored_path
+                    if thumb_path:
+                        file_info["thumb_path"] = thumb_path
                     media_result = None
                     try:
                         if file_info["type"] == "image":
@@ -243,10 +342,20 @@ class App:
                         "original_file": file_info.get("file", ""),
                         "original_url": file_info.get("url", ""),
                         "stored_path": stored_path,
+                        "thumb_path": thumb_path,
                         "name": file_info.get("name", ""),
                         "transcript": file_info.get("transcript", ""),
                         "ocr_text": file_info.get("ocr_text", ""),
                     }
+                    if meta.get("width"):
+                        attachment["width"] = meta["width"]
+                        attachment["height"] = meta.get("height")
+                    if meta.get("thumb_width"):
+                        attachment["thumb_width"] = meta["thumb_width"]
+                        attachment["thumb_height"] = meta.get("thumb_height")
+                    if "is_animated" in meta:
+                        attachment["is_animated"] = meta["is_animated"]
+
                     if media_result:
                         attachment["text_extraction_status"] = media_result.status
                         attachment["text_extraction_backend"] = media_result.backend
@@ -258,6 +367,28 @@ class App:
                         audio_file_path = stored_path
 
         append_media_text(parsed, extracted_media)
+        # Keep the message handler usable in lightweight compensation/test
+        # contexts where only the database dependency is constructed.  The
+        # normal App initializer always provides both services; without them
+        # there is simply no nested card/forward media to hydrate.
+        storage = getattr(self, "storage", None)
+        media_text = getattr(self, "media_text", None)
+        if storage is not None and media_text is not None:
+            nested_media_text = await hydrate_structure_media(
+                storage,
+                media_text,
+                parsed.get("message_structure", []),
+                parsed["group_id"],
+                parsed["msg_id"],
+            )
+        else:
+            nested_media_text = []
+        if nested_media_text:
+            parsed["plain_text_content"] = " ".join(
+                part
+                for part in (parsed.get("plain_text_content", ""), *nested_media_text)
+                if str(part).strip()
+            ).strip()
         content = parsed.get("message_content", "").strip()
         normalized_content = self._normalize_command_text(content)
 
@@ -279,9 +410,25 @@ class App:
                     else None
                 ),
                 is_self=parsed.get("is_self", False),
+                message_source=parsed.get("message_source"),
                 audio_file_path=audio_file_path,
                 audio_transcript=parsed.get("audio_transcript", ""),
             )
+
+        stored_message = self.db.get_message_by_msg_id(parsed["group_id"], parsed["msg_id"])
+        if stored_message and stored_message.get("is_recalled"):
+            logger.info(
+                "Skipping recalled message after persistence: group=%s msg=%s",
+                parsed["group_id"],
+                parsed["msg_id"],
+            )
+            return
+
+        # Private messages are persisted for audit/history, but the current bot
+        # command/chat flow is group-scoped. Private outbound messages sent by
+        # the notifier are recorded directly by onebot_api.py.
+        if parsed.get("conversation_type") != "group":
+            return
 
         if self._is_disabled_mc_ticket_command(normalized_content):
             logger.info(
@@ -298,10 +445,10 @@ class App:
                 lines = ["帮助菜单："]
                 lines.extend(f"{name}：{description}" for name, description in self._HELP_CATEGORIES.items())
                 lines.append("输入 /help <子菜单名> 查看具体指令。")
-                await send_group_text(self.config, parsed["group_id"], "\n".join(lines))
+                await self._send_group_text(self.config, parsed["group_id"], "\n".join(lines))
             else:
                 detail = self._HELP_DETAILS.get(category)
-                await send_group_text(
+                await self._send_group_text(
                     self.config,
                     parsed["group_id"],
                     detail or "未找到该帮助分类，请输入 /help 查看分类。",
@@ -318,80 +465,32 @@ class App:
             target_id = user_group_match.group(2)
             if requested_group and target_id:
                 if not self.db.is_bot_admin(parsed["sender_id"]):
-                    await send_group_text(self.config, parsed["group_id"], "只有 bot 管理员可以设置用户组。")
+                    await self._send_group_text(self.config, parsed["group_id"], "只有 bot 管理员可以设置用户组。")
                 else:
                     self.db.set_user_group(target_id, requested_group.lower())
-                    await send_group_text(
+                    await self._send_group_text(
                         self.config,
                         parsed["group_id"],
                         f"IGNG 用户 {target_id} 已设置为 {requested_group.lower()} 组。",
                     )
             else:
                 group_name = self.db.get_user_group(parsed["sender_id"])
-                await send_group_text(self.config, parsed["group_id"], f"当前用户组：{group_name}")
+                await self._send_group_text(self.config, parsed["group_id"], f"当前用户组：{group_name}")
             return
 
         is_command = False
-
-
-        if content and not is_command:
-            if await self.system_prompt_commands.handle(parsed, normalized_content):
-                is_command = True
 
         if content and not is_command:
             if re.search(r"/聊天模式", normalized_content):
                 role = parsed.get("sender_role", "member")
                 if role in ("owner", "admin") or self.db.is_bot_admin(parsed["sender_id"]):
                     new_state = self.db.toggle_chat_mode(parsed["group_id"])
-                    await send_group_text(
+                    await self._send_group_text(
                         self.config,
                         parsed["group_id"],
                         "聊天模式已开启" if new_state else "聊天模式已关闭",
                     )
                 is_command = True
-
-            personality_match = re.fullmatch(r"/性格(?:\s+(.+))?", normalized_content)
-            if personality_match:
-                requested_name = (personality_match.group(1) or "").strip()
-                can_manage_personality = (
-                    self.db.is_bot_admin(parsed["sender_id"])
-                    or
-                    parsed.get("sender_role") in ("owner", "admin")
-                )
-                if requested_name and can_manage_personality:
-                    if self.db.activate_personality(parsed["group_id"], requested_name):
-                        await send_group_text(
-                            self.config,
-                            parsed["group_id"],
-                            f"当前性格已切换为：{requested_name}",
-                        )
-                    else:
-                        names = [row["name"] for row in self.db.list_personalities()]
-                        await send_group_text(
-                            self.config,
-                            parsed["group_id"],
-                            f"没有找到性格「{requested_name}」。可选：{'、'.join(names)}",
-                        )
-                elif requested_name and not can_manage_personality:
-                    await send_group_text(
-                        self.config,
-                        parsed["group_id"],
-                        "只有管理员可以切换性格。",
-                    )
-                else:
-                    current = self.db.get_active_personality(parsed["group_id"])
-                    names = [row["name"] for row in self.db.list_personalities()]
-                    await send_group_text(
-                        self.config,
-                        parsed["group_id"],
-                        f"当前性格：{current['name'] if current else '未设置'}；可选：{'、'.join(names)}",
-                    )
-                is_command = True
-
-
-
-        if self.config.CONTENT_REVIEW_ENABLED and parsed["group_id"] in self.content_review_groups:
-            self.reviewer.trigger()
 
         if is_command:
             return
@@ -405,9 +504,7 @@ class App:
             return
 
         group_config = self.db.get_group_config(parsed["group_id"]) or {}
-        if not group_config.get("is_chat_mode"):
-            return
-
+        chat_mode_enabled = bool(group_config.get("is_chat_mode"))
         textual_direct_alias = self._has_textual_direct_alias(parsed)
         direct_mention = (
             self._is_direct_mention(parsed)
@@ -422,7 +519,17 @@ class App:
             # Keep the structured field useful to the model even when a client
             # sent a plain-text @云萤/莹宝 instead of a real OneBot at segment.
             mentioned_user_ids.add(str(self.config.BOT_USER_ID))
-        if self._should_skip_non_direct_chat_message(parsed, direct_mention, mentioned_user_ids):
+        # Direct requests must work regardless of the optional proactive chat
+        # mode. The mode only controls whether ordinary group messages enter
+        # the LLM decision flow.
+        if not direct_mention and not chat_mode_enabled:
+            return
+        if self._should_skip_non_direct_chat_message(
+            parsed,
+            direct_mention,
+            mentioned_user_ids,
+            chat_mode_enabled,
+        ):
             logger.info(
                 "Skipping non-directed chat message in group %s: msg=%s mentions=%s files=%s",
                 parsed["group_id"], parsed["msg_id"], sorted(mentioned_user_ids), bool(parsed.get("files")),
@@ -449,10 +556,12 @@ class App:
             return False
 
         previous = self.db.get_previous_non_self_message(group_id, parsed["msg_id"])
-        previous_text = self._normalize_plus_one_text(
-            (previous or {}).get("message_content") or (previous or {}).get("plain_text_content") or "",
-            None,
-        )
+        previous_text = ""
+        if previous and not previous.get("is_recalled"):
+            previous_text = self._normalize_plus_one_text(
+                previous.get("message_content") or previous.get("plain_text_content") or "",
+                None,
+            )
         active_text = self._plus_one_states.get(group_id)
 
         if active_text == clean_text:
@@ -466,7 +575,12 @@ class App:
         if previous_text == clean_text:
             self._plus_one_states[group_id] = clean_text
             logger.info("Auto +1 triggered in group %s: %s", group_id, clean_text[:50])
-            await send_group_text(self.config, group_id, clean_text)
+            await self._send_group_text(
+                self.config,
+                group_id,
+                clean_text,
+                message_source=OUTBOUND_SOURCE_AUTO_PLUS_ONE,
+            )
             return True
 
         return False
@@ -533,7 +647,7 @@ class App:
                 history_start_msg_id = self._chat_pending_boundaries.pop(group_id, None)
 
                 group_config = self.db.get_group_config(group_id) or {}
-                if not group_config.get("is_chat_mode"):
+                if not group_config.get("is_chat_mode") and not ctx.direct_mention:
                     continue
 
                 if not ctx.direct_mention:
@@ -549,7 +663,7 @@ class App:
 
                 logger.info("Starting chat analysis for group %s msg %s", group_id, ctx.msg_id)
                 decision = await self.chat_service.maybe_reply(ctx, history_start_msg_id)
-                if decision.get("should_reply") or decision.get("affinity_updates"):
+                if decision.get("should_reply"):
                     if group_id in self._plus_one_states:
                         self._plus_one_queued_decisions.setdefault(group_id, []).append((ctx, decision))
                         logger.info("Queued bot reply during auto +1 in group %s", group_id)
@@ -620,14 +734,17 @@ class App:
         parsed: dict,
         direct_mention: bool,
         mentioned_user_ids: set[str],
+        chat_mode_enabled: bool = False,
     ) -> bool:
         if direct_mention:
             return False
-        # In group chat, a question or a topic continuation is still a message
-        # between group members unless the sender explicitly addressed Yunying.
-        # Do this deterministically; the small chat model is not a reliable
-        # addressee classifier.
-        return True
+        # Do not intercept a message explicitly addressed to another QQ user.
+        # Plain topic messages may enter the LLM only when the admin enabled
+        # proactive chat mode; the model then decides whether a reply adds
+        # value, with the worker cooldown preventing reply storms.
+        if mentioned_user_ids:
+            return True
+        return not chat_mode_enabled
 
     def _normalize_command_text(self, text: str) -> str:
         clean_text = (text or "").strip()
@@ -651,7 +768,11 @@ class App:
 def main():
     app = App()
     app.startup()
-    client = OneBotClient(app.config, app.handle_raw_message)
+    client = OneBotClient(
+        app.config,
+        app.handle_raw_message,
+        app.handle_recall_event,
+    )
     logger.info("Starting IGNGbot v3 listener...")
     client.start()
 

@@ -2,8 +2,13 @@
 
 import json
 import logging
+import time
+
+from .call_log_db import insert_call_log, mirror_call_to_site
 
 logger = logging.getLogger(__name__)
+
+RECALLED_MESSAGE_PLACEHOLDER = "[消息已撤回]"
 
 
 def estimate_tokens(text: str) -> int:
@@ -15,6 +20,8 @@ def estimate_tokens(text: str) -> int:
 
 
 def message_tokens(row: dict) -> int:
+    if row.get("is_recalled"):
+        return estimate_tokens(RECALLED_MESSAGE_PLACEHOLDER) + 20
     content = row.get("message_content") or row.get("plain_text_content") or ""
     total = estimate_tokens(content) + 20
     attachments = row.get("attachments_json")
@@ -24,11 +31,23 @@ def message_tokens(row: dict) -> int:
         except json.JSONDecodeError:
             attachments = []
     for attachment in attachments or []:
-        if attachment.get("type") == "image":
+        if attachment.get("type") in ("image", "mface"):
             total += 765
         elif attachment.get("type") in ("audio", "record"):
             total += 500
     return total
+
+
+def format_context_message(row: dict, include_attachment_marker: bool = True) -> str:
+    """Return a safe representation of a stored message for model context."""
+    if row.get("is_recalled"):
+        return RECALLED_MESSAGE_PLACEHOLDER
+    content = row.get("message_content") or row.get("plain_text_content") or ""
+    if len(content) > 6000:
+        content = content[:6000] + "..."
+    if include_attachment_marker and row.get("attachments_json"):
+        content = f"{content} [包含附件/图片]"
+    return content
 
 
 class ContextManager:
@@ -126,21 +145,68 @@ class ContextManager:
         )
 
         self.db.mark_context_summary_status(group_id, "summarizing")
+        model_name = (
+            self.llm_options.get("model")
+            or getattr(self.config, "LLM_LOCAL_MODEL", "")
+            or self.config.OPENAI_CHAT_MODEL
+        )
+        request_started = time.perf_counter()
+        summary_text = ""
+        token_usage = None
+        error_message = ""
         try:
-            summary_text = await self.llm_client.generate_text(
-                system_prompt=self.summary_prompt,
-                user_prompt=summary_prompt,
-                max_tokens=self.config.CONTEXT_SUMMARY_MAX_TOKENS,
+            response_data = await self.llm_client.chat_completion(
+                messages=[
+                    {"role": "system", "content": self.summary_prompt},
+                    {"role": "user", "content": summary_prompt},
+                ],
                 temperature=0.2,
+                max_tokens=self.config.CONTEXT_SUMMARY_MAX_TOKENS,
                 **self.llm_options,
             )
-            if not summary_text.strip():
-                raise RuntimeError("summary model returned empty content")
-        except Exception:
+            choice = (response_data.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            summary_text = (message.get("content") or "").strip()
+            token_usage = response_data.get("usage")
+            if not summary_text:
+                error_message = "summary model returned empty content"
+        except Exception as exc:
             logger.exception(
                 "Context summary failed for group %s; falling back to safe clipped recent context",
                 group_id,
             )
+            summary_text = ""
+            error_message = str(exc).strip()[:2000] or exc.__class__.__name__
+        duration_ms = max(0, int(round((time.perf_counter() - request_started) * 1000)))
+        success = bool(summary_text)
+
+        call_log_id = await insert_call_log(
+            group_id=str(group_id),
+            message_text="",
+            call_type="summary",
+            model=model_name,
+            system_prompt=self.summary_prompt,
+            user_prompt=summary_prompt[:65535],
+            response_content=summary_text[:65535],
+            token_usage=token_usage,
+            duration_ms=duration_ms,
+            success=success,
+            error_message=error_message,
+        )
+        await mirror_call_to_site(
+            call_log_id=call_log_id,
+            group_id=str(group_id),
+            call_type="summary",
+            model=model_name,
+            system_prompt=self.summary_prompt,
+            user_prompt=summary_prompt[:65535],
+            response_content=summary_text[:65535],
+            token_usage=token_usage,
+            duration_ms=duration_ms,
+            success=success,
+            error_message=error_message,
+        )
+        if not success:
             self.db.mark_context_summary_status(group_id, "failed")
             return existing_summary, recent_rows
 
@@ -159,10 +225,6 @@ class ContextManager:
         lines = []
         for row in rows:
             sender = "云萤" if row.get("is_self") else str(row.get("sender_id"))
-            content = row.get("message_content") or row.get("plain_text_content") or ""
-            if len(content) > 6000:
-                content = content[:6000] + "..."
-            if row.get("attachments_json"):
-                content = f"{content} [包含附件/图片]"
+            content = format_context_message(row)
             lines.append(f"[{row.get('msg_id')}] {sender}: {content}")
         return "\n".join(lines)

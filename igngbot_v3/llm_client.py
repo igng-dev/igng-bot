@@ -44,14 +44,16 @@ class LLMClient:
         base_url: str | None = None,
         api_key: str | None = None,
         timeout: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
+        effort = reasoning_effort if reasoning_effort is not None else getattr(self.config, "LLM_REASONING_EFFORT", "low")
         payload = {
             "model": model or self.config.OPENAI_CHAT_MODEL,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": False,
-            "extra_body": {"reasoning_effort": "none"},
+            "extra_body": {"reasoning_effort": effort},
         }
         headers = {
             "Authorization": f"Bearer {api_key if api_key is not None else self.config.OPENAI_API_KEY}",

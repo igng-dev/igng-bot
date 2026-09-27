@@ -69,6 +69,7 @@ def cloud_chat_completion(config, messages, temperature=0.7, max_tokens=800):
     headers = {
         "Authorization": f"Bearer {config.OPENAI_API_KEY}",
         "Content-Type": "application/json",
+        "User-Agent": getattr(config, "LLM_USER_AGENT", "IGNGbot/3.0 (requests)"),
     }
     payload = {
         "model": config.OPENAI_CHAT_MODEL,
@@ -76,7 +77,7 @@ def cloud_chat_completion(config, messages, temperature=0.7, max_tokens=800):
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": False,
-        "extra_body": {"reasoning_effort": "none"},
+        "extra_body": {"reasoning_effort": getattr(config, "LLM_REASONING_EFFORT", "low")},
     }
     base_url = config.OPENAI_BASE_URL.rstrip("/")
     if base_url.endswith("/v1"):

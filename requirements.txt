@@ -5,3 +5,5 @@ pymysql>=1.1.0
 python-dotenv>=1.0.0
 requests>=2.32.0
 websocket-client>=1.8.0
+rapidocr-onnxruntime>=1.2.3
+faster-whisper>=1.1.0

@@ -1,0 +1,184 @@
+# IGNGbot full stack on the NAS.
+#
+# Everything the bot needs at runtime lives in this one compose project:
+#   bot      - the Python bot (built from this repository)
+#   napcat   - SnowLuma/NapCat QQ client exposing OneBot HTTP + WebSocket
+#   media    - signed read-only media delivery service for IGNG site previews
+#   frpc     - tunnel that publishes the media service to the public VPS
+#
+# The QQ login state lives in named volumes that were migrated from the old VM,
+# so no re-login / QR scan is required after cutover.
+
+services:
+  bot:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: ${BOT_IMAGE:-igngbot-v3:local}
+    # Images are built by deploy-nas.sh and imported; the NAS cannot reach a
+    # public registry, so never attempt an implicit pull.
+    pull_policy: never
+    container_name: ${BOT_CONTAINER_NAME:-igngbot-v3}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      MESSAGE_ROOT: /data/message_logs
+      LOCAL_STORAGE: /data/runtime
+      PROMPT_DIR: /app/prompts
+      SYSTEM_PROMPT_CACHE_DIR: /data/runtime/system_prompts
+      MEDIA_ASR_MODEL_DIR: /data/models
+      # The NAS cannot reach huggingface.co, so faster-whisper model downloads
+      # must go through the reachable mirror. Models cache to ./models and are
+      # then reused offline.
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      ONEBOT_WS_URL: ws://napcat:3001
+      ONEBOT_HTTP_URL: http://napcat:3000
+      TZ: Asia/Shanghai
+    volumes:
+      # Attachment tree on the NAS. Reused in place: the old VM reached this
+      # same directory over CIFS, so no bulk copy happens during cutover.
+      - ${BOT_STORAGE_ROOT:-/vol2/1000/Docker/igngbot/data/message_logs}:/data/message_logs
+      # Mutable runtime state (logs, prompt snapshot, tmp) outside the image.
+      - ./bot-runtime:/data/runtime
+      # faster-whisper model cache, downloaded once and reused across rebuilds.
+      - ./models:/data/models
+    depends_on:
+      napcat:
+        # Wait for the OneBot WebSocket to actually be listening. Starting on
+        # service_started makes the bot race NapCat's ~30s boot and then idle in
+        # an exponential reconnect backoff.
+        condition: service_healthy
+    healthcheck:
+      # The listener has no HTTP endpoint, so assert the process is alive and
+      # the attachment root is still present and writable.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys; sys.exit(0 if os.path.isdir('/data/message_logs') and os.access('/data/message_logs', os.W_OK) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  napcat:
+    image: ${NAPCAT_IMAGE:-snowluma-docker-framework:local}
+    # Imported from an archive built on the build host; not registry-available.
+    pull_policy: never
+    container_name: ${NAPCAT_CONTAINER_NAME:-igngbot-napcat}
+    restart: unless-stopped
+    # Required by the SnowLuma framework: without these the QQ process fails
+    # with "/usr/local/bin/node: Operation not permitted".
+    shm_size: 1gb
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      VNC_PASSWD: ${VNC_PASSWD:-vncpasswd}
+      SNOWLUMA_UID: ${SNOWLUMA_UID:-1000}
+      SNOWLUMA_GID: ${SNOWLUMA_GID:-1000}
+      SNOWLUMA_WEBUI_PORT: ${SNOWLUMA_WEBUI_PORT:-5099}
+      SNOWLUMA_LOG_LEVEL: ${SNOWLUMA_LOG_LEVEL:-info}
+      SNOWLUMA_SCREEN: ${SNOWLUMA_SCREEN:-1920x1080x16}
+      SNOWLUMA_HOOK_AUTOLOAD: ${SNOWLUMA_HOOK_AUTOLOAD:-1}
+      SNOWLUMA_EXTRA_QQ_HOMES: "${SNOWLUMA_EXTRA_QQ_HOMES:-}"
+      SNOWLUMA_QQ_FLAGS: "${SNOWLUMA_QQ_FLAGS:---disable-gpu --disable-software-rasterizer --disable-gpu-compositing}"
+      TZ: Asia/Shanghai
+    healthcheck:
+      # QQ and NapCat take tens of seconds to come up. Without this the bot
+      # starts against a not-yet-listening OneBot socket and burns through its
+      # reconnect backoff, so gate startup on the WebSocket port being open.
+      test:
+        - CMD-SHELL
+        - "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3001' 2>/dev/null || exit 1"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    ports:
+      # Host 3000/3001 are taken on the NAS by an unrelated container, so NapCat
+      # is published on alternate ports. It is bound to the LAN (not just
+      # loopback) to preserve the operator access the VM deployment provided for
+      # the WebUI, VNC and OneBot endpoints; the bot itself uses the compose
+      # network and never depends on these host bindings. OneBot access is
+      # token-protected by the migrated config.
+      - "${NOVNC_PORT:-6081}:6081"
+      - "${SNOWLUMA_WEBUI_HOST_PORT:-5099}:${SNOWLUMA_WEBUI_PORT:-5099}"
+      - "${ONEBOT_HTTP_HOST_PORT:-3200}:3000"
+      - "${ONEBOT_WS_HOST_PORT:-3201}:3001"
+    volumes:
+      # Migrated from the old VM volumes to preserve the QQ login session.
+      - napcat-data:/app/snowluma-data
+      - napcat-qq-config:/app/.config
+      - napcat-qq-data:/app/.local/share
+
+  media:
+    build:
+      # Populated at deploy time from the IGNG site repository
+      # (services/igng-bot-media), which stays the single source of truth.
+      context: ./media
+      dockerfile: Dockerfile
+    image: ${BOT_MEDIA_IMAGE:-igng-bot-media:local}
+    # Built on the NAS; its base image is pre-pulled from the reachable mirror.
+    pull_policy: never
+    container_name: ${BOT_MEDIA_CONTAINER_NAME:-igng-bot-media}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      BOT_MEDIA_PORT: 8082
+      BOT_MEDIA_STORAGE_ROOT: /data/bot_logs
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:48734:8082"
+    volumes:
+      - ${BOT_STORAGE_ROOT:-/vol2/1000/Docker/igngbot/data/message_logs}:/data/bot_logs:ro
+    # The NAS share is owned by 1000:1001 and not world-readable, so the
+    # service must run as that identity to read attachments. The image's own
+    # botmedia user (10001) cannot traverse the share.
+    user: "${MEDIA_UID:-1000}:${MEDIA_GID:-1001}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8082/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frpc:
+    build:
+      context: ./media
+      dockerfile: Dockerfile.frpc
+    image: ${BOT_MEDIA_FRPC_IMAGE:-igng-bot-media-nas-frpc}
+    # Built on the NAS from the vendored frpc binary; no registry involved.
+    pull_policy: never
+    container_name: ${BOT_MEDIA_FRPC_CONTAINER_NAME:-igng-bot-media-frpc}
+    restart: unless-stopped
+    init: true
+    command: ['-c', '/etc/frpc.toml']
+    network_mode: host
+    volumes:
+      - ./frpc.toml:/etc/frpc.toml:ro
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  napcat-data:
+    name: ${NAPCAT_DATA_VOLUME:-igngbot_napcat-data}
+  napcat-qq-config:
+    name: ${NAPCAT_CONFIG_VOLUME:-igngbot_napcat-qq-config}
+  napcat-qq-data:
+    name: ${NAPCAT_QQ_DATA_VOLUME:-igngbot_napcat-qq-data}
