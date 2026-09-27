@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# 设备级 pre-push 守卫 —— 由 ~/.qoder/coder-rules/install-hooks.sh 生成，请勿直接编辑
-# 真源: ~/.qoder/coder-rules/hooks/pre-push.tpl
+# IGNGbot 的 pre-push：设备级守卫 + 全工作区隐私扫描（bash 版，不依赖 PowerShell）
+# 守卫部分由 ~/.qoder/coder-rules/hooks/pre-push.tpl（MODE=solo）生成，改动请同步两处。
 #
-# pre-push 的 stdin 每行有 4 个字段：
+# pre-push 的 stdin 每行 4 个字段：
 #   <local-ref> SP <local-oid> SP <remote-ref> SP <remote-oid>
-# 删除分支时 local-oid 全 0；远端新建分支时 remote-oid 全 0。
+# 删除远端分支时 local-oid 全 0；远端新建分支时 remote-oid 全 0。
 set -uo pipefail
 
-MODE="solo"      # solo | collaborative | frozen
-PROTECT="main master" # 受保护分支（空格分隔）
+MODE="solo"
+PROTECT="main master"
 ZEROS=0000000000000000000000000000000000000000
 blocked=0
 
@@ -22,7 +22,6 @@ while read -r local_ref local_oid remote_ref remote_oid; do
   is_protected=0
   case " $PROTECT " in *" $name "*) is_protected=1 ;; esac
 
-  # 删除远端分支
   if [ "$local_oid" = "$ZEROS" ]; then
     if [ "$is_protected" = 1 ]; then
       echo "pre-push 拒绝：不允许删除远端分支 $name（需你明确确认）。" >&2
@@ -31,24 +30,12 @@ while read -r local_ref local_oid remote_ref remote_oid; do
     continue
   fi
 
-  # 新建远端分支：remote_oid 全 0，无需快进检查
   if [ "$remote_oid" = "$ZEROS" ]; then
-    if [ "$is_protected" = 1 ] && [ "$MODE" = collaborative ]; then
-      echo "pre-push 拒绝：$name 是集成分支，不允许直接新建（改动走 Pull Request）。" >&2
-      blocked=1
-    fi
     continue
   fi
 
-  # 非快进 = 需要 force
   if ! git merge-base --is-ancestor "$remote_oid" "$local_oid" 2>/dev/null; then
     echo "pre-push 拒绝：$name 非快进，推送会需要 --force。按设备级规范，重写历史仅限 Agent 独占分支且必须用 --force-with-lease，并先说明原因。" >&2
-    blocked=1
-  fi
-
-  # collaborative 仓库禁止直推集成分支
-  if [ "$is_protected" = 1 ] && [ "$MODE" = collaborative ]; then
-    echo "pre-push 拒绝：$name 是本 collaborative 仓库的集成分支，改动必须走 Pull Request。" >&2
     blocked=1
   fi
 
@@ -58,12 +45,7 @@ while read -r local_ref local_oid remote_ref remote_oid; do
   fi
 done <<< "$data"
 
-orig="${GIT_DIR:-.git}/pre-push.orig"
-if [ -x "$orig" ]; then
-  if ! printf '%s\n' "$data" | "$orig" "$@"; then
-    echo "pre-push 拒绝：仓库原有的 pre-push 钩子返回失败。" >&2
-    blocked=1
-  fi
-fi
+[ "$blocked" -eq 0 ] || exit 1
 
-exit $blocked
+# 守卫通过后，再做一次全工作区隐私扫描
+exec bash scripts/privacy-scan.sh
