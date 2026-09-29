@@ -77,7 +77,7 @@ services:
     security_opt:
       - seccomp=unconfined
     environment:
-      VNC_PASSWD: ${VNC_PASSWD:-vncpasswd}
+      VNC_PASSWD: ${VNC_PASSWD:?set VNC_PASSWD in .env}
       SNOWLUMA_UID: ${SNOWLUMA_UID:-1000}
       SNOWLUMA_GID: ${SNOWLUMA_GID:-1000}
       SNOWLUMA_WEBUI_PORT: ${SNOWLUMA_WEBUI_PORT:-5099}
