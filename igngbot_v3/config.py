@@ -209,7 +209,7 @@ class Config:
     CCODE_DEFAULT_IMAGE_SIZE = OPENAI_DEFAULT_IMAGE_SIZE
     CCODE_IMAGE_TIMEOUT = int(os.getenv("CCODE_IMAGE_TIMEOUT", "900"))
 
-    BOT_USER_ID = int(os.getenv("BOT_USER_ID", "1000000001"))
+    BOT_USER_ID = int(os.getenv("BOT_USER_ID", "0"))
     LOCAL_STORAGE = os.getenv("LOCAL_STORAGE", str(_PROJECT_DIR / "runtime"))
     PROMPT_DIR = os.getenv("PROMPT_DIR", str(_PROJECT_DIR / "prompts"))
     SYSTEM_PROMPT_CACHE_DIR = os.getenv(
@@ -327,7 +327,7 @@ class Config:
             os.getenv("MC_REPORT_DAILY_REMINDER_HOUR", "10"),
         )
     )
-    NTFY_REPORT_URL = os.getenv("NTFY_REPORT_URL", "https://ntfy.example.org/reports")
+    NTFY_REPORT_URL = os.getenv("NTFY_REPORT_URL", "")
     NTFY_REPORT_TOKEN = os.getenv(
         "NTFY_REPORT_TOKEN",
         "",
