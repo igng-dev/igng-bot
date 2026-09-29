@@ -5,7 +5,7 @@
 ### NAS（生产环境）
 
 - 主机：`192.0.2.17`（飞牛 NAS，Debian 12）
-- 用户：`serviceuser`
+- 用户：`<nas-user>`
 - 部署方式：Docker Compose，工程目录 `/vol2/1000/Docker/igngbot`
 - 服务：`bot` / `napcat` / `media` / `frpc`
 - 附件数据：`/vol2/1000/Docker/igngbot/data/message_logs`（NAS 本地目录，不再走 CIFS）
