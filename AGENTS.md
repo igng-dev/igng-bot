@@ -2,8 +2,8 @@
 > 只写本仓库与设备级规范的差异。Git 纪律、worktree、冲突处理见 `~/.qoder/coder-rules/global-rules.md`。
 
 Collaboration: solo
+Baseline: main
 Default branch: main
-Integration: direct-after-validation
 Release: manual（**本仓库无 CI workflow**）
 Worktree: `~/项目/.wt/IGNGbot/<slug>`
 
