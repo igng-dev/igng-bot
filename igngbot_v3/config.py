@@ -78,9 +78,12 @@ class Config:
     ONEBOT_HTTP_TOKEN = os.getenv("ONEBOT_HTTP_TOKEN", "")
     ONEBOT_NAME = os.getenv("ONEBOT_NAME", "SnowLuma OneBot")
 
-    DB_HOST = os.getenv("DB_HOST", "db.example.internal")
+    # The RDS endpoint and account are deployment secrets: they must come from
+    # .env (deploy/docker/.env on the NAS). Nothing here may default to a real
+    # host or username, because this repository is public.
+    DB_HOST = os.getenv("DB_HOST", "")
     DB_PORT = int(os.getenv("DB_PORT", "3306"))
-    DB_USER = os.getenv("DB_USER", "igng_bot")
+    DB_USER = os.getenv("DB_USER", "")
     DB_PASSWORD = os.getenv("DB_PASSWORD", "")
     DB_NAME = os.getenv("DB_NAME", "igng_bot")
 
@@ -272,10 +275,7 @@ class Config:
     # now stores mc_tickets as well as users and permission assignments.
     IGNG_SITE_DB_HOST = os.getenv(
         "IGNG_SITE_DB_HOST",
-        os.getenv(
-            "MC_REPORT_IDENTITY_DB_HOST",
-            "db-us.example.internal",
-        ),
+        os.getenv("MC_REPORT_IDENTITY_DB_HOST", ""),
     )
     IGNG_SITE_DB_PORT = int(
         os.getenv("IGNG_SITE_DB_PORT", os.getenv("MC_REPORT_IDENTITY_DB_PORT", "3306"))
