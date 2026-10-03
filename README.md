@@ -1,8 +1,23 @@
-# IGNGbot v3
+# IGNG Bot V4 · 云萤
+
+云萤是运行在官方 DeepSeek Harness 上的长期在线 Social Agent。每个 QQ 群/私聊有持久 DSH Session；每条启用会话的来信都进入原生 Inbox，模型通过 QQ 工具决定发言或沉默。运行上下文与压缩交给 DSH，长期 Markdown Memory 以 MySQL 为权威存储。
+
+- [V4 架构、数据库、V3 复用与 donor 差异](docs/v4-architecture.md)
+- [配置、迁移、NAS 切换和回滚](docs/v4-operations.md)
+- [自动化测试与实际验收边界](docs/testing.md)
+- [qq-bridge 原文移植与许可证](yunying-dsh/donor/qq-bridge/PROVENANCE.md)
+
+源码 `main.py` 默认 V4；`IGNGBOT_RUNTIME=v3` 保留成熟 V3 回滚入口。现有生产 base Compose 保持 V3，叠加 `docker-compose.v4.yml` 才切换到 V4；开发合并不会自动部署。
+
+V4 安装需要 Python 3.12、Node >=24，以及固定官方 DSH `0.2.1-alpha.1`。先配置数据库/OneBot/明确允许的会话，运行 `python -m igngbot_v4.migrate`，再分别启动 `python -m igngbot_v4` 与 `scripts/run-yunying-profile.sh`。完整配置见运行文档。
+
+---
+
+# V3 回滚路径与共用基础设施
 
 v3 将 v2 里“主程序 + AstrBot 插件”的分离式结构整合成单个 Python 程序。
 
-## 当前实现
+## V3 实现（显式回滚入口）
 
 - 连接 OneBot WebSocket 接收群消息
 - 消息落库到 `igng_bot.message_logs`

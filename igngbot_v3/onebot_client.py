@@ -8,10 +8,11 @@ logger = logging.getLogger(__name__)
 
 
 class OneBotClient:
-    def __init__(self, config, message_callback, recall_callback=None):
+    def __init__(self, config, message_callback, recall_callback=None, notice_callback=None):
         self.config = config
         self.message_callback = message_callback
         self.recall_callback = recall_callback
+        self.notice_callback = notice_callback
         self.ws = None
         self._running = False
         self.self_id = None
@@ -145,6 +146,8 @@ class OneBotClient:
                     self.recall_callback(data)
                 else:
                     logger.debug("No group recall callback configured; notice ignored")
+            elif post_type == "notice" and self.notice_callback is not None:
+                self.notice_callback(data)
             else:
                 logger.debug(f"WS recv: post_type={post_type} (ignored)")
 

@@ -9,7 +9,8 @@
 # so apt and pip are pinned to mirrors that are reachable from it.
 FROM dockerproxy.net/library/python:3.12-slim
 
-ENV DEBIAN_FRONTEND=noninteractive \
+ENV IGNGBOT_RUNTIME=v3 \
+    DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Shanghai \
@@ -46,6 +47,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py ./
 COPY prompts/ ./prompts/
 COPY igngbot_v3/ ./igngbot_v3/
+COPY igngbot_v4/ ./igngbot_v4/
+COPY migrations/ ./migrations/
 COPY scripts/ ./scripts/
 
 # Run unprivileged; the NAS share is owned by uid/gid 1000:1001 and is mounted

@@ -1,0 +1,10 @@
+{
+  "agent.cordis.yml": "6d19f20441ee3e0100cbcc9baf6fdc1318f0fee40bc7f61793d11bf6de13e1d0",
+  "qq-model-view.js": "60cf9fbd1aa1b85c90885efd66c72f9c23fd663c4d7b7ff509bc494a151072b9",
+  "v2-wait.js": "88eef2d2f240e93ceb865fc9fc78d480df2219fafbd72b4e5a6f7ae1e5c8ed36",
+  "safe-fetch.js": "1bef6af7eba1341a1d436c3eafe4b6b0ac05dce5e8f26c225236a6b5e3dc897a",
+  "wake-prompts.js": "bb12092991b6278a18756e948dde7290f60105fdb4743af81d3942e90ba0891e",
+  "web-functions.js": "0fdf8548cdba694e37d993cb608809ab7d608de325e748275419adc784b3a135",
+  "tool-descriptions.json": "dbd2ab8c318449c1cc042fbe4655df226bb5a2fc68479548f1188ea928a43635",
+  "LICENSE": "30acfc362e8404a3603612464ee186b285e8c9954d550f3fb4e06c0f2696e6e5"
+}

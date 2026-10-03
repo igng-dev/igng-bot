@@ -154,6 +154,11 @@ async def insert_call_log(
 def _extract_tokens(token_usage: dict | None) -> tuple[int, int, int, int]:
     """从 OpenAI 风格 usage 中解析 (prompt, completion, total, cached) token。"""
     usage = token_usage if isinstance(token_usage, dict) else {}
+    if "inputTokens" in usage:
+        cached = int(usage.get("cacheReadTokens") or 0) + int(usage.get("cacheWriteTokens") or 0)
+        prompt = int(usage.get("inputTokens") or 0) + cached
+        completion = int(usage.get("outputTokens") or 0)
+        return prompt, completion, int(usage.get("totalTokens") or prompt + completion), cached
     prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
     total = int(usage.get("total_tokens") or (prompt + completion))
@@ -199,91 +204,102 @@ async def mirror_call_to_site(
     success: bool = True,
     error_message: str = "",
     provider: str = "local",
-) -> None:
-    """把一次 LLM 调用镜像写入站点 AI 记录库。失败只记日志，绝不抛出。"""
+    durable: bool = False,
+) -> bool:
+    """Mirror idempotently. V3 callers may ignore failure; V4 durable callers retry."""
     if not Config.SITE_AI_RECORDS_ENABLED:
-        return
+        return True
     if call_log_id is None:
-        logger.warning("[云萤] 跳过站点 AI 记录镜像：缺少 call_logs id")
-        return
+        return False
     try:
-        prompt_tokens, completion_tokens, total_tokens, cached_tokens = _extract_tokens(
-            token_usage
-        )
+        prompt_tokens, completion_tokens, total_tokens, cached_tokens = _extract_tokens(token_usage)
         ended_at = datetime.now()
         started_at = ended_at - timedelta(milliseconds=max(0, int(duration_ms or 0)))
-        strategy = json.dumps(
-            {
-                "bot_call_log_id": call_log_id,
-                "group_id": str(group_id or ""),
-                "sender_id": str(sender_id or ""),
-                "sender_name": sender_name or "",
-                "message_text": (message_text or "")[:2000],
-                "duration_ms": int(duration_ms or 0),
-            },
-            ensure_ascii=False,
-        )
+        strategy = json.dumps({"bot_call_log_id": call_log_id, "group_id": str(group_id or ""),
+            "sender_id": str(sender_id or ""), "sender_name": sender_name or "",
+            "message_text": (message_text or "")[:2000], "duration_ms": int(duration_ms or 0)}, ensure_ascii=False)
         pool = await _get_site_pool()
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """INSERT INTO ai_jobs
-                       (service, task_type, task_key, operator_type, operator_id,
-                        strategy, system_prompt, user_prompt, status, attempt_count,
-                        prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                        round, last_error, final_result)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (
-                        SITE_AI_SERVICE,
-                        call_type,
-                        str(call_log_id),
-                        SITE_AI_OPERATOR_TYPE,
-                        None,
-                        strategy,
-                        system_prompt or None,
-                        user_prompt or None,
-                        "success" if success else "failed",
-                        1,
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens,
-                        cached_tokens,
-                        0,
-                        error_message[:2000] if error_message else None,
-                        response_content or None,
-                    ),
-                )
-                job_id = cur.lastrowid
-                await cur.execute(
-                    """INSERT INTO ai_job_attempts
-                       (job_id, provider, model, attempt_no, round, is_fallback,
-                        started_at, ended_at, ok, prompt_tokens, completion_tokens,
-                        total_tokens, cached_tokens, error_message, raw_response,
-                        selected)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (
-                        job_id,
-                        "local",
-                        model or None,
-                        1,
-                        0,
-                        0,
-                        started_at,
-                        ended_at,
-                        1 if success else 0,
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens,
-                        cached_tokens,
-                        error_message[:2000] if error_message else None,
-                        response_content or None,
-                        1,
-                    ),
-                )
+                lock_name = f"igngbot-site-call:{call_log_id}"
+                await cur.execute("SELECT GET_LOCK(%s,10)", (lock_name,))
+                if (await cur.fetchone())[0] != 1:
+                    raise RuntimeError("site call mirror locked")
+                try:
+                    await conn.begin()
+                    await cur.execute("SELECT id FROM ai_jobs WHERE service=%s AND task_key=%s AND task_type=%s LIMIT 1", (SITE_AI_SERVICE, str(call_log_id), call_type))
+                    existing = await cur.fetchone()
+                    if existing:
+                        job_id = existing[0]
+                    else:
+                        await cur.execute(
+                            """INSERT INTO ai_jobs
+                               (service, task_type, task_key, operator_type, operator_id,
+                                strategy, system_prompt, user_prompt, status, attempt_count,
+                                prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                                round, last_error, final_result)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (
+                                SITE_AI_SERVICE,
+                                call_type,
+                                str(call_log_id),
+                                SITE_AI_OPERATOR_TYPE,
+                                None,
+                                strategy,
+                                system_prompt or None,
+                                user_prompt or None,
+                                "success" if success else "failed",
+                                1,
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens,
+                                cached_tokens,
+                                0,
+                                error_message[:2000] if error_message else None,
+                                response_content or None,
+                            ),
+                        )
+                        job_id = cur.lastrowid
+                    await cur.execute("SELECT id FROM ai_job_attempts WHERE job_id=%s AND attempt_no=1 AND round=0 LIMIT 1", (job_id,))
+                    if not await cur.fetchone():
+                        await cur.execute(
+                            """INSERT INTO ai_job_attempts
+                               (job_id, provider, model, attempt_no, round, is_fallback,
+                                started_at, ended_at, ok, prompt_tokens, completion_tokens,
+                                total_tokens, cached_tokens, error_message, raw_response,
+                                selected)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (
+                                job_id,
+                                provider or "unknown",
+                                model or None,
+                                1,
+                                0,
+                                0,
+                                started_at,
+                                ended_at,
+                                1 if success else 0,
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens,
+                                cached_tokens,
+                                error_message[:2000] if error_message else None,
+                                response_content or None,
+                                1,
+                            ),
+                        )
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+                finally:
+                    await cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+        return True
     except Exception:
-        logger.exception(
-            "[云萤] 站点 AI 记录镜像写入失败 call_log_id=%s", call_log_id
-        )
+        logger.exception("[云萤] 站点 AI 记录镜像写入失败 call_log_id=%s", call_log_id)
+        if durable:
+            raise
+        return False
 
 
 async def close_call_log_pool():

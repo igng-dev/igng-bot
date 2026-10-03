@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.v4.example
 *.pem
 *.key
 *.p12
@@ -39,3 +40,6 @@ _upstream_astrbot/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# JavaScript dependencies use the shared cache
+node_modules

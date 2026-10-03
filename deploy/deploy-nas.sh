@@ -91,7 +91,7 @@ cmd_image() {
   # metadata stay behind so no credential can leak into the build context.
   rsync -a --delete \
     --exclude '.git' --exclude '.venv' --exclude 'runtime' --exclude '__pycache__' \
-    --exclude '*.pyc' --exclude '.pytest_cache' --exclude 'secrets' --exclude '.env*' \
+    --exclude 'node_modules' --exclude '*.pyc' --exclude '.pytest_cache' --exclude 'secrets' --exclude '.env*' \
     --exclude '_upstream_astrbot' --exclude '老程序*' --exclude 'tests' \
     "$REPO_DIR/" "$BUILD_HOST:$BUILD_DIR/"
 

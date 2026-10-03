@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+secrets
+runtime
+**/node_modules
+**/__pycache__
+**/.venv
+**/.pytest_cache
+_upstream_astrbot
+老程序*
+tests
+yunying-dsh/tests
