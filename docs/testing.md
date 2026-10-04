@@ -57,7 +57,7 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 已有 `.github/workflows/ci.yml` 已扩展：Python3.12/Node24、官方 CLI、一次性 loopback MySQL8.4、schema 初始化、两个完整测试套件（含双进程故障恢复）、语法和凭据扫描。CI 不使用生产配置，不发布或部署。实际远端 run 结果另在 PR 记录。
 
-## 2026-10-04 实际结果
+## 2026-10-04 初始实现的本地结果（NAS切换前）
 
 环境：CPython3.12.13，Node24.18.0，官方 DSH0.2.1-alpha.1，独立 loopback MariaDB11.8.6（MySQL 协议/InnoDB，33316），独立 Compose CLI2.40.3。没有使用生产 MySQL、真实 QQ 或模型凭据。
 
@@ -88,3 +88,7 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 真实 Bing 调用尝试被 donor SSRF 校验正确拒绝：开发网络 DNS 返回198.18.0.100 Fake-IP（系统 DNS 与显式公网 resolver 均如此）。没有放宽私网/metadata 防护。明确选择 `YUNYING_SEARCH_PROVIDER=deepseek` 可避开该 DNS 模式，但真实认证搜索仍需部署验收。
 
 未执行：Docker 镜像实际构建、NAS 切换、生产迁移、真实群/私聊、付费模型、公网搜索成功、真实图片/语音模型、长期在线压测。不能把118项程序/协议测试描述为这些环境已验收。
+
+## NAS部署修订
+
+暂停权限、搜索回退与媒体配置修订后的完整验证为Python102 passed / Node25 passed，无skip；远端CI含MySQL8.4也通过。真实NAS构建、生产迁移、官方Session重启恢复、现役模型工具续接、网络搜索及签名图片证据和未验收项目见 [2026-10-04部署记录](v4-nas-deployment-20261004.md)。该记录更新前一阶段的“未执行”清单；不会把协议fixture升格为真实对话风格或OCR/ASR验收。部署时inclusive npm audit为1 high / 0 critical，仍未通过全量依赖安全审计。

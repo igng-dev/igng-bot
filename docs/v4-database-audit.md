@@ -25,6 +25,8 @@ V4 不需要旧上下文摘要、旧人格选择和旧系统 Prompt 表参与推
 
 站点依据：`apps/account/app/api/admin/yunying/groups/route.js:29,45-52,118-121`；`groups/summary/route.js:23`；`calls/route.js:21,78`；`calls/[id]/route.js:21`；`overview/route.js`。聊天媒体依赖 `apps/igngchat/lib/chatlogs.js`。V4 依据：`igngbot_v4/main.py`、`views.py`、`journal.py` 与 `yunying-dsh/src/store.js/runtime.js`。
 
+部署后第二次只读快照为2026-10-04 15:25：23张表，原消息40579、撤回156、调用日志3437行。4张退役候选表行数未变；`file_url` 的5634个非空路径仍全部出现在attachments中，语音路径15个全部覆盖。`thinking_content` 仍无非空值。具体切换/备份/Session重启证据见 [NAS部署记录](v4-nas-deployment-20261004.md)。
+
 ### 旧字段
 
 | 字段 | 生产快照证据 | 判断与处理 |

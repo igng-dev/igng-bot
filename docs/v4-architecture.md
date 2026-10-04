@@ -58,11 +58,11 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 | Runtime Session | 官方 DSH JSONL/附件持久目录 | 模型真实运行历史、原生 Inbox、工具结果、request context、compaction；不把 summary 当长期记忆。 |
 | Long-term Memory | MySQL Markdown 文档/版本/来源/Identity | 稳定事实与长期约定；模型受控访问，Owner/未来网站管理。 |
 
-新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移全部添加表，不删除、重写、导入 V3 context summary。既有 `call_logs` 和站点 `ai_jobs/ai_job_attempts` 复用并以事务+重试去重镜像，记录真实 provider 与 DSH 的 cache/input token 语义，包括 compaction。
+新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅添加表与独立 `social_paused` 字段，不删除、重写或导入 V3 context summary。既有 `call_logs` 和站点 `ai_jobs/ai_job_attempts` 复用并以事务+重试去重镜像，记录真实 provider 与 DSH 的 cache/input token 语义，包括 compaction。
 
 Memory 默认 `scope_private`，SQL 在匹配、计数、snippet 之前过滤 scope。跨群 `shared_person` 必须由本人开启 `/记忆共享 开启`，来源必须是已查看的本人真实群消息；服务端生成共享标题和引用 Markdown，禁止模型把别群私有 prose 粘入共享文档。私聊不能升级为共享；跨群结果不返回来源群号。身份按 provider+external_id 唯一绑定；跨平台绑定只可经独立 Owner API，模型不能绑定身份或改共享授权。
 
-更新使用 `expectedVersion` 乐观锁，版本、hash、来源和审计在同一事务提交。Forget 对模型隐藏内容，保留受控审计版本；Owner rollback 创建新版本。Owner secret 与 infrastructure secret 必须分开，默认无 owner endpoint 的 host port。以后网站可直接使用管理 API；本次不改站点仓库或生产数据。
+更新使用 `expectedVersion` 乐观锁，版本、hash、来源和审计在同一事务提交。Forget 对模型隐藏内容，保留受控审计版本；Owner rollback 创建新版本。Owner secret 与 infrastructure secret 必须分开，默认无 owner endpoint 的 host port。以后网站可直接使用管理 API；本次不改站点仓库或清理用户历史；正式记忆未灌入伪造测试文档。
 
 未来 MySQL SessionPersistence 可作为上游同一异步 capability 的独立 provider 接入。当前 adapter 不读取或修改 JSONL 实体、不自定义 durability；`persistence_provider` 和 Agent create/resume/flush 接口是扩展边界。
 
@@ -74,8 +74,8 @@ V4 不调用 ChatService、ContextManager、旧 system_prompt_store 或纯文本
 
 ## 当前限制
 
-DSH 为固定 alpha 版本，升级需重新跑契约与持久恢复测试。部署镜像仍需在既有 build host/NAS 实际构建验证，本次未部署。脚本模型/OneBot fixture 验证调度和协议，不能证明真实 QQ、付费模型的自然风格或 NAS 稳定运行。
+DSH 为固定 alpha 版本，升级需重新跑契约与持久恢复测试。本次已通过既有 build host/NAS 通道构建并部署，实际版本/重启/备份证据见 [NAS部署记录](v4-nas-deployment-20261004.md)。脚本模型/OneBot fixture 验证调度和协议，不能证明真实 QQ、付费模型的自然风格或 NAS 稳定运行。
 
-直接依赖 MySQL/YAML 已使用审计修复版本；`fflate` 固定修复版本。上游发布包仍带 `http-cache-semantics <=4.2.0` 引出的 9 项 npm high 告警，[上游公告](https://github.com/advisories/GHSA-ch52-4w7c-c8xp) 当前没有已发布修复；YunYing 禁用遥测和相关工具，不将缓存抓取路径暴露给模型。这不等同于全量依赖安全认证。
+直接依赖 MySQL/YAML 已使用审计修复版本；`fflate` 固定修复版本。上游发布包仍带 `http-cache-semantics <=4.2.0` 引出的告警；部署时重新执行 inclusive audit 的结果为1 high / 0 critical。[上游公告](https://github.com/advisories/GHSA-ch52-4w7c-c8xp) 当前仍标记 patched versions 为None，而 npm报告 `fixAvailable: true`；未验证可执行的升级路径，不能仅凭该标志声称漏洞已修复。YunYing 禁用遥测和相关工具，不将缓存抓取路径暴露给模型。这不等同于全量依赖安全认证。
 
-当前开发网络把 Bing DNS 解析为 `198.18.0.0/15` Fake-IP，donor 安全抓取正确拒绝；不能声称真实 Bing 搜索通过。代理部署可明确选上游认证 DeepSeek 搜索 provider；公网抓取仍保留原 SSRF 防护。
+当前开发网络把 Bing DNS 解析为 `198.18.0.0/15` Fake-IP，donor 安全抓取正确拒绝；此开发环境不能证明公网搜索；NAS的安全RSS回退已实测返回8条，边界见部署记录。代理部署可明确选上游认证 DeepSeek 搜索 provider；公网抓取仍保留原 SSRF 防护。
