@@ -69,7 +69,11 @@ DSH 官方 `llm-pi-ai` 已包含在固定 CLI 依赖中。可以在 `$DSH_HOME/p
 
 设置 `YUNYING_MODEL_PROVIDER=yunying-gateway`、`YUNYING_MODEL=gemini-flash`。示例 URL 为占位；key 仅通过已有 `.env` 注入。65536 是当前部署使用的保守上下文预算，不代表提供方公布的模型容量。官方 compaction 按此预算管理上下文。
 
-V3 的 `is_chat_mode=0` 意味着“仅艾特响应”，不是暂停。V4 保留其历史值以便网站旧页与 V3 回滚，但运行时不读取该字段；所有授权会话均由 Social Agent 自主选择是否发言。新增 `group_configs.social_paused`，默认0；管理员 `/云萤暂停`、`/云萤继续` 更新此字段。受控网站后端以后应使用这个明确的暂停权限。变更通过基础设施监测（5秒）进入持久 FIFO，暂停仍保留 Inbox，恢复无需等待新来信；发送消息与拍一拍在执行前直接检查。旧 `/聊天模式` 仅返回迁移说明，不再切换 classifier 或暂停。网站旧聊天模式/人格/摘要控件尚待后续替换，不影响固定 reserved2 Prompt。
+聊天模式沿用 `group_configs.is_chat_mode`。`/聊天模式` 由群 owner/admin 或 bot 管理员幂等切换；也可显式 `/聊天模式 开启|关闭`。网站现有 `isChatMode` PATCH 写同一字段，无须新建配置表。关闭时普通来信仍记录、可供已呼叫的 Agent 读取，但只允许明确 @ 或回复云萤开始模型轮次；名字提问和普通拍一拍不构成关闭模式的呼叫。
+
+`social_paused` 为独立硬暂停，由 `/云萤暂停`、`/云萤继续` 控制。5秒监测把配置变更放入持久队列；Profile 同时读数据库当前权限，原生 pre-step 与发送端再次核对，因此旧 retry/wake config 不能恢复旧权限。关闭聊天模式时恢复硬暂停不会重放积压呼叫；新 @/回复可再次开启一轮。授权私聊不受群开关影响。
+
+网站旧摘要/人格管理页面仍在独立站点仓库中，本轮不修改或部署站点；机器人不再生成群业务摘要，不再启动初始化旧摘要/Prompt，但保留历史表以供旧页面读取与 V3 回滚。本站开关已经与 V4 重新对齐，通用 AI 表的 schema 不变。
 
 ## NAS 切换
 
@@ -85,7 +89,7 @@ bash deploy/deploy-v4-nas.sh rollback
 
 `up` 保存原 V3 镜像名和 Compose/env 备份，建立 `dsh-runtime`（1000:1001），构建并导入两个固定版本镜像。停止旧 bot 单消费者后执行 checksum 迁移，再启动现有 `bot` 服务的 V4 入口与 `yunying`，等待健康检查；NapCat/media/frpc 和附件卷不另起一套。部署失败应查看阶段与日志，按 `rollback` 恢复记录的旧镜像；脚本不会自行删除数据或伪装健康。
 
-迁移只有新增表和默认非暂停的配置字段；MySQL DDL 按自身语义提交，迁移中断后 `CREATE IF NOT EXISTS` 可重试，已登记迁移 checksum 不一致会拒绝。后续修改 schema 应新增迁移文件，不能改已应用版本。开发测试只应用于临时数据库；生产切换的实际记录与数据库退役计划见后续部署审查记录。
+迁移只新增表/字段/索引，以及回填既有 ingress 的机械完成状态；MySQL DDL 按自身语义提交，迁移中断后 `CREATE IF NOT EXISTS` 可重试，已登记迁移 checksum 不一致会拒绝。后续修改 schema 应新增迁移文件，不能改已应用版本。开发测试只应用于临时数据库；生产切换的实际记录与数据库退役计划见后续部署审查记录。
 
 媒体服务也可纳入同一 Compose。若现役媒体容器来自另一个项目，应先保存其 inspect、固定原 image ID，迁移其原签名密钥到未提交的 `.env.media`（0600），并验证合并配置；停用/改名旧容器后启动 `media`。V4 overlay 的此 env 文件是可选项，已有主 `.env` 已配置正确签名时不必建立。不能用机器人 `.env` 的不同 key 覆盖现役服务的签名密钥。数据仍使用 `BOT_STORAGE_ROOT`，只读挂给媒体容器，不搬附件。
 

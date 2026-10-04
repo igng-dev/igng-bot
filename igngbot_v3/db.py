@@ -48,7 +48,7 @@ class DBHandler:
                     raise
         return self._conn
 
-    def init_table(self):
+    def init_message_tables(self):
         with self.conn.cursor() as cursor:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS message_logs (
@@ -147,6 +147,14 @@ class DBHandler:
                     INDEX idx_recall_pending (processed_at, recalled_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='待应用的消息撤回事件'
             """)
+
+        self.conn.commit()
+        logger.info("Message and recall tables initialized")
+
+    def init_table(self):
+        """V3 rollback initializer; V4 uses only init_message_tables."""
+        self.init_message_tables()
+        with self.conn.cursor() as cursor:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS context_summaries (
                     group_id BIGINT NOT NULL PRIMARY KEY COMMENT '群号',

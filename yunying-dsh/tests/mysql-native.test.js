@@ -8,6 +8,7 @@ test('real MySQL + native DSH: official Session mapping, Person identity and Mem
  const config=testSettings();config.groups.clear();config.private.clear();config.groups.add(key.split(':')[1]);
  let store=await open(),h=await harness(),runtime=new SocialRuntime(h.ctx,store,config,async()=>({ok:true}));let id,doc,root=h.root;
  try{
+  await store.query('INSERT INTO group_configs (group_id,is_chat_mode) VALUES (?,1)',[key.split(':')[1]]);
   const source=event(randomUUID(),key,{userId:qq,text:'我喜欢红茶',plain:'我喜欢红茶',atBot:true});await runtime.accept(source);await settle(runtime,key);
   const conv=runtime.conversations.get(key);id=conv.state.sessionId;
   // Use the real DSH tool scheduler for Memory instead of bypassing its permission boundary.

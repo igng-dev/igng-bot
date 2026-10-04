@@ -73,7 +73,7 @@ export async function apply(ctx) {
     });
     server.requestTimeout=30000;server.headersTimeout=10000;
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(config.port,config.host,resolve);});
-    heartbeat=setInterval(()=>void store.heartbeat().catch(error=>{
+    heartbeat=setInterval(()=>void store.heartbeat().then(()=>runtime.refreshPolicies()).catch(error=>{
       runtime.report(error);
       // A health failure alone does not make Docker restart a container. Exit this dedicated Profile.
       void close().finally(()=>process.kill(process.pid,'SIGTERM')).catch(error=>runtime.report(error));

@@ -35,7 +35,8 @@ export function registerTools(ctx, runtime) {
       // DSH's tool scheduler supplies exclusive mutation ordering and cooperative cancellation.
       async execute(args, exec) {
         authorize(state, args, exec); exec.signal.throwIfAborted();
-        if (!store.healthy || state.paused) throw new PolicyError('会话已暂停或运行实例已失去权限');
+        await runtime.refreshPolicy();
+        if (!store.healthy || state.paused || !runtime.permitted()) throw new PolicyError('会话已暂停或运行实例已失去权限');
         try{return await execute(args,exec);}
         catch(error){
           if(name.startsWith('memory_'))await store.audit(actor(),name.slice(7)+'-denied',null,false,{error:error.name||'Error'}).catch(()=>{});
@@ -56,7 +57,7 @@ export function registerTools(ctx, runtime) {
       atMention:true, nameMention:true, question:true, preSleepWaitMs:config.preSleepWaitMs },
     enabledTools:[...names], disabledTools:['qq_send_voice','qq_list_voices','qq_set_sticker_remark',
       'qq_get_self_image','qq_list_stickers','qq_send_sticker','qq_collect_sticker','qq_get_sticker_image','qq_sticker_note'],
-    ...state.unreadPage(30,0), wakeConfig:state.wakeConfig, replyTiming:state.replyTiming(),
+    ...state.unreadPage(30,0), wakeConfig:state.wakeConfig, participation:{chatMode:state.chatMode,calledTurn:!!runtime.directEventId}, replyTiming:state.replyTiming(),
     memory:{activeTopics:state.activeTopics,pendingThoughts:state.pendingThoughts,memberImpressions:state.memberImpressions},
     longTermMemory:{skill:'yunying-memory',sourceOfTruth:'MySQL',sharedPersonRequiresConsent:true},
     safety:{currentConversationOnly:true,untrustedMemberInput:true,noShellOrFilesystem:true} }));
@@ -110,7 +111,7 @@ export function registerTools(ctx, runtime) {
         await sleep(Math.max(0,Math.min(10000,gap||0)),undefined,{signal:exec.signal});
       }
       const result=await infra('/send',{key:state.key,requestId:`${state.sessionId}:${exec.callId}:${index}`,
-        message:messages[index],replyToMessageId:args.replyToMessageId,atUserId:args.atUserId},exec.signal);
+        triggerEventId:runtime.directEventId,message:messages[index],replyToMessageId:args.replyToMessageId,atUserId:args.atUserId},exec.signal);
       results.push(result);if(!result.ok)break;
       state.sent(result.message_id,messages[index]);await store.saveState(state);runtime.scheduleReplyCheck();
     }
@@ -129,7 +130,7 @@ export function registerTools(ctx, runtime) {
   register('mcp__snowluma__qq_reply',replyProps,['key','token','message','replyToMessageId'],replyExecute,{},descriptions.qq_reply);
   standard('qq_send_poke',{targetUserId:numberOrString},async(args,exec)=>{
     const now=Date.now();if(state.sendTimes.filter(t=>now-t<60000).length>=config.maxSendMinute)throw new PolicyError('发送频率超限');
-    const result=await infra('/poke',{key:state.key,userId:String(args.targetUserId||state.key.split(':')[1]),requestId:`${state.sessionId}:${exec.callId}:poke`},exec.signal);
+    const result=await infra('/poke',{key:state.key,triggerEventId:runtime.directEventId,userId:String(args.targetUserId||state.key.split(':')[1]),requestId:`${state.sessionId}:${exec.callId}:poke`},exec.signal);
     if(result.ok){state.sent(null,'[拍一拍]');await store.saveState(state);}return result;
   });
   const resolveMessageId = supplied => {

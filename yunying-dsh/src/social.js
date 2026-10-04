@@ -25,7 +25,7 @@ export class SocialState {
     this.activeTopics = saved.activeTopics || []; this.pendingThoughts = saved.pendingThoughts || [];
     this.memberImpressions = saved.memberImpressions || {};
     this.wakeTimes = saved.wakeTimes || []; this.sendTimes = saved.sendTimes || [];
-    this.paused = false; this.recentMessages = []; this.unread = []; this.modelSeenSeqs = new Set();
+    this.chatMode = true; this.paused = false; this.recentMessages = []; this.unread = []; this.modelSeenSeqs = new Set();
     this.lastUnreadSeq = 0; this.waiting = false;
     this.ensureWakeable();
   }
@@ -83,6 +83,15 @@ export class SocialState {
     for (const msg of this.recentMessages.filter(m => !unread.has(m.seq)).slice(-4).reverse()) if (!add('recent', msg)) break;
     packet.recent.reverse(); return packet;
   }
+  callSnapshot() {
+    const messages=[];
+    for(const msg of this.recentMessages.filter(m=>!m.isConfiguration).slice(-20).reverse()) {
+      const next=[compactModelMessage(msg),...messages];
+      if(JSON.stringify(next).length>6000)break;
+      messages.unshift(compactModelMessage(msg));
+    }
+    return {messages,recent:[],unreadCount:this.unread.length,readThroughSeq:this.readThrough(messages),partial:messages.length<this.unread.length};
+  }
   acknowledge(through = this.readThrough()) {
     through = integer(through, 0, Number.MAX_SAFE_INTEGER);
     if (through > this.readThrough() || through < this.lastReadThroughSeq) throw new PolicyError('throughSeq 超过已查看的连续消息水位');
@@ -129,6 +138,7 @@ export class SocialState {
     if (this.paused || msg.isSelf || msg.commandHandled) return null;
     if (this.key.startsWith('private:')) return 'private';
     if (msg.atBot || msg.replyToBot) return 'atMention'; // Product guarantee: direct requests bypass ordinary cost throttles.
+    if (!this.chatMode || msg.observeOnly || msg.isConfiguration) return null;
     const t = this.wakeConfig.triggers, text = String(msg.plain || msg.text || '');
     if (this.wakeConfig.mode === 'active' || t.anyMessage) return 'anyMessage';
     if (t.nameMention && (this.config.nicknames || ['云萤','莹宝']).some(s => text.includes(s))) return 'nameMention';

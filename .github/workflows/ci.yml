@@ -56,7 +56,7 @@ jobs:
           from igngbot_v3.db import DBHandler
           from igngbot_v4.migrate import connect, migrate
           db = DBHandler(Config())
-          db.init_table()
+          db.init_message_tables()
           db.init_group_configs_table()
           db.conn.close()
           with connect() as conn:

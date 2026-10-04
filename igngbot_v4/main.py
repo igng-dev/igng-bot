@@ -19,6 +19,7 @@ from igngbot_v3.onebot_client import OneBotClient
 from igngbot_v3.mc_ticket_notifications import McTicketNotifier
 from igngbot_v3.timeutil import unix_to_utc_naive
 from igngbot_v3.call_log_db import ensure_call_logs_table, insert_call_log, mirror_call_to_site, close_call_log_pool
+from .ai_records import mirror_native_record
 from .journal import Journal, decode, encode
 from .migrate import connect, migrate
 from .settings import Settings, signed_conversation
@@ -43,8 +44,11 @@ class Infrastructure:
         self._stopping = False
         self._journal_signal = asyncio.Event()
         self._group_modes = {}
+        self._delivery_signal = asyncio.Event()
 
     async def enqueue(self, raw):
+        if raw.get("group_id"):
+            raw = {**raw, "_yunying_chat_mode": self.group_policy(int(raw["group_id"]))["chatMode"]}
         key, _ = self.journal.enqueue(raw)
         # Durability precedes any slow media download or DSH contact.
         self._journal_signal.set()
@@ -72,23 +76,26 @@ class Infrastructure:
             message = "个人记忆跨群共享已开启。只有你本人提供的信息可写入共享记忆。" if enabled else "个人记忆跨群共享已关闭；其他会话将无法读取你的共享记忆。"
             handled = True
         elif text in {"/help", "/帮助"}:
-            message = "/云萤暂停、/云萤继续：群管理员或 bot 管理员控制发言。\n/用户组 [pro|plus IGNG用户ID]：沿用网站权限。\n/记忆共享 开启|关闭：本人选择个人记忆是否跨群可见。\n直接 @ 或回复云萤即可聊天。"
+            message = "/聊天模式 [开启|关闭]：群管理员或 bot 管理员控制自主参与。\n/云萤暂停、/云萤继续：控制包括呼叫在内的全部发言。\n/用户组 [pro|plus IGNG用户ID]：沿用网站权限。\n/记忆共享 开启|关闭：本人选择个人记忆是否跨群可见。\n直接 @ 或回复云萤即可聊天。"
             handled = True
         elif text in {"/云萤暂停", "/云萤继续"} and key.startswith("group:"):
             handled = True
             if parsed.get("sender_role") in {"owner", "admin"} or central_admin():
                 gid = signed_conversation(key)
                 pause = text == "/云萤暂停"
-                with self.db.conn.cursor() as cur:
-                    cur.execute("INSERT INTO group_configs (group_id,social_paused) VALUES (%s,%s) "
-                                "ON DUPLICATE KEY UPDATE social_paused=VALUES(social_paused)", (gid, int(pause)))
-                self.db.conn.commit()
+                pause = self.journal.group_control(event_id, gid, "social_paused", pause)
                 message = "云萤已暂停发言，消息仍正常保存。" if pause else "云萤已恢复发言。"
             else:
                 message = "需要群管理员或 bot 管理员权限。"
-        elif text == "/聊天模式" and key.startswith("group:"):
+        elif re.fullmatch(r"/聊天模式(?:\s+(开启|关闭|on|off))?", text, re.I) and key.startswith("group:"):
             handled = True
-            message = "V4 由云萤自主决定参与群聊。管理员可用 /云萤暂停 或 /云萤继续 控制发言。"
+            if parsed.get("sender_role") in {"owner", "admin"} or central_admin():
+                option = text.split()[1].lower() if len(text.split()) > 1 else None
+                enabled = self.journal.group_control(event_id, signed_conversation(key), "is_chat_mode",
+                    None if option is None else option in {"开启", "on"})
+                message = "聊天模式已开启，云萤可自主参与。" if enabled else "聊天模式已关闭；消息照常记录，@ 或回复云萤仍可呼叫。"
+            else:
+                message = "需要群管理员或 bot 管理员权限。"
         else:
             match = re.fullmatch(r"/用户组(?:\s+(pro|plus)\s+#?(\d+))?", text, re.I)
             if match:
@@ -105,14 +112,29 @@ class Infrastructure:
             await self.send({"key": key, "requestId": f"command:{event_id}", "message": message}, owner_command=True)
         return {"commandHandled": handled, **({"pause": pause} if pause is not None else {})}
 
-    def group_enabled(self, gid):
-        # V3 is_chat_mode only governed unsolicited chat; it is not a pause permission.
-        # This lease connection is autocommit. The legacy raw-history connection
-        # uses repeatable-read transactions and would cache a website toggle.
+    def group_policy(self, gid):
+        # Read with the autocommit lease connection so website updates cannot be cached.
         with self.conn.cursor() as cur:
-            cur.execute("SELECT social_paused FROM group_configs WHERE group_id=%s", (gid,))
+            cur.execute("SELECT is_chat_mode,social_paused FROM group_configs WHERE group_id=%s", (gid,))
             row = cur.fetchone()
-            return bool(row and not row.get("social_paused"))
+            return {"chatMode": bool(row and row.get("is_chat_mode")), "pause": not row or bool(row.get("social_paused"))}
+
+    def group_enabled(self, gid):
+        return not self.group_policy(gid)["pause"]
+
+    def speaking_allowed(self, key, trigger_event_id=None):
+        if self.conversation_paused(key):
+            return False
+        gid = signed_conversation(key)
+        if gid < 0 or self.group_policy(gid)["chatMode"]:
+            return True
+        if not isinstance(trigger_event_id, str):
+            return False
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM yunying_sessions s JOIN yunying_events e ON e.event_id=s.direct_event_id "
+                        "AND e.conversation_key=s.conversation_key WHERE s.conversation_key=%s AND s.direct_event_id=%s "
+                        "AND s.direct_expires_at>UTC_TIMESTAMP(6)", (key, trigger_event_id))
+            return bool(cur.fetchone())
 
     def conversation_paused(self, key):
         gid = signed_conversation(key)
@@ -125,7 +147,7 @@ class Infrastructure:
 
     async def sync_group_modes(self):
         for group in sorted(self.settings.groups):
-            enabled = self.group_enabled(int(group))
+            enabled = self.group_policy(int(group))
             if self._group_modes.get(group) == enabled:
                 continue
             # Trusted pause configuration shares the durable per-conversation FIFO.
@@ -180,11 +202,13 @@ class Infrastructure:
         return {**view, **command, "eventId": event_id, "key": key, "kind": "message",
                 "sender": str(sender.get("card") or sender.get("nickname") or parsed["sender_id"])[:120],
                 "atBot": bot_id in ats, "replyToBot": bool(reply and reply.get("is_self")),
-                "time": int(raw.get("time") or 0) * 1000}
+                "time": int(raw.get("time") or 0) * 1000,
+                "observeOnly": key.startswith("group:") and raw.get("_yunying_chat_mode") is False
+                    and not (bot_id in ats or bool(reply and reply.get("is_self")))}
 
-    async def deliver(self):
+    async def record(self):
         while not self._stopping:
-            row = self.journal.pending()
+            row = self.journal.pending_recording()
             if not row:
                 self._journal_signal.clear()
                 try:
@@ -194,13 +218,33 @@ class Infrastructure:
                 continue
             try:
                 payload = decode(row["prepared_event"]) if row["prepared_event"] else await self.prepare(row)
-                if payload is not None and not row["prepared_event"]:
-                    self.journal.prepare(row["event_id"], payload)
+                raw = decode(row["raw_event"])
+                if payload and raw.get("_yunying_chat_mode") is False and not (payload.get("atBot") or payload.get("replyToBot")):
+                    payload = {**payload, "observeOnly": True}
+                self.journal.prepare(row["event_id"], payload)
+                self._delivery_signal.set()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.journal.recording_retry(row["event_id"], row["recording_attempts"], error)
+                logger.warning("Mechanical recording deferred: %s", type(error).__name__)
+
+    async def deliver(self):
+        while not self._stopping:
+            row = self.journal.pending()
+            if not row:
+                self._delivery_signal.clear()
+                try:
+                    await asyncio.wait_for(self._delivery_signal.wait(), 1)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            try:
+                payload = decode(row["prepared_event"])
                 if payload is not None and self.settings.allowed(row["conversation_key"]):
                     gid = signed_conversation(row["conversation_key"])
                     if gid > 0:
-                        # Prepared/retried events must not restore an obsolete pause permission.
-                        payload = {**payload, "pause": not self.group_enabled(gid)}
+                        payload = {**payload, **self.group_policy(gid)}
                     async with self.http.post(self.settings.dsh_url + "/events", json=payload,
                             headers={"Authorization": "Bearer " + self.settings.internal_secret},
                             timeout=ClientTimeout(total=30)) as response:
@@ -212,7 +256,7 @@ class Infrastructure:
                 raise
             except Exception as error:
                 self.journal.retry(row["event_id"], row["attempts"], error)
-                logger.warning("Ingress delivery deferred: %s", type(error).__name__)
+                logger.warning("DSH delivery deferred: %s", type(error).__name__)
 
     async def send(self, data, owner_command=False):
         key = data["key"]
@@ -240,8 +284,8 @@ class Infrastructure:
                     raise web.HTTPForbidden(text="mention is outside conversation")
         segments = ([{"type": "reply", "data": {"id": str(reply)}}] if reply else []) + ([{"type": "at", "data": {"qq": str(at_user)}}] if at_user else []) + [{"type": "text", "data": {"text": message}}]
         async with self._send_lock:
-            if not owner_command and self.conversation_paused(key):
-                return {"ok": False, "error": "管理员已暂停本会话发言"}
+            if not owner_command and not self.speaking_allowed(key, data.get("triggerEventId")):
+                return {"ok": False, "error": "当前发言权限已关闭或呼叫已结束"}
             fresh, prior = self.journal.begin_send(request_id, key, {"message": message, "reply": reply, "at": at_user})
             if not fresh:
                 return prior
@@ -308,8 +352,8 @@ class Infrastructure:
                 return web.json_response({"ok": True, "images": images, "isRecalled": bool(row.get("is_recalled"))})
             return web.json_response({"ok": True, "message": message_view(row)})
         if request.path == "/poke":
-            if self.conversation_paused(key):
-                return web.json_response({"ok": False, "error": "管理员已暂停本会话发言"})
+            if not self.speaking_allowed(key, data.get("triggerEventId")):
+                return web.json_response({"ok": False, "error": "当前发言权限已关闭或呼叫已结束"})
             # Fixed capability, never an arbitrary OneBot action supplied by the model.
             uid = str(data.get("userId", ""))
             if not re.fullmatch(r"[1-9][0-9]{0,19}", uid):
@@ -338,7 +382,20 @@ class Infrastructure:
 
     async def ai_record(self, data):
         record_id = data["recordId"]
-        # Local history insert and journal link commit together, including retries after HTTP loss.
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT payload FROM yunying_ai_records WHERE record_id=%s", (record_id,))
+            source = cur.fetchone()
+            if not source:
+                raise web.HTTPNotFound()
+        native = decode(source["payload"])
+        if native.get("task_key"):
+            mirrored = await mirror_native_record(record_id, native)
+            if native.get("record_kind") == "task-end":
+                return {"ok": bool(mirrored), "callLogId": None}
+        else:
+            mirrored = None
+        # Compatibility history has its own idempotent link. Universal export above
+        # has no call_log_id dependency and can succeed even if compatibility fails.
         self.conn.begin()
         try:
             with self.conn.cursor() as cur:
@@ -358,7 +415,8 @@ class Infrastructure:
         except Exception:
             self.conn.rollback()
             raise
-        mirrored = await mirror_call_to_site(call_log_id=call_id, durable=True, **{k: v for k, v in payload.items() if k in {
+        if mirrored is None:
+            mirrored = await mirror_call_to_site(call_log_id=call_id, durable=True, **{k: v for k, v in payload.items() if k in {
             "group_id", "sender_id", "sender_name", "message_text", "call_type", "model", "system_prompt", "user_prompt",
             "response_content", "token_usage", "duration_ms", "success", "error_message", "provider"}})
         return {"ok": bool(mirrored), "callLogId": call_id}
@@ -366,7 +424,7 @@ class Infrastructure:
     async def run(self):
         self.loop = asyncio.get_running_loop()
         self.db.connect()
-        self.db.init_table()
+        self.db.init_message_tables()
         self.db.init_group_configs_table()
         self.conn = connect(self.config)
         migrate(self.conn)
@@ -392,6 +450,7 @@ class Infrastructure:
         await web.TCPSite(runner, self.settings.host, self.settings.port).start()
         stop = asyncio.Event()
         await self.sync_group_modes()
+        recorder = asyncio.create_task(self.record())
         worker = asyncio.create_task(self.deliver())
         config_worker = asyncio.create_task(self.monitor_group_modes())
         def delivery_done(task):
@@ -399,6 +458,7 @@ class Infrastructure:
                 failure = 'Cancelled' if task.cancelled() else type(task.exception()).__name__
                 logger.error('Durable delivery worker stopped: %s', failure)
                 stop.set()
+        recorder.add_done_callback(delivery_done)
         worker.add_done_callback(delivery_done)
         config_worker.add_done_callback(delivery_done)
         notifier = None
@@ -416,9 +476,10 @@ class Infrastructure:
         finally:
             self._stopping = True
             self.client.stop()
+            recorder.cancel()
             worker.cancel()
             config_worker.cancel()
-            await asyncio.gather(worker, config_worker, return_exceptions=True)
+            await asyncio.gather(recorder, worker, config_worker, return_exceptions=True)
             if notifier:
                 await notifier.stop()
             await runner.cleanup()

@@ -6,9 +6,11 @@ V4 由一个官方 DSH YunYing Profile、一组仓库外插件/工具/Skill，�
 
 ```mermaid
 flowchart LR
-  QQ[NapCat / OneBot] --> I[Python: durable ingress + V3 media]
-  I --> DB[(MySQL: raw QQ / journal / mappings)]
-  I --> P[YunYing out-of-tree DSH Profile]
+  QQ[NapCat / OneBot] --> I[Python durable ingress]
+  I --> R[Mechanical recording worker: messages / media / recall / controls]
+  R --> DB[(MySQL raw QQ + prepared outbox)]
+  DB --> D[Independent delivery worker]
+  D --> P[YunYing out-of-tree DSH Profile + mode gate]
   P --> A[One native Agent per group/private]
   A --> S[Official Session JSONL + compaction]
   A --> T[Scoped QQ / search / Memory tools]
@@ -23,7 +25,7 @@ flowchart LR
 | 上游层 | 核心实现 | V4 使用方式 |
 | --- | --- | --- |
 | Profile/Plugin | `apps/cli/src/profile-boot.ts`、`plugin.ts`；app-boot 的 profile bundle/patch 与 package resolution | 官方 `dsh plugin --profile yunying add <package>`；bundle 的 `cordis.patch.yml` 禁用编码工具，挂载 `@igng/yunying-dsh`。 |
-| Agent | `packages/core/agent-loop/src/{index,agent,inbox}.ts`、agent registry | `ctx.agents.create/resume`；`inject` 提交每条事件，`followup` 唤醒，同一会话保持一个原生 Agent。 |
+| Agent | `packages/core/agent-loop/src/{index,agent,inbox}.ts`、agent registry | `ctx.agents.create/resume`；`inject` 提交当前允许的模型输入，`followup` 唤醒；关闭聊天模式的普通消息仅成为 Social Runtime 观察记录。同一会话保持一个原生 Agent。 |
 | Tool | `packages/core/tools` 的 scoped registry、guards、scheduler | 注册 DSH ToolDefinition；继承工具限制为仅官方 `skill`，额外执行 guard 验证实际 Agent 身份、精确工具白名单、会话、令牌、暂停/租约。 |
 | Skill | `packages/skill/{skill,tool-skill}` | Memory Skill 在 agent scope 注册；官方 `tool-skill` 保留上游的全局挂载方式；无 filesystem skill provider。 |
 | Session | `packages/core/session`、`session-persistence-jsonl`、projection | 原生异步 Persistence `stat/open/read` 与 `sessions.flush`；MySQL 只存映射、事件状态和管理数据。 |
@@ -34,7 +36,11 @@ flowchart LR
 
 `group:<QQ群号>`、`private:<QQ号>` 是稳定会话 key，每个 key 对应一个持久 DSH UUID。允许列表为空时拒绝社交访问。私聊原始历史沿用 V3 的负数 group_id 约定。
 
-WebSocket 来信先落 `yunying_ingress`，之后才下载附件、OCR/ASR 和提交给 DSH。每条消息都进入 Agent Inbox；唤醒机制决定何时运行，模型行为决定是否发言。普通文本输出不转发 QQ。媒体提交前进程中断时复用已提交的 `message_logs` 行；同一会话队首重试阻止后来消息越过，但其他会话可继续入队。
+WebSocket 来信先落 `yunying_ingress`。机械 worker 复用 V3 下载附件、OCR/ASR、保存消息、撤回和管理控制，再提交 prepared outbox；独立 delivery worker 才联系 DSH。两阶段各自按会话 FIFO、backoff 和状态恢复。DSH 不在线不会阻塞后续 `message_logs`/附件保存。媒体提交前进程中断时复用已提交的消息行，不重复下载/转写。普通模型文本输出不转发 QQ。
+
+`group_configs.is_chat_mode` 继续作为网站/QQ 的同一个开关：开启时所有来信可参与原 reserved2 行为；关闭时普通消息只观察，不 inject、不自主 wake，明确 @ 或引用云萤才建立一次调用。该轮带最近最多20条/约6000字符上下文，可继续读取新到达的观察消息和旧历史。个人私聊不受群开关影响。`social_paused` 为独立硬暂停，连明确呼叫也禁止，机械记录始终继续。
+
+许可在事件投递、所有 wake 路径、官方 `agent/pre-step`、工具执行和 Python 发送端收口。关闭模式不会因 bootstrap、pending Inbox、有限 sleep、reply check、提醒、proactive 或恢复而自行启动模型；开关恢复不会自动重放旧积压。真实呼叫的临时权限记录来源 event、最长10分钟，原生 `turn/end` 撤销；模型只能改变 wake 意愿，不能授予聊天权限。切换保持原 Session UUID，旧待处理输入通过官方 Inbox 的取消记录移除，不改 Session 文件。
 
 DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `inject`、官方 `flush`，最后确认 SQL delivery。恢复时通过官方 read handle 重建已消费和仍排队的 ID；官方正常 `dispose()` 会记录取消待处理 Inbox，因此未消费的 SQL 事件以原 ID重新提交。已经消费的消息不重放。生产不能丢弃 DSH 持久目录后仅用 SQL 映射重新建空会话。
 
@@ -44,7 +50,7 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 
 ## reserved2 baseline
 
-保留潜水默认值、指定成员/关键词/@/名字/提问/概率/拍一拍唤醒、有限时间唤醒、主动机会、回复检查、无行动重置与遗漏收尾提醒。普通唤醒限频；直接 @、回复云萤及授权私聊可及时唤醒。
+聊天模式开启时保留潜水默认值、指定成员/关键词/@/名字/提问/概率/拍一拍唤醒、有限时间唤醒、主动机会、回复检查、无行动重置与遗漏收尾提醒。普通唤醒限频；直接 @、回复云萤及授权私聊可及时唤醒。
 
 `qq_get_unread_messages`、历史读取、wake 快照与 wait 返回建立“已查看”凭据。`qq_mark_read`/`qq_set_wake_config` 只确认连续安全水位，不能跳过未查看的早期消息或误清新消息。`purpose="reply"` 从最后来信开始计静默，思考时间计入；短静默不替代 300 秒沉睡观察。新消息、发言与重启不会把短等待累计为完整观察。普通文本结束可保持沉默，有限提醒后保留可唤醒默认配置。
 
@@ -58,7 +64,11 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 | Runtime Session | 官方 DSH JSONL/附件持久目录 | 模型真实运行历史、原生 Inbox、工具结果、request context、compaction；不把 summary 当长期记忆。 |
 | Long-term Memory | MySQL Markdown 文档/版本/来源/Identity | 稳定事实与长期约定；模型受控访问，Owner/未来网站管理。 |
 
-新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅添加表与独立 `social_paused` 字段，不删除、重写或导入 V3 context summary。既有 `call_logs` 和站点 `ai_jobs/ai_job_attempts` 复用并以事务+重试去重镜像，记录真实 provider 与 DSH 的 cache/input token 语义，包括 compaction。
+新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅增加结构，不删除、重写或导入 V3 context summary。003 在 ingress 增加机械阶段状态、独立重试/时间/错误与命令结果，在 sessions 增加真实呼叫的 event/到期权限；004 增加机械队列索引。既有记录回填为已完成机械阶段，已应用001/002保持原 checksum。V4 启动只初始化消息、撤回和群配置，不再初始化/seed 旧摘要和 system Prompt；V3 rollback 初始化器保留。
+
+正式用量继续写既有 `igng_sites.ai_jobs/ai_job_attempts`：每个原生 turn 一个 `social_turn` job，续接和失败重试为 attempts；compaction 是独立 `dsh_compaction` job。任务 key 来自 Session UUID 与原生 turn/compaction ID，request_id 来自 Session UUID 与 event seq。SQL事务和任务锁去重，每次从 attempts 重算总量；provider/cache 用量来自原生事件，未知 usage 的 attempt tokens 为 NULL，job只合计已知值并记录未知次数。模型沉默仍计费。
+
+`yunying_ai_records` 保存按原生 seq 排序的尝试/任务结束 outbox，网站故障时重试；官方 Session 回放可重建相同键。导出首先按原生 task key 写通用表，独立于 call_log_id；随后兼容写 `call_logs`，供尚未迁移的网站旧调用页读取。历史日志与既有旧镜像 job 保留，不重算过去的0用量。
 
 Memory 默认 `scope_private`，SQL 在匹配、计数、snippet 之前过滤 scope。跨群 `shared_person` 必须由本人开启 `/记忆共享 开启`，来源必须是已查看的本人真实群消息；服务端生成共享标题和引用 Markdown，禁止模型把别群私有 prose 粘入共享文档。私聊不能升级为共享；跨群结果不返回来源群号。身份按 provider+external_id 唯一绑定；跨平台绑定只可经独立 Owner API，模型不能绑定身份或改共享授权。
 

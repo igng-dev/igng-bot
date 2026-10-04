@@ -52,6 +52,9 @@ export class FixtureStore {
  constructor(){this.healthy=true;this.maps=new Map();this.rows=new Map();this.bindings=new Map();this.calls=[];this.failDeliveryOnce=false;}
  async mapping(key){if(!this.maps.has(key))this.maps.set(key,{conversation_key:key,dsh_session_id:randomUUID(),provisioning_status:'provisioning',social_state:null,paused:0});return structuredClone(this.maps.get(key));}
  async mappings(){return [...this.maps.values()].map(v=>structuredClone(v));}
+ async policy(key){const row=this.maps.get(key);return {chatMode:row?.chatMode??true,paused:!!row?.paused};}
+ async beginDirect(key,eventId){this.maps.get(key).directEventId=eventId;}
+ async endDirect(key,eventId){if(this.maps.get(key).directEventId===eventId)this.maps.get(key).directEventId=null;}
  async ready(key){this.maps.get(key).provisioning_status='ready';}
  async saveState(state){this.maps.get(state.key).social_state=state.snapshot();}
  async setPaused(key,paused){this.maps.get(key).paused=Number(paused);}

@@ -36,7 +36,7 @@ cfg = SimpleNamespace(DB_HOST='127.0.0.1', DB_PORT=33316,
                       DB_USER='root', DB_PASSWORD='', DB_NAME='yunying_v4_test',
                       PROMPT_DIR='/tmp/no-v3-prompt-seed')
 db = DBHandler(cfg)
-db.init_table()
+db.init_message_tables()
 db.conn.close()
 with pymysql.connect(host='127.0.0.1', port=33316, user='root',
                      database='yunying_v4_test', charset='utf8mb4',
@@ -92,3 +92,23 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 ## NAS部署修订
 
 暂停权限、搜索回退与媒体配置修订后的完整验证为Python102 passed / Node25 passed，无skip；远端CI含MySQL8.4也通过。真实NAS构建、生产迁移、官方Session重启恢复、现役模型工具续接、网络搜索及签名图片证据和未验收项目见 [2026-10-04部署记录](v4-nas-deployment-20261004.md)。该记录更新前一阶段的“未执行”清单；不会把协议fixture升格为真实对话风格或OCR/ASR验收。部署时inclusive npm audit为1 high / 0 critical，仍未通过全量依赖安全审计。
+
+
+## 机械记录、聊天模式与原生任务记账调整
+
+本轮在独立 loopback MariaDB11.8.6、官方 DSH0.2.1-alpha.1 CLI、合成 OneBot/Messages 服务上验证。未连接生产数据库、真实群或付费模型；未部署 NAS/网站。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `python -m pip install -r requirements-dev.txt` | 共享 venv 的依赖检查通过。 |
+| `YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q` | **107 passed**，无 skip；幂等建表及旧 DBHandler ping 的7条 warning。 |
+| `YUNYING_TEST_DB=yunying_v4_test npm --prefix yunying-dsh test` | **30 passed**，无 skip；实际官方 loop/JSONL/tool/runtime，含模型失败重试。 |
+| `npm --prefix yunying-dsh run check` | 全部插件模块语法通过。 |
+| `bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh` | 通过。 |
+| `bash scripts/privacy-scan.sh`、`git diff --check` | 通过；提交前再次校验暂存范围。 |
+
+新增回归覆盖：DSH 接收失败时，同会话连续消息/附件元数据仍全部机械提交；断点恢复不重复执行切换命令；OFF群普通消息不生成模型请求，@/reply 携带最近受限上下文且最多一个 Agent；OFF下 wait 能在当前呼叫轮看到普通新消息，active wake config、提醒与定时器不能开启新轮；OFF恢复、先开启再重启均不重放观察积压；实际 CLI 在OFF模式完成 Memory→搜索→回复，并在租约故障后恢复原 Session；硬暂停阻断呼叫，解除硬暂停后等待新呼叫。
+
+真实 SQL 记账测试覆盖：网站连接故障时 native outbox 仍 pending、恢复后重复投递去重；三次模型调用聚合到一个 job；未知 usage 保留 NULL与未知次数，cache/input正确合计；compaction为独立任务；原生三次重试保持一个turn，Session历史回放产生相同task/request ID。既有跨群Person Memory/私有隔离、撤回、图片/语音/转发、官方compaction和重启测试继续通过。
+
+这些结果不等于真实QQ风格、付费提供方计费一致性、NAS长时运行或真实OCR/ASR模型验收。原部署快照仍在部署记录中；本轮迁移003/004只在临时库应用。站点旧摘要/人格控件保留在另一个仓库，未修改或部署；V4侧已停止旧摘要/Prompt bootstrap与业务摘要生成。依赖安全告警未作为本轮功能改动处理。
