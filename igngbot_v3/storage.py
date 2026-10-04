@@ -173,6 +173,11 @@ class StorageHandler:
 
 
     def _storage_path(self, group_id, file_name):
+        file_name = os.path.basename(str(file_name).replace("\\", "/"))
+        if not file_name or file_name in {".", ".."} or "\0" in file_name:
+            raise ValueError("invalid attachment filename")
+        if not str(group_id).lstrip("-").isdigit():
+            raise ValueError("invalid attachment conversation")
         date_str = datetime.now().strftime("%Y-%m-%d")
         dir_path = os.path.join(
             self._storage_root, str(group_id), date_str
@@ -322,7 +327,7 @@ class StorageHandler:
 
         local_path = None
         try:
-            logger.info(f"Downloading {file_type}: {file_url[:80]}...")
+            logger.info("Downloading attachment type=%s", file_type)
             resp = requests.get(file_url, timeout=30, stream=True)
             resp.raise_for_status()
 
@@ -338,9 +343,13 @@ class StorageHandler:
 
             ext = os.path.splitext(file_name)[1] or ".tmp"
             local_path = os.path.join(tmp_dir, f"dl_{datetime.now().timestamp()}{ext}")
+            written = 0
             with open(local_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
+                        written += len(chunk)
+                        if written > self.config.MAX_FILE_SIZE:
+                            raise ValueError("attachment exceeds configured byte limit")
                         f.write(chunk)
 
             if file_type == "image":
@@ -395,10 +404,10 @@ class StorageHandler:
                 }
 
         except subprocess.TimeoutExpired:
-            logger.error(f"Video encoding timed out for {file_url}")
+            logger.error("Video encoding timed out")
             return None
         except Exception as e:
-            logger.error(f"Failed to process/store {file_type} {file_url}: {e}")
+            logger.error("Failed to process/store attachment type=%s error=%s", file_type, type(e).__name__)
             return None
         finally:
             if local_path and os.path.exists(local_path):

@@ -1,0 +1,41 @@
+{
+  "name": "@igng/yunying-dsh",
+  "version": "4.0.0",
+  "private": true,
+  "description": "YunYing native DSH social profile with reserved2 protocols and MySQL memory",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "check": "node --check src/index.js"
+  },
+  "dependencies": {
+    "mysql2": "3.24.5",
+    "js-yaml": "4.3.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.5-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-persona": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-tool-skill": "0.2.1-alpha.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.1-alpha.1"
+  },
+  "overrides": {
+    "js-yaml": "$js-yaml",
+    "fflate": "0.8.3"
+  }
+}

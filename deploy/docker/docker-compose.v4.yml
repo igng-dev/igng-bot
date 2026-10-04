@@ -1,0 +1,50 @@
+# Overlay the existing project: replace its sole bot consumer, retain NapCat/media/frpc/data.
+services:
+  bot:
+    image: ${BOT_V4_IMAGE:?set BOT_V4_IMAGE to a fixed built image}
+    entrypoint: [python, -m, igngbot_v4]
+    env_file:
+      - .env.v4
+    environment:
+      YUNYING_INFRA_HOST: 0.0.0.0
+      YUNYING_INFRA_PORT: 8788
+      YUNYING_DSH_URL: http://yunying:8787
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 90s
+
+  yunying:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.dsh
+    image: ${YUNYING_IMAGE:?set YUNYING_IMAGE to a fixed built image}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    user: '1000:1001'
+    env_file:
+      - .env
+      - .env.v4
+    environment:
+      DSH_HOME: /data/dsh
+      DSH_TELEMETRY_DISABLED: '1'
+      YUNYING_DSH_HOST: 0.0.0.0
+      YUNYING_DSH_PORT: 8787
+      YUNYING_INFRA_URL: http://bot:8788
+    volumes:
+      - ./dsh-runtime:/data/dsh
+    # No shell/SQL/filesystem capability or owner endpoint is published to a QQ user or the host.
+    depends_on:
+      bot:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1);return r.json()}).then(v=>process.exit(v.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    security_opt:
+      - no-new-privileges:true

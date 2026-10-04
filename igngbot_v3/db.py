@@ -22,6 +22,7 @@ class DBHandler:
     def connect(self):
         self._conn = pymysql.connect(
             host=self.config.DB_HOST,
+            port=getattr(self.config, "DB_PORT", 3306),
             user=self.config.DB_USER,
             password=self.config.DB_PASSWORD,
             database=self.config.DB_NAME,

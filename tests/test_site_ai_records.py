@@ -2,6 +2,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from igngbot_v3 import call_log_db
 from igngbot_v3.call_log_db import _extract_tokens, mirror_call_to_site
@@ -11,11 +12,20 @@ class FakeCursor:
     def __init__(self, recorder):
         self.recorder = recorder
         self.lastrowid = None
+        self.selected = None
 
     async def execute(self, sql, params=None):
-        self.recorder.append((sql, params))
+        if sql.strip().upper().startswith("SELECT GET_LOCK"):
+            self.selected = (1,)
+        elif sql.strip().upper().startswith("SELECT"):
+            self.selected = None
+        if sql.strip().upper().startswith("INSERT"):
+            self.recorder.append((sql, params))
         if sql.strip().upper().startswith("INSERT INTO AI_JOBS"):
             self.lastrowid = 987
+
+    async def fetchone(self):
+        return self.selected
 
     async def __aenter__(self):
         return self
@@ -27,6 +37,15 @@ class FakeCursor:
 class FakeConn:
     def __init__(self, recorder):
         self.recorder = recorder
+
+    async def begin(self):
+        pass
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):
+        pass
 
     def cursor(self):
         return FakeCursor(self.recorder)
@@ -76,11 +95,20 @@ class ExtractTokensTest(unittest.TestCase):
         }
         self.assertEqual(_extract_tokens(usage), (50, 10, 60, 32))
 
+    def test_native_dsh_disjoint_cached_input_is_mapped_to_site_total(self):
+        self.assertEqual(_extract_tokens({"inputTokens":30,"outputTokens":10,"cacheReadTokens":20,"cacheWriteTokens":5}), (55,10,65,25))
+
     def test_missing_usage(self):
         self.assertEqual(_extract_tokens(None), (0, 0, 0, 0))
 
 
 class MirrorCallToSiteTest(unittest.TestCase):
+    def setUp(self):
+        # Unit fixtures explicitly enable mirroring; CI keeps real site writes disabled.
+        enabled = patch.object(call_log_db.Config, "SITE_AI_RECORDS_ENABLED", True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
+
     def _run(self, coro):
         return asyncio.run(coro)
 

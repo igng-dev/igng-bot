@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Authorized operator commands only. This script does not run during tests or normal development.
+set -euo pipefail
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_DIR="${COMPOSE_DIR:-$REPO_DIR/deploy/docker}"
+NAS_TARGET="${NAS_TARGET:-nas}"
+BUILD_HOST="${BUILD_HOST:-ubuntu-vm}"
+BUILD_DIR="${BUILD_DIR:-/home/deploy/igngbot-v4-build}"
+NAS_ROOT="${NAS_ROOT:-/vol2/1000/Docker/igngbot}"
+V4_VERSION="${V4_VERSION:-$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)}"
+BOT_V4_IMAGE="${BOT_V4_IMAGE:-igngbot-v4:$V4_VERSION}"
+YUNYING_IMAGE="${YUNYING_IMAGE:-igngbot-yunying:$V4_VERSION}"
+export COMPOSE_DIR BUILD_HOST BUILD_DIR NAS_ROOT NAS_TARGET BOT_V4_IMAGE YUNYING_IMAGE
+nas() { ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$NAS_TARGET" "$@"; }
+build() { ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$BUILD_HOST" "$@"; }
+compose="docker compose --env-file .env --env-file .env.v4 -f docker-compose.yml -f docker-compose.v4.yml"
+require_config() {
+  test -f "$COMPOSE_DIR/.env" && test -f "$COMPOSE_DIR/.env.v4" || { echo 'Existing .env and configured .env.v4 are required' >&2; exit 1; }
+  case "$BOT_V4_IMAGE $YUNYING_IMAGE" in *:local*|*:latest*) echo 'Use fixed source-version image tags' >&2; exit 1;; esac
+}
+sync_config() {
+  require_config
+  nas "mkdir -p '$NAS_ROOT/dsh-runtime' '$NAS_ROOT/v4-backups'; chmod 700 '$NAS_ROOT/v4-backups'; chown 1000:1001 '$NAS_ROOT/dsh-runtime'"
+  nas "if [ ! -s '$NAS_ROOT/.v4-rollback-image' ]; then docker inspect --format '{{.Config.Image}}' \$(cd '$NAS_ROOT' && docker compose ps -q bot) > '$NAS_ROOT/.v4-rollback-image'; test -s '$NAS_ROOT/.v4-rollback-image'; cp '$NAS_ROOT/docker-compose.yml' '$NAS_ROOT/v4-backups/docker-compose.v3.yml'; cp '$NAS_ROOT/.env' '$NAS_ROOT/v4-backups/.env.v3'; chmod 600 '$NAS_ROOT/v4-backups/.env.v3'; fi"
+  scp -q -o BatchMode=yes -o StrictHostKeyChecking=yes "$COMPOSE_DIR/docker-compose.yml" "$COMPOSE_DIR/docker-compose.v4.yml" "$NAS_TARGET:$NAS_ROOT/"
+  local staged_env
+  staged_env="$(mktemp)"
+  chmod 600 "$staged_env"
+  sed '/^BOT_V4_IMAGE=/d; /^YUNYING_IMAGE=/d' "$COMPOSE_DIR/.env.v4" > "$staged_env"
+  printf '\nBOT_V4_IMAGE=%s\nYUNYING_IMAGE=%s\n' "$BOT_V4_IMAGE" "$YUNYING_IMAGE" >> "$staged_env"
+  scp -q -o BatchMode=yes -o StrictHostKeyChecking=yes "$staged_env" "$NAS_TARGET:$NAS_ROOT/.env.v4"
+  rm -f "$staged_env"
+  nas "chmod 600 '$NAS_ROOT/.env.v4'"
+}
+images() {
+  require_config
+  BOT_IMAGE="$BOT_V4_IMAGE" bash "$REPO_DIR/deploy/deploy-nas.sh" image
+  build "cd '$BUILD_DIR' && docker build --platform linux/amd64 -f deploy/docker/Dockerfile.dsh -t '$YUNYING_IMAGE' ."
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$BUILD_HOST" "docker save '$YUNYING_IMAGE' | zstd -3 -T0" | nas "zstd -d -c | docker load"
+}
+up() {
+  sync_config
+  images
+  # Stop the sole legacy consumer before schema migration and V4 startup.
+  nas "cd '$NAS_ROOT' && docker compose stop bot"
+  nas "cd '$NAS_ROOT' && BOT_V4_IMAGE='$BOT_V4_IMAGE' YUNYING_IMAGE='$YUNYING_IMAGE' $compose run --rm --no-deps --entrypoint python bot -m igngbot_v4.migrate"
+  nas "cd '$NAS_ROOT' && BOT_V4_IMAGE='$BOT_V4_IMAGE' YUNYING_IMAGE='$YUNYING_IMAGE' $compose up -d --no-build bot yunying"
+  nas "cd '$NAS_ROOT' && $compose up -d --wait --wait-timeout 180 --no-build bot yunying && $compose ps"
+}
+rollback() {
+  # Restore the recorded V3 image with the base definition. New MySQL/DSH data stay intact.
+  nas "cd '$NAS_ROOT' && test -s .v4-rollback-image && $compose stop bot yunying && cp v4-backups/docker-compose.v3.yml docker-compose.yml && BOT_IMAGE=\$(cat .v4-rollback-image) docker compose --env-file .env -f docker-compose.yml up -d --no-build bot && docker compose --env-file .env -f docker-compose.yml ps bot"
+}
+case "${1:-}" in
+  sync) sync_config;;
+  images) images;;
+  up) up;;
+  status) nas "cd '$NAS_ROOT' && $compose ps";;
+  logs) nas "cd '$NAS_ROOT' && $compose logs -f --tail=100 bot yunying";;
+  rollback) rollback;;
+  *) echo 'Usage: deploy-v4-nas.sh sync|images|up|status|logs|rollback' >&2; exit 1;;
+esac

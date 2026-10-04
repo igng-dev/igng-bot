@@ -1,0 +1,90 @@
+# 自动化验证与验收边界
+
+测试入口先于 V4 实现单独登记。Python 使用 `pytest.ini` + `requirements-dev.txt`；DSH 使用 Node 原生 test runner，不替换上游 Agent Loop。
+
+## 默认离线回归
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest tests -q
+cd yunying-dsh
+task_node_cache="${XDG_CACHE_HOME:-$HOME/.cache}/igngbot-v4/node-runtime"
+mkdir -p "$task_node_cache"
+cp package.json package-lock.json "$task_node_cache/"
+(cd "$task_node_cache" && npm ci --ignore-scripts)
+test -e node_modules || ln -s "$task_node_cache/node_modules" node_modules
+npm test
+npm run check
+```
+
+无显式 opt-in 时跳过真实数据库与双进程测试。测试不读取部署凭据、不向真实 QQ/付费模型发消息。DSH 测试实际使用固定官方 core、Tool Runtime、Skill、JSONL Persistence、attachment admission、compaction；只有 LLM/外部 QQ 服务使用脚本替身。原 Prompt 同时核对固定字节和上游模板插值后的实际模型请求，CLI 的模型请求也验证精确 Social 工具目录边界。
+
+## 可复现的临时数据库集成
+
+只允许 `YUNYING_TEST_DB=yunying_v4_test`，固定 loopback `127.0.0.1`，默认端口33316，可用 `YUNYING_TEST_DB_PORT` 改测试端口。集成测试以该独立服务的本地 root/空密码连接；**只能使用一次性、只绑定 loopback 的开发数据库，不可指向 NAS/生产**。测试保留合成记录，便于核查；重置数据库需要测试服务操作者自行处理，测试不会清空任意数据库。
+
+在该独立服务创建 `yunying_v4_test`（utf8mb4），先初始化复用的消息表及新增迁移：
+
+```python
+# 独立服务已存在、仅 loopback，端口按测试设置；没有使用 Config 的生产 DB 参数。
+from types import SimpleNamespace
+from igngbot_v3.db import DBHandler
+from igngbot_v4.migrate import migrate
+import pymysql
+from pymysql.cursors import DictCursor
+cfg = SimpleNamespace(DB_HOST='127.0.0.1', DB_PORT=33316,
+                      DB_USER='root', DB_PASSWORD='', DB_NAME='yunying_v4_test',
+                      PROMPT_DIR='/tmp/no-v3-prompt-seed')
+db = DBHandler(cfg)
+db.init_table()
+db.conn.close()
+with pymysql.connect(host='127.0.0.1', port=33316, user='root',
+                     database='yunying_v4_test', charset='utf8mb4',
+                     autocommit=True, cursorclass=DictCursor,
+                     init_command="SET time_zone = '+00:00'") as conn:
+    migrate(conn)
+```
+
+
+```bash
+YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q
+(cd yunying-dsh && YUNYING_TEST_DB=yunying_v4_test npm test)
+```
+
+两条命令串行运行，因为数据库独占租约主动阻止两个 Profile 同时拥有同一 DB。双进程测试需 Node >=24、pnpm 和已安装官方 `dsh`；可选 `YUNYING_TEST_DSH_BIN` 指定其实际 CLI 路径。
+
+## CI
+
+已有 `.github/workflows/ci.yml` 已扩展：Python3.12/Node24、官方 CLI、一次性 loopback MySQL8.4、schema 初始化、两个完整测试套件（含双进程故障恢复）、语法和凭据扫描。CI 不使用生产配置，不发布或部署。实际远端 run 结果另在 PR 记录。
+
+## 2026-10-04 实际结果
+
+环境：CPython3.12.13，Node24.18.0，官方 DSH0.2.1-alpha.1，独立 loopback MariaDB11.8.6（MySQL 协议/InnoDB，33316），独立 Compose CLI2.40.3。没有使用生产 MySQL、真实 QQ 或模型凭据。
+
+| 实际命令 | 结果 |
+| --- | --- |
+| `python -m pip install -r requirements-dev.txt` | requirements 含全部运行依赖，安装检查通过，venv 在共享缓存。 |
+| `YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q` | **96 passed**，1条幂等建表 warning（call_logs 已存在）；无 skip。 |
+| `YUNYING_TEST_DB=yunying_v4_test npm test` | **22 passed**，无 skip；含真实 SQL + 官方 DSH。 |
+| `npm run check` | 通过。 |
+| `bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh` | 通过。 |
+| Compose `config --no-env-resolution` 合并 base + v4 overlay | 通过；使用临时副本、空配置示例及合成 VNC/固定 image 值，没有启动容器。 |
+| `bash scripts/privacy-scan.sh`、`git diff --check` | 通过；暂存后的凭据扫描在 PR 集成前再次执行。 |
+| `npm audit --json` | **未通过安全审计：9 high / 0 critical**，来自上游 http-cache-semantics 链；详见架构文档。 |
+
+| 场景 | 自动化证据 |
+| --- | --- |
+| 群聊沉默与 @/回复 | 原生 loop 的普通文本不触发发送；@ 工具回复；实际官方 CLI 双进程 fixture 的 @/reply-to 事件与 OneBot reply segment。自然风格取决于真实模型，尚未验收。 |
+| 连续多人来信 | 原生21条并发事件恰好入 Inbox 一次、max model concurrency=1；双进程 OneBot fixture 连续12条事件落库且无并发调用/重复发送。 |
+| 主动读取、wait/wake/潜水 | 未读 source ID 与连续 watermark、分页/新到达不能越水位、10秒静默与300秒观察分离、取消、有限时间唤醒、无限潜水安全。测试缩短计时，不等待生产分钟级时长。 |
+| 搜索后自然回复 | 原生工具结果→模型→QQ 的协议链；双进程经官方 DeepSeek search provider 的 Messages wire fixture。真实公网结果和模型风格尚未验收。 |
+| Person Memory 跨群 CRUD / 私有隔离 | 真实 SQL 的本人共享授权、来源校验、跨群检索/更新、CAS、撤销授权、忘记、Owner rollback、审计；别群私有搜索和直接 read 均拒绝。 |
+| 撤回、图片、语音、旧历史 | V3 媒体/语音/转发/撤回回归；V4 当前 DB 行、撤回 tombstone、路径隔离、OCR/转写 view；原生图片 tool admission、模型 image content 和重启后的持久引用。没有重跑真实 OCR/ASR 模型下载。 |
+| Compaction 后继续 | 实际官方 `compactNow` 创建 durable summary，下一 QQ 事件继续；JSONL 恢复后仍保持摘要和同一 Session。生产自动压缩组件保留，没有自建 summary。 |
+| 重启恢复 | 真实 SQL journal/FIFO/backoff、identity/Memory、native JSONL Inbox 取消/重入；实际断开 Python+官方CLI 两个测试进程的 DB 租约连接，二者退出再启动，同一 Session UUID、Memory read 与 QQ reply 恢复。 |
+| 发送/管理员/权限 | CQ 为纯文本、当前会话引用/@ 校验、同一 call 去重、unknown 不重发、普通成员不能暂停/提升权限、高权限 host tool 隐藏且执行 guard 拒绝、内部错误过滤。 |
+| AI 记录/网站镜像 | 真实 SQL 的 call_logs 与站点 schema-shaped ai_jobs/attempts，失败重试无重复，保留 provider 与 cache token 语义。未向真实网站数据库写入。 |
+
+真实 Bing 调用尝试被 donor SSRF 校验正确拒绝：开发网络 DNS 返回198.18.0.100 Fake-IP（系统 DNS 与显式公网 resolver 均如此）。没有放宽私网/metadata 防护。明确选择 `YUNYING_SEARCH_PROVIDER=deepseek` 可避开该 DNS 模式，但真实认证搜索仍需部署验收。
+
+未执行：Docker 镜像实际构建、NAS 切换、生产迁移、真实群/私聊、付费模型、公网搜索成功、真实图片/语音模型、长期在线压测。不能把118项程序/协议测试描述为这些环境已验收。
