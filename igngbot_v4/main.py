@@ -74,19 +74,21 @@ class Infrastructure:
         elif text in {"/help", "/帮助"}:
             message = "/云萤暂停、/云萤继续：群管理员或 bot 管理员控制发言。\n/用户组 [pro|plus IGNG用户ID]：沿用网站权限。\n/记忆共享 开启|关闭：本人选择个人记忆是否跨群可见。\n直接 @ 或回复云萤即可聊天。"
             handled = True
-        elif text in {"/云萤暂停", "/云萤继续", "/聊天模式"} and key.startswith("group:"):
+        elif text in {"/云萤暂停", "/云萤继续"} and key.startswith("group:"):
             handled = True
             if parsed.get("sender_role") in {"owner", "admin"} or central_admin():
                 gid = signed_conversation(key)
-                enabled = self.group_enabled(gid)
-                pause = text == "/云萤暂停" if text != "/聊天模式" else enabled
+                pause = text == "/云萤暂停"
                 with self.db.conn.cursor() as cur:
-                    cur.execute("INSERT INTO group_configs (group_id,is_chat_mode) VALUES (%s,%s) "
-                                "ON DUPLICATE KEY UPDATE is_chat_mode=VALUES(is_chat_mode)", (gid, int(not pause)))
+                    cur.execute("INSERT INTO group_configs (group_id,social_paused) VALUES (%s,%s) "
+                                "ON DUPLICATE KEY UPDATE social_paused=VALUES(social_paused)", (gid, int(pause)))
                 self.db.conn.commit()
                 message = "云萤已暂停发言，消息仍正常保存。" if pause else "云萤已恢复发言。"
             else:
                 message = "需要群管理员或 bot 管理员权限。"
+        elif text == "/聊天模式" and key.startswith("group:"):
+            handled = True
+            message = "V4 由云萤自主决定参与群聊。管理员可用 /云萤暂停 或 /云萤继续 控制发言。"
         else:
             match = re.fullmatch(r"/用户组(?:\s+(pro|plus)\s+#?(\d+))?", text, re.I)
             if match:
@@ -104,13 +106,13 @@ class Infrastructure:
         return {"commandHandled": handled, **({"pause": pause} if pause is not None else {})}
 
     def group_enabled(self, gid):
-        # Keep the existing website's group switch authoritative. Missing rows fail closed.
+        # V3 is_chat_mode only governed unsolicited chat; it is not a pause permission.
         # This lease connection is autocommit. The legacy raw-history connection
         # uses repeatable-read transactions and would cache a website toggle.
         with self.conn.cursor() as cur:
-            cur.execute("SELECT is_chat_mode FROM group_configs WHERE group_id=%s", (gid,))
+            cur.execute("SELECT social_paused FROM group_configs WHERE group_id=%s", (gid,))
             row = cur.fetchone()
-            return bool(row and row.get("is_chat_mode"))
+            return bool(row and not row.get("social_paused"))
 
     def conversation_paused(self, key):
         gid = signed_conversation(key)
@@ -126,7 +128,7 @@ class Infrastructure:
             enabled = self.group_enabled(int(group))
             if self._group_modes.get(group) == enabled:
                 continue
-            # Trusted infrastructure control shares the durable per-conversation FIFO.
+            # Trusted pause configuration shares the durable per-conversation FIFO.
             # No fake QQ message is inserted into message_logs, and this never wakes on its own.
             await self.enqueue({"post_type": "yunying_configuration", "notice_type": "yunying_configuration",
                                 "group_id": int(group), "nonce": str(uuid.uuid4())})
@@ -197,7 +199,7 @@ class Infrastructure:
                 if payload is not None and self.settings.allowed(row["conversation_key"]):
                     gid = signed_conversation(row["conversation_key"])
                     if gid > 0:
-                        # Prepared/retried events must not restore an obsolete website permission.
+                        # Prepared/retried events must not restore an obsolete pause permission.
                         payload = {**payload, "pause": not self.group_enabled(gid)}
                     async with self.http.post(self.settings.dsh_url + "/events", json=payload,
                             headers={"Authorization": "Bearer " + self.settings.internal_secret},

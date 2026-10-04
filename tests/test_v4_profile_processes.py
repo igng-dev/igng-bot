@@ -147,7 +147,7 @@ async def process_scenario():
         conn = pymysql.connect(host='127.0.0.1', port=int(env['DB_PORT']), user='root', database='yunying_v4_test', autocommit=True)
         try:
             with conn.cursor() as cur:
-                cur.execute('INSERT INTO group_configs (group_id,is_chat_mode) VALUES (%s,%s) ON DUPLICATE KEY UPDATE is_chat_mode=VALUES(is_chat_mode)', (group, int(enabled)))
+                cur.execute('INSERT INTO group_configs (group_id,is_chat_mode,social_paused) VALUES (%s,0,%s) ON DUPLICATE KEY UPDATE social_paused=VALUES(social_paused)', (group, int(not enabled)))
         finally:
             conn.close()
     set_group_mode(True)
@@ -253,7 +253,8 @@ async def process_scenario():
         await eventually(lambda:asyncio.sleep(0,result=len(received)==2))
         assert received[-1]['message'][0]=={'type':'reply','data':{'id':'13'}}
         assert counters['max_active']==1
-        # Exercise the actual legacy website SQL switch, without sending a new wake message.
+        # Exercise the V4 pause permission, without sending a new wake message.
+        # The legacy is_chat_mode remains 0 throughout; @ replies above must still work.
         phase.update(action='silence',step=0)
         async def has_pause(value):
             conn=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')

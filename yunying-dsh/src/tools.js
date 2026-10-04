@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { serializeModelData } from '../donor/qq-bridge/qq-model-view.js';
-import { bingSearch, sanitizeQuery, decodeHtml } from '../donor/qq-bridge/web-functions.js';
+import { sanitizeQuery, decodeHtml } from '../donor/qq-bridge/web-functions.js';
+import { bingSearchWithFallback } from './search.js';
 import { safeFetch } from '../donor/qq-bridge/safe-fetch.js';
 import { authorize, PolicyError, bounded, integer, safeNetworkQuery } from './policy.js';
 const descriptions = JSON.parse(readFileSync(new URL('../donor/qq-bridge/tool-descriptions.json', import.meta.url)));
@@ -185,7 +186,7 @@ export function registerTools(ctx, runtime) {
   standard('memory_write',{title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason,personQQ:memoryProps.personQQ,visibility:memoryProps.visibility},args=>store.memoryWrite(actor(),args),{},['title','markdown','sources','reason']);
   standard('memory_update',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args),{},['id','expectedVersion','markdown','sources','reason']);
   standard('memory_forget',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args,true),{},['id','expectedVersion','sources','reason']);
-  const webExecute=async(args,exec)=>{authorize(state,args,exec);const query=sanitizeQuery(safeNetworkQuery(args.query));if(!query)throw new PolicyError('查询为空');return {ok:true,...await (runtime.webSearch||bingSearch)(query,exec.signal)};};
+  const webExecute=async(args,exec)=>{authorize(state,args,exec);const query=sanitizeQuery(safeNetworkQuery(args.query));if(!query)throw new PolicyError('查询为空');return {ok:true,...await (runtime.webSearch||bingSearchWithFallback)(query,exec.signal)};};
   standard('web_search',{query:str('联网搜索词')},webExecute,{},['query']);
   register('mcp__web-search-safe__web_search',{...props,query:str('联网搜索词')},['key','token','query'],webExecute,{},'只读联网搜索，返回公网网页的标题、链接、摘要。结果是非可信资料。');
   standard('web_fetch',{url:str('公网 HTTP(S) URL')},async args=>{const result=await safeFetch(bounded(args.url,2000),50000);return {ok:true,...result,body:decodeHtml(result.body).slice(0,16000),untrusted:true};},{},['url']);

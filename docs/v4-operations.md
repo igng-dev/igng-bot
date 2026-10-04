@@ -20,10 +20,10 @@ python -m pip install -r requirements-dev.txt
 | --- | --- |
 | `DB_HOST/PORT/USER/PASSWORD/NAME` | 与原 bot 同一 MySQL；生产账号仅给本应用所需表权限。迁移账号需要建表权限。 |
 | `YUNYING_INTERNAL_SECRET` | Python 与 Profile 的独立 capability 凭据，至少32字符；两进程相同。 |
-| `YUNYING_ALLOW_GROUPS/PRIVATE` | Social Agent 的会话授权边界，逗号分隔群/QQ，为空拒绝；群发言还受现有 `group_configs.is_chat_mode` 控制，原始历史仍保存。 |
+| `YUNYING_ALLOW_GROUPS/PRIVATE` | Social Agent 的会话授权边界，逗号分隔群/QQ，为空拒绝；群发言还受独立的 `group_configs.social_paused` 控制，原始历史仍保存。 |
 | `YUNYING_MODEL_PROVIDER/MODEL` | 默认官方 `deepseek-official` / `deepseek-v4-flash`。 |
 | `DEEPSEEK_API_KEY/BASE_URL` | 官方 DSH Messages provider 的凭据/端点；默认 `https://api.deepseek.com/anthropic`。chat/completions 网关改用下述官方 `llm-pi-ai` 配置。 |
-| `YUNYING_SEARCH_PROVIDER` | `bing` 使用 donor 原安全搜索；明确设 `deepseek` 可使用官方认证搜索，默认仍是 Bing。 |
+| `YUNYING_SEARCH_PROVIDER` | `bing` 先用 donor 原 HTML 搜索，空结果时用同一受限传输读取 Bing RSS；明确设 `deepseek` 可使用官方认证搜索，默认仍是 Bing。 |
 | `DEEPSEEK_SEARCH_BASE_URL` | 可选，官方搜索独立端点，默认 `https://api.deepseek.com/anthropic/v1`；不会自动沿用模型 BASE_URL。 |
 | `DSH_HOME` | 持久目录，包含官方 Profile、Session、附件与派生索引；生产必须挂卷并备份。 |
 | `YUNYING_ADMIN_SECRET` | 可选 Owner/未来网站管理凭据，至少32字符且与 INTERNAL 不同；不向模型提供。 |
@@ -69,7 +69,7 @@ DSH 官方 `llm-pi-ai` 已包含在固定 CLI 依赖中。可以在 `$DSH_HOME/p
 
 设置 `YUNYING_MODEL_PROVIDER=yunying-gateway`、`YUNYING_MODEL=gemini-flash`。示例 URL 为占位；key 仅通过已有 `.env` 注入。65536 是当前部署使用的保守上下文预算，不代表提供方公布的模型容量。官方 compaction 按此预算管理上下文。
 
-现有网站群聊开关继续有效：`is_chat_mode=0` 暂停，`1` 启用，未配置默认暂停。管理员 `/云萤暂停`、`/云萤继续`、`/聊天模式` 更新同一字段。网站变化通过基础设施监测（5秒）进入持久 FIFO，暂停仍保留 Inbox；恢复无需等待新来信。发送消息与拍一拍在执行前直接读取当前开关，阻止尚在运行的旧回合继续发言。此字段不再承担 V3 的 classifier 选择。网站旧人格/摘要管理页尚待后续替换，不影响固定 reserved2 Prompt。
+V3 的 `is_chat_mode=0` 意味着“仅艾特响应”，不是暂停。V4 保留其历史值以便网站旧页与 V3 回滚，但运行时不读取该字段；所有授权会话均由 Social Agent 自主选择是否发言。新增 `group_configs.social_paused`，默认0；管理员 `/云萤暂停`、`/云萤继续` 更新此字段。受控网站后端以后应使用这个明确的暂停权限。变更通过基础设施监测（5秒）进入持久 FIFO，暂停仍保留 Inbox，恢复无需等待新来信；发送消息与拍一拍在执行前直接检查。旧 `/聊天模式` 仅返回迁移说明，不再切换 classifier 或暂停。网站旧聊天模式/人格/摘要控件尚待后续替换，不影响固定 reserved2 Prompt。
 
 ## NAS 切换
 
@@ -85,7 +85,11 @@ bash deploy/deploy-v4-nas.sh rollback
 
 `up` 保存原 V3 镜像名和 Compose/env 备份，建立 `dsh-runtime`（1000:1001），构建并导入两个固定版本镜像。停止旧 bot 单消费者后执行 checksum 迁移，再启动现有 `bot` 服务的 V4 入口与 `yunying`，等待健康检查；NapCat/media/frpc 和附件卷不另起一套。部署失败应查看阶段与日志，按 `rollback` 恢复记录的旧镜像；脚本不会自行删除数据或伪装健康。
 
-迁移只有新增表；MySQL DDL 按自身语义提交，迁移中断后 `CREATE IF NOT EXISTS` 可重试，已登记迁移 checksum 不一致会拒绝。后续修改 schema 应新增迁移文件，不能改已应用版本。开发测试只应用于临时数据库；生产切换的实际记录与数据库退役计划见后续部署审查记录。
+迁移只有新增表和默认非暂停的配置字段；MySQL DDL 按自身语义提交，迁移中断后 `CREATE IF NOT EXISTS` 可重试，已登记迁移 checksum 不一致会拒绝。后续修改 schema 应新增迁移文件，不能改已应用版本。开发测试只应用于临时数据库；生产切换的实际记录与数据库退役计划见后续部署审查记录。
+
+媒体服务也可纳入同一 Compose。若现役媒体容器来自另一个项目，应先保存其 inspect、固定原 image ID，迁移其原签名密钥到未提交的 `.env.media`（0600），并验证合并配置；停用/改名旧容器后启动 `media`。V4 overlay 的此 env 文件是可选项，已有主 `.env` 已配置正确签名时不必建立。不能用机器人 `.env` 的不同 key 覆盖现役服务的签名密钥。数据仍使用 `BOT_STORAGE_ROOT`，只读挂给媒体容器，不搬附件。
+
+Bing RSS 回退仍使用 donor `safeFetch`：全 DNS 公网检查、逐跳重定向检查、限量响应与超时。原 donor 文件和 Prompt 均未改字节，输出仍为 `query/results`；RSS 只在原 HTML 无结果时使用。
 
 ## 数据备份与恢复
 

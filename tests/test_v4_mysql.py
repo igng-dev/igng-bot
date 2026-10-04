@@ -112,3 +112,23 @@ def test_real_mysql_call_log_and_site_mirror_retry_are_idempotent(monkeypatch):
         asyncio.run(run())
     finally:
         conn.close()
+
+
+def test_real_mysql_group_pause_migration_can_resume_after_ddl_without_resetting_configuration():
+    from pathlib import Path
+    conn=connection()
+    group=int(uuid4().int % 10**9)+10**9
+    try:
+        migrate(conn)
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO group_configs (group_id,is_chat_mode,social_paused) VALUES (%s,0,1)", (group,))
+            source=Path(__file__).resolve().parents[1]/'migrations/v4/002_group_social_pause.sql'
+            # Simulate DDL committed but checksum registration interrupted. Existing permission survives.
+            for statement in source.read_text().split(';'):
+                if statement.strip():cur.execute(statement)
+            cur.execute('SELECT is_chat_mode,social_paused FROM group_configs WHERE group_id=%s',(group,))
+            assert cur.fetchone()=={'is_chat_mode':0,'social_paused':1}
+            cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='group_configs' AND COLUMN_NAME='social_paused'")
+            assert cur.fetchone()['n']==1
+    finally:
+        conn.close()

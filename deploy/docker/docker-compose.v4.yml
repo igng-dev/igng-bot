@@ -16,6 +16,13 @@ services:
       retries: 6
       start_period: 90s
 
+  media:
+    # Optional operator file preserves an existing service's signing credential
+    # when bringing that service into this Compose project. Never commit it.
+    env_file:
+      - path: .env.media
+        required: false
+
   yunying:
     build:
       context: ../..
