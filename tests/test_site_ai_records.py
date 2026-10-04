@@ -2,6 +2,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from igngbot_v3 import call_log_db
 from igngbot_v3.call_log_db import _extract_tokens, mirror_call_to_site
@@ -102,6 +103,12 @@ class ExtractTokensTest(unittest.TestCase):
 
 
 class MirrorCallToSiteTest(unittest.TestCase):
+    def setUp(self):
+        # Unit fixtures explicitly enable mirroring; CI keeps real site writes disabled.
+        enabled = patch.object(call_log_db.Config, "SITE_AI_RECORDS_ENABLED", True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
+
     def _run(self, coro):
         return asyncio.run(coro)
 
