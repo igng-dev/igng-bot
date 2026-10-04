@@ -42,6 +42,7 @@ class Infrastructure:
         self._send_lock = asyncio.Lock()
         self._stopping = False
         self._journal_signal = asyncio.Event()
+        self._group_modes = {}
 
     async def enqueue(self, raw):
         key, _ = self.journal.enqueue(raw)
@@ -76,11 +77,13 @@ class Infrastructure:
         elif text in {"/云萤暂停", "/云萤继续", "/聊天模式"} and key.startswith("group:"):
             handled = True
             if parsed.get("sender_role") in {"owner", "admin"} or central_admin():
-                with self.conn.cursor() as cur:
-                    cur.execute("SELECT paused FROM yunying_sessions WHERE conversation_key=%s", (key,))
-                    row = cur.fetchone()
-                    pause = text == "/云萤暂停" if text != "/聊天模式" else not bool(row and row["paused"])
-                    cur.execute("UPDATE yunying_sessions SET paused=%s WHERE conversation_key=%s", (int(pause), key))
+                gid = signed_conversation(key)
+                enabled = self.group_enabled(gid)
+                pause = text == "/云萤暂停" if text != "/聊天模式" else enabled
+                with self.db.conn.cursor() as cur:
+                    cur.execute("INSERT INTO group_configs (group_id,is_chat_mode) VALUES (%s,%s) "
+                                "ON DUPLICATE KEY UPDATE is_chat_mode=VALUES(is_chat_mode)", (gid, int(not pause)))
+                self.db.conn.commit()
                 message = "云萤已暂停发言，消息仍正常保存。" if pause else "云萤已恢复发言。"
             else:
                 message = "需要群管理员或 bot 管理员权限。"
@@ -100,10 +103,48 @@ class Infrastructure:
             await self.send({"key": key, "requestId": f"command:{event_id}", "message": message}, owner_command=True)
         return {"commandHandled": handled, **({"pause": pause} if pause is not None else {})}
 
+    def group_enabled(self, gid):
+        # Keep the existing website's group switch authoritative. Missing rows fail closed.
+        # This lease connection is autocommit. The legacy raw-history connection
+        # uses repeatable-read transactions and would cache a website toggle.
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT is_chat_mode FROM group_configs WHERE group_id=%s", (gid,))
+            row = cur.fetchone()
+            return bool(row and row.get("is_chat_mode"))
+
+    def conversation_paused(self, key):
+        gid = signed_conversation(key)
+        if gid > 0 and not self.group_enabled(gid):
+            return True
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT paused FROM yunying_sessions WHERE conversation_key=%s", (key,))
+            row = cur.fetchone()
+            return bool(row and row["paused"])
+
+    async def sync_group_modes(self):
+        for group in sorted(self.settings.groups):
+            enabled = self.group_enabled(int(group))
+            if self._group_modes.get(group) == enabled:
+                continue
+            # Trusted infrastructure control shares the durable per-conversation FIFO.
+            # No fake QQ message is inserted into message_logs, and this never wakes on its own.
+            await self.enqueue({"post_type": "yunying_configuration", "notice_type": "yunying_configuration",
+                                "group_id": int(group), "nonce": str(uuid.uuid4())})
+            self._group_modes[group] = enabled
+
+    async def monitor_group_modes(self):
+        while not self._stopping:
+            await self.sync_group_modes()
+            await asyncio.sleep(5)
+
     async def prepare(self, row):
         raw = decode(row["raw_event"])
         key = row["conversation_key"]
         event_id = row["event_id"]
+        if raw.get("post_type") == "yunying_configuration":
+            return {"eventId": event_id, "key": key, "kind": "message", "isConfiguration": True,
+                    "commandHandled": True, "isSelf": True, "userId": "0", "sender": "群配置",
+                    "text": "[管理员群聊开关已同步]"}
         if raw.get("post_type") == "notice":
             notice = raw.get("notice_type")
             gid = signed_conversation(key)
@@ -154,6 +195,10 @@ class Infrastructure:
                 if payload is not None and not row["prepared_event"]:
                     self.journal.prepare(row["event_id"], payload)
                 if payload is not None and self.settings.allowed(row["conversation_key"]):
+                    gid = signed_conversation(row["conversation_key"])
+                    if gid > 0:
+                        # Prepared/retried events must not restore an obsolete website permission.
+                        payload = {**payload, "pause": not self.group_enabled(gid)}
                     async with self.http.post(self.settings.dsh_url + "/events", json=payload,
                             headers={"Authorization": "Bearer " + self.settings.internal_secret},
                             timeout=ClientTimeout(total=30)) as response:
@@ -193,11 +238,8 @@ class Infrastructure:
                     raise web.HTTPForbidden(text="mention is outside conversation")
         segments = ([{"type": "reply", "data": {"id": str(reply)}}] if reply else []) + ([{"type": "at", "data": {"qq": str(at_user)}}] if at_user else []) + [{"type": "text", "data": {"text": message}}]
         async with self._send_lock:
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT paused FROM yunying_sessions WHERE conversation_key=%s", (key,))
-                row = cur.fetchone()
-                if row and row["paused"] and not owner_command:
-                    return {"ok": False, "error": "管理员已暂停本会话发言"}
+            if not owner_command and self.conversation_paused(key):
+                return {"ok": False, "error": "管理员已暂停本会话发言"}
             fresh, prior = self.journal.begin_send(request_id, key, {"message": message, "reply": reply, "at": at_user})
             if not fresh:
                 return prior
@@ -264,6 +306,8 @@ class Infrastructure:
                 return web.json_response({"ok": True, "images": images, "isRecalled": bool(row.get("is_recalled"))})
             return web.json_response({"ok": True, "message": message_view(row)})
         if request.path == "/poke":
+            if self.conversation_paused(key):
+                return web.json_response({"ok": False, "error": "管理员已暂停本会话发言"})
             # Fixed capability, never an arbitrary OneBot action supplied by the model.
             uid = str(data.get("userId", ""))
             if not re.fullmatch(r"[1-9][0-9]{0,19}", uid):
@@ -345,13 +389,16 @@ class Infrastructure:
         await runner.setup()
         await web.TCPSite(runner, self.settings.host, self.settings.port).start()
         stop = asyncio.Event()
+        await self.sync_group_modes()
         worker = asyncio.create_task(self.deliver())
+        config_worker = asyncio.create_task(self.monitor_group_modes())
         def delivery_done(task):
             if not self._stopping:
                 failure = 'Cancelled' if task.cancelled() else type(task.exception()).__name__
                 logger.error('Durable delivery worker stopped: %s', failure)
                 stop.set()
         worker.add_done_callback(delivery_done)
+        config_worker.add_done_callback(delivery_done)
         notifier = None
         if self.config.IGNG_SITE_DB_HOST:
             notifier = McTicketNotifier(self.config, db=self.db)
@@ -368,7 +415,8 @@ class Infrastructure:
             self._stopping = True
             self.client.stop()
             worker.cancel()
-            await asyncio.gather(worker, return_exceptions=True)
+            config_worker.cancel()
+            await asyncio.gather(worker, config_worker, return_exceptions=True)
             if notifier:
                 await notifier.stop()
             await runner.cleanup()

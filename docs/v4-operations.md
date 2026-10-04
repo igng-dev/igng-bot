@@ -20,9 +20,9 @@ python -m pip install -r requirements-dev.txt
 | --- | --- |
 | `DB_HOST/PORT/USER/PASSWORD/NAME` | 与原 bot 同一 MySQL；生产账号仅给本应用所需表权限。迁移账号需要建表权限。 |
 | `YUNYING_INTERNAL_SECRET` | Python 与 Profile 的独立 capability 凭据，至少32字符；两进程相同。 |
-| `YUNYING_ALLOW_GROUPS/PRIVATE` | 逗号分隔启用的群/QQ；为空拒绝。只控制 Social Agent，原始历史仍保存。 |
+| `YUNYING_ALLOW_GROUPS/PRIVATE` | Social Agent 的会话授权边界，逗号分隔群/QQ，为空拒绝；群发言还受现有 `group_configs.is_chat_mode` 控制，原始历史仍保存。 |
 | `YUNYING_MODEL_PROVIDER/MODEL` | 默认官方 `deepseek-official` / `deepseek-v4-flash`。 |
-| `DEEPSEEK_API_KEY/BASE_URL` | 官方 DSH Messages provider 的凭据/端点；默认 `https://api.deepseek.com/anthropic`。V3 chat/completions 端点不能直接沿用。 |
+| `DEEPSEEK_API_KEY/BASE_URL` | 官方 DSH Messages provider 的凭据/端点；默认 `https://api.deepseek.com/anthropic`。chat/completions 网关改用下述官方 `llm-pi-ai` 配置。 |
 | `YUNYING_SEARCH_PROVIDER` | `bing` 使用 donor 原安全搜索；明确设 `deepseek` 可使用官方认证搜索，默认仍是 Bing。 |
 | `DEEPSEEK_SEARCH_BASE_URL` | 可选，官方搜索独立端点，默认 `https://api.deepseek.com/anthropic/v1`；不会自动沿用模型 BASE_URL。 |
 | `DSH_HOME` | 持久目录，包含官方 Profile、Session、附件与派生索引；生产必须挂卷并备份。 |
@@ -39,6 +39,38 @@ YUNYING_PACKAGE_DIR="$PWD/yunying-dsh" DSH_HOME=/persistent/yunying sh scripts/r
 
 Profile 启动脚本只在初次目录不存在时调用官方 `dsh plugin --profile yunying add`，已有无关 Profile 会拒绝启动。正常启动沿用既有 Profile；升级须保留 `DSH_HOME`，不能重新初始化为临时目录。
 
+## 复用现有 OpenAI 网关
+
+DSH 官方 `llm-pi-ai` 已包含在固定 CLI 依赖中。可以在 `$DSH_HOME/profiles/yunying/cordis.patch.yml` 配置手工 provider route；不要修改 DSH 核心或自动生成的根 `cordis.yml`。本次 NAS 沿用已有 `LLM_LOCAL_BASE_URL/LLM_LOCAL_MODEL/LLM_LOCAL_API_KEY`，模型依然是 Gemini，由 DSH 执行 Agent Loop/工具续接/压缩。
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      yunying-gateway:
+        apiKeyEnv: LLM_LOCAL_API_KEY
+        api: openai-completions
+        baseURL: https://gateway.example/v1
+        models:
+          - id: gemini-flash
+            contextWindow: 65536
+            maxTokens: 8192
+            input: [text, image]
+            reasoningEfforts: false
+        compat:
+          supportsDeveloperRole: false
+          supportsStore: false
+          supportsStrictMode: false
+          maxTokensField: max_tokens
+        retryPolicy:
+          mode: normal
+          maxRetries: 2
+```
+
+设置 `YUNYING_MODEL_PROVIDER=yunying-gateway`、`YUNYING_MODEL=gemini-flash`。示例 URL 为占位；key 仅通过已有 `.env` 注入。65536 是当前部署使用的保守上下文预算，不代表提供方公布的模型容量。官方 compaction 按此预算管理上下文。
+
+现有网站群聊开关继续有效：`is_chat_mode=0` 暂停，`1` 启用，未配置默认暂停。管理员 `/云萤暂停`、`/云萤继续`、`/聊天模式` 更新同一字段。网站变化通过基础设施监测（5秒）进入持久 FIFO，暂停仍保留 Inbox；恢复无需等待新来信。发送消息与拍一拍在执行前直接读取当前开关，阻止尚在运行的旧回合继续发言。此字段不再承担 V3 的 classifier 选择。网站旧人格/摘要管理页尚待后续替换，不影响固定 reserved2 Prompt。
+
 ## NAS 切换
 
 沿用既有 VM 构建→压缩导入 NAS 镜像通道。首次复制 `deploy/docker/.env.v4.example` 为 `.env.v4`，填入启用会话、独立 secrets、官方模型凭据和固定源码版本镜像。既有 `.env` 保留 DB/OneBot/media/网站参数。
@@ -53,7 +85,7 @@ bash deploy/deploy-v4-nas.sh rollback
 
 `up` 保存原 V3 镜像名和 Compose/env 备份，建立 `dsh-runtime`（1000:1001），构建并导入两个固定版本镜像。停止旧 bot 单消费者后执行 checksum 迁移，再启动现有 `bot` 服务的 V4 入口与 `yunying`，等待健康检查；NapCat/media/frpc 和附件卷不另起一套。部署失败应查看阶段与日志，按 `rollback` 恢复记录的旧镜像；脚本不会自行删除数据或伪装健康。
 
-迁移只有新增表；MySQL DDL 按自身语义提交，迁移中断后 `CREATE IF NOT EXISTS` 可重试，已登记迁移 checksum 不一致会拒绝。后续修改 schema 应新增迁移文件，不能改已应用版本。开发测试只应用于临时数据库，本任务没有写生产数据库、构建 Docker 镜像或执行 NAS 部署。
+迁移只有新增表；MySQL DDL 按自身语义提交，迁移中断后 `CREATE IF NOT EXISTS` 可重试，已登记迁移 checksum 不一致会拒绝。后续修改 schema 应新增迁移文件，不能改已应用版本。开发测试只应用于临时数据库；生产切换的实际记录与数据库退役计划见后续部署审查记录。
 
 ## 数据备份与恢复
 
