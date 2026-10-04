@@ -48,18 +48,36 @@ def exists(conn, table):
         return bool(cur.fetchone()["n"])
 
 
+def canonical_schema(ddl):
+    """Ignore only a redundant charset already determined by COLLATE.
+
+    SHOW CREATE after a MySQL dump/restore can add CHARACTER SET. Quoted
+    defaults/comments/identifiers are preserved byte for byte. Column metadata
+    is compared independently; no type, index, collation or default is ignored.
+    """
+    pattern = r"'(?:\\.|''|[^'])*'|`(?:``|[^`])*`|\bCHARACTER SET ([A-Za-z0-9_]+) COLLATE ([A-Za-z0-9_]+)"
+    def replace(match):
+        charset, collation = match.group(1), match.group(2)
+        if charset and collation.startswith(charset + "_"):
+            return "COLLATE " + collation
+        return match.group(0)
+    return re.sub(pattern, replace, ddl)
+
+
 def table_snapshot(conn, table):
     """Portable digest of actual rows, including NULL and JSON strings, by PK."""
     with conn.cursor() as cur:
         cur.execute("SHOW CREATE TABLE " + identifier(table))
         ddl = cur.fetchone()["Create Table"]
+        cur.execute("SELECT COLUMN_NAME,ORDINAL_POSITION,COLUMN_TYPE,COLUMN_DEFAULT,IS_NULLABLE,CHARACTER_SET_NAME,COLLATION_NAME,EXTRA,COLUMN_COMMENT,GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION", (table,))
+        column_hash = digest(cur.fetchall())
         cur.execute("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME='PRIMARY' ORDER BY SEQ_IN_INDEX", (table,))
         keys = [r["COLUMN_NAME"] for r in cur.fetchall()]
         if not keys:
             raise ValueError("snapshot requires a primary key")
         cur.execute("SELECT * FROM " + identifier(table) + " ORDER BY " + ",".join(map(identifier, keys)))
         rows = list(cur.fetchall())
-    return {"table": table, "create_sql": ddl, "rows": rows, "row_count": len(rows), "content_sha256": digest(rows), "schema_sha256": hashlib.sha256(ddl.encode()).hexdigest()}
+    return {"table": table, "create_sql": ddl, "rows": rows, "row_count": len(rows), "content_sha256": digest(rows), "schema_sha256": hashlib.sha256(canonical_schema(ddl).encode()).hexdigest(), "columns_sha256": column_hash}
 
 
 def server_identity(conn):
@@ -92,11 +110,11 @@ def prove_restore(source, restored, backup, output):
     for name in names:
         a, b = table_snapshot(source, name), table_snapshot(restored, name)
         # SHOW CREATE includes restored auto_increment, charset, collation and indexes.
-        if a["content_sha256"] != b["content_sha256"] or a["create_sql"] != b["create_sql"]:
+        if a["content_sha256"] != b["content_sha256"] or a["schema_sha256"] != b["schema_sha256"] or a["columns_sha256"] != b["columns_sha256"]:
             raise ValueError("restored table differs: " + name)
-        tables[name] = {k: a[k] for k in ("row_count", "content_sha256", "schema_sha256")}
+        tables[name] = {k: a[k] for k in ("row_count", "content_sha256", "schema_sha256", "columns_sha256")}
     backup = Path(backup)
-    proof = {"format": 1, "restore_verified": True, "database": origin["db"],
+    proof = {"format": 2, "restore_verified": True, "database": origin["db"],
              "server_uuid": origin["uuid"], "backup_file": backup.name,
              "backup_sha256": hashlib.sha256(backup.read_bytes()).hexdigest(), "tables": tables,
              "verified_at": datetime.now().isoformat()}
@@ -129,7 +147,7 @@ class Retirement:
         path = Path(self.proof)
         self.evidence = json.loads(path.read_text())
         p = self.evidence
-        if p.get("format") != 1 or p.get("restore_verified") is not True:
+        if p.get("format") != 2 or p.get("restore_verified") is not True:
             raise ValueError("invalid restore proof")
         archive = path.parent / p["backup_file"]
         if archive.parent.resolve() != path.parent.resolve() or hashlib.sha256(archive.read_bytes()).hexdigest() != p["backup_sha256"]:
@@ -145,7 +163,7 @@ class Retirement:
     def verified_snapshot(self, table):
         snap = table_snapshot(self.conn, table)
         recorded = self.evidence["tables"].get(table)
-        if recorded != {k: snap[k] for k in ("row_count", "content_sha256", "schema_sha256")}:
+        if recorded != {k: snap[k] for k in ("row_count", "content_sha256", "schema_sha256", "columns_sha256")}:
             raise ValueError("backup is stale for " + table)
         return snap
 
