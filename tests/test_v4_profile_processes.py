@@ -143,6 +143,14 @@ async def process_scenario():
       'STORAGE_REQUIRE_MOUNT':'0','MEDIA_OCR_ENABLED':'0','MEDIA_ASR_ENABLED':'0','MC_TICKET_NOTIFICATION_GROUP':'0','MC_TICKET_TECH_NOTIFICATION_GROUP':'0',
       'SITE_AI_RECORDS_ENABLED':'0','DEEPSEEK_API_KEY':secrets.token_hex(32),'DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server_port}/anthropic',
       'YUNYING_SEARCH_PROVIDER':'deepseek','DEEPSEEK_SEARCH_BASE_URL':f'http://127.0.0.1:{server_port}/anthropic/v1','NO_PROXY':'127.0.0.1,localhost'}
+    def set_group_mode(enabled):
+        conn = pymysql.connect(host='127.0.0.1', port=int(env['DB_PORT']), user='root', database='yunying_v4_test', autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute('INSERT INTO group_configs (group_id,is_chat_mode) VALUES (%s,%s) ON DUPLICATE KEY UPDATE is_chat_mode=VALUES(is_chat_mode)', (group, int(enabled)))
+        finally:
+            conn.close()
+    set_group_mode(True)
     processes=[]
     logs=[]
     async def start_processes():
@@ -196,7 +204,7 @@ async def process_scenario():
                 conn=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
                 try:
                     with conn.cursor() as cur:
-                        cur.execute('SELECT COUNT(*) FROM yunying_events WHERE conversation_key=%s',(key,))
+                        cur.execute("SELECT COUNT(*) FROM yunying_events WHERE conversation_key=%s AND JSON_EXTRACT(payload,'$.isConfiguration') IS NULL",(key,))
                         return cur.fetchone()[0]==12
                 finally:
                     conn.close()
@@ -245,6 +253,37 @@ async def process_scenario():
         await eventually(lambda:asyncio.sleep(0,result=len(received)==2))
         assert received[-1]['message'][0]=={'type':'reply','data':{'id':'13'}}
         assert counters['max_active']==1
+        # Exercise the actual legacy website SQL switch, without sending a new wake message.
+        phase.update(action='silence',step=0)
+        async def has_pause(value):
+            conn=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
+            try:
+                with conn.cursor() as cur:
+                    cur.execute('SELECT paused FROM yunying_sessions WHERE conversation_key=%s',(key,))
+                    return bool(cur.fetchone()[0]) == value
+            finally:
+                conn.close()
+        set_group_mode(False)
+        await eventually(lambda:has_pause(True),15)
+        requests=counters['requests']
+        await incoming(14,'暂停期间仍应保存并排队',at=True)
+        async def paused_event_saved():
+            conn=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
+            try:
+                with conn.cursor() as cur:
+                    cur.execute('SELECT COUNT(*) FROM message_logs WHERE group_id=%s AND msg_id=%s',(group,'14'))
+                    raw=cur.fetchone()[0]
+                    cur.execute("SELECT COUNT(*) FROM yunying_events WHERE conversation_key=%s AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.messageId'))='14' AND delivered=1",(key,))
+                    return raw==1 and cur.fetchone()[0]==1
+            finally:
+                conn.close()
+        await eventually(paused_event_saved)
+        await asyncio.sleep(.3)
+        assert counters['requests']==requests and len(received)==2
+        set_group_mode(True)
+        await eventually(lambda:has_pause(False),15)
+        await eventually(lambda:asyncio.sleep(0,result=counters['requests']>requests))
+        assert mapping()==before and counters['max_active']==1
     finally:
         await stop_processes()
         for log in logs:
