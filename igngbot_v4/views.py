@@ -62,8 +62,6 @@ def row_images(row, storage, root, limit=3):
                     collect(child, depth + 1)
     collect(attachments)
     collect(structure)
-    if row.get("file_type") == "image" and row.get("file_url"):
-        candidates.append(row["file_url"])
     images = []
     for stored in dict.fromkeys(candidates):
         path = Path(storage.resolve_path(stored)).resolve()

@@ -29,7 +29,11 @@ sync_config() {
   sed '/^BOT_V4_IMAGE=/d; /^YUNYING_IMAGE=/d' "$COMPOSE_DIR/.env.v4" > "$staged_env"
   printf '\nBOT_V4_IMAGE=%s\nYUNYING_IMAGE=%s\n' "$BOT_V4_IMAGE" "$YUNYING_IMAGE" >> "$staged_env"
   scp -q -o BatchMode=yes -o StrictHostKeyChecking=yes "$staged_env" "$NAS_TARGET:$NAS_ROOT/.env.v4"
-  rm -f "$staged_env"
+  local env_archive
+  env_archive="${XDG_CACHE_HOME:-$HOME/.cache}/igngbot-deploy-private"
+  mkdir -p "$env_archive"
+  chmod 700 "$env_archive"
+  mv "$staged_env" "$env_archive/env-$(date -u +%Y%m%dT%H%M%SZ)-$V4_VERSION"
   nas "chmod 600 '$NAS_ROOT/.env.v4'"
 }
 images() {
@@ -42,13 +46,16 @@ up() {
   sync_config
   images
   # Stop the sole legacy consumer before schema migration and V4 startup.
-  nas "cd '$NAS_ROOT' && docker compose stop bot"
+  nas "cd '$NAS_ROOT' && $compose stop bot yunying"
   nas "cd '$NAS_ROOT' && BOT_V4_IMAGE='$BOT_V4_IMAGE' YUNYING_IMAGE='$YUNYING_IMAGE' $compose run --rm --no-deps --entrypoint python bot -m igngbot_v4.migrate"
   nas "cd '$NAS_ROOT' && BOT_V4_IMAGE='$BOT_V4_IMAGE' YUNYING_IMAGE='$YUNYING_IMAGE' $compose up -d --no-build bot yunying"
   nas "cd '$NAS_ROOT' && $compose up -d --wait --wait-timeout 180 --no-build bot yunying && $compose ps"
 }
 rollback() {
-  # Restore the recorded V3 image with the base definition. New MySQL/DSH data stay intact.
+  # Restore retired legacy contracts with the reviewed V4 image before V3 starts.
+  # Official DSH data and current message/Memory records remain intact.
+  nas "cd '$NAS_ROOT' && $compose stop bot yunying"
+  nas "cd '$NAS_ROOT' && $compose run -T --rm --no-deps --entrypoint python bot -c 'from igngbot_v4.migrate import connect; from igngbot_v4.retire import Retirement, exists; c=connect(); print(Retirement(c).restore(apply=True) if exists(c, \"yunying_legacy_tables\") else \"No retirement archive\"); c.close()'"
   nas "cd '$NAS_ROOT' && test -s .v4-rollback-image && $compose stop bot yunying && cp v4-backups/docker-compose.v3.yml docker-compose.yml && BOT_IMAGE=\$(cat .v4-rollback-image) docker compose --env-file .env -f docker-compose.yml up -d --no-build bot && docker compose --env-file .env -f docker-compose.yml ps bot"
 }
 case "${1:-}" in

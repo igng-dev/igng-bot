@@ -104,7 +104,8 @@ cmd_image() {
     | nas "cat > '$NAS_ROOT/.bot-image.tar.zst'"
 
   log "Loading image on the NAS"
-  nas "zstd -d -c '$NAS_ROOT/.bot-image.tar.zst' | docker load && rm -f '$NAS_ROOT/.bot-image.tar.zst'"
+  # Keep the imported artifact as a rollback aid instead of deleting it.
+  nas "zstd -d -c '$NAS_ROOT/.bot-image.tar.zst' | docker load && mkdir -p '$NAS_ROOT/v4-backups/image-imports' && mv '$NAS_ROOT/.bot-image.tar.zst' '$NAS_ROOT/v4-backups/image-imports/bot-$(date -u +%Y%m%dT%H%M%SZ).tar.zst'"
 }
 
 cmd_up() {

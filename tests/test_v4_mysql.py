@@ -73,7 +73,7 @@ def test_real_mysql_migration_fifo_retry_restart_and_identity_consent():
         conn.close()
 
 
-def test_real_mysql_call_log_and_site_mirror_retry_are_idempotent(monkeypatch):
+def test_real_mysql_unlinked_baseline_export_without_call_logs_is_idempotent(monkeypatch):
     conn = connection()
     # Website schema-shaped fixtures live only in the disposable test database.
     with conn.cursor() as cur:
@@ -104,14 +104,12 @@ def test_real_mysql_call_log_and_site_mirror_retry_are_idempotent(monkeypatch):
     app.conn = conn
     async def run():
         try:
-            await call_log_db.ensure_call_logs_table()
             a = await app.ai_record({'recordId':record_id})
             b = await app.ai_record({'recordId':record_id})
             assert a == b and a['ok']
             with conn.cursor() as cur:
-                cur.execute('SELECT COUNT(*) total FROM call_logs WHERE id=%s', (a['callLogId'],))
-                assert cur.fetchone()['total'] == 1
-                cur.execute('SELECT * FROM ai_jobs WHERE service=%s AND task_key=%s', ('igng-bot',str(a['callLogId'])))
+                assert a['callLogId'] is None
+                cur.execute('SELECT * FROM ai_jobs WHERE service=%s AND task_key=%s', ('igng-bot','dsh-legacy:'+record_id))
                 rows = cur.fetchall()
                 assert len(rows) == 1
                 assert rows[0]['prompt_tokens'] == 30
@@ -156,7 +154,7 @@ def test_recording_continues_while_dsh_delivery_retries_and_admin_toggle_is_once
     group=int(uuid4().int%10**8)+5000000000
     config=SimpleNamespace(DB_HOST='127.0.0.1',DB_PORT=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),DB_USER='root',DB_PASSWORD='',DB_NAME='yunying_v4_test')
     app=Infrastructure.__new__(Infrastructure)
-    app.conn=conn;app.db=DBHandler(config);app.journal=Journal(conn)
+    app.conn=conn;app.db=DBHandler(config, legacy_compat=False);app.journal=Journal(conn)
     app.settings=Settings(str(uuid4()),groups=frozenset({str(group)}));app._stopping=False
     app._journal_signal=asyncio.Event();app._delivery_signal=asyncio.Event()
     app.http=MagicMock();app.http.post.return_value=Response()

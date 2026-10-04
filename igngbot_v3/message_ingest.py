@@ -45,6 +45,7 @@ async def persist_message(self, data):
     # Persist incoming messages and download attachments before command or
     # task handling so continuous task mode can use stable NAS paths and
     # media-derived text can be included in the same LLM turn.
+    legacy_compat = getattr(self.db, "legacy_compat", True)
     file_url = None
     file_type = None
     audio_file_path = None
@@ -151,10 +152,10 @@ async def persist_message(self, data):
                     attachment["text_extraction_status"] = media_result.status
                     attachment["text_extraction_backend"] = media_result.backend
                 stored_attachments.append(attachment)
-                if file_url is None:
+                if legacy_compat and file_url is None:
                     file_url = stored_path
                     file_type = file_info["type"]
-                if file_info["type"] in ("audio", "record") and audio_file_path is None:
+                if legacy_compat and file_info["type"] in ("audio", "record") and audio_file_path is None:
                     audio_file_path = stored_path
 
     append_media_text(parsed, extracted_media)
@@ -192,8 +193,6 @@ async def persist_message(self, data):
             attachments_json=_json_dump(stored_attachments) if stored_attachments else None,
             reply_to_msg_id=parsed["reply_to_msg_id"],
             msg_id=parsed["msg_id"],
-            file_url=file_url,
-            file_type=file_type,
             created_at=(
                 unix_to_utc_naive(parsed["created_at"])
                 if parsed.get("created_at")
@@ -201,7 +200,7 @@ async def persist_message(self, data):
             ),
             is_self=parsed.get("is_self", False),
             message_source=parsed.get("message_source"),
-            audio_file_path=audio_file_path,
+            **({"file_url": file_url, "file_type": file_type, "audio_file_path": audio_file_path} if legacy_compat else {}),
             audio_transcript=parsed.get("audio_transcript", ""),
         )
 
