@@ -57,9 +57,9 @@ def retired_db(tmp_path):
         cur.execute('SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()')
         names = [r['TABLE_NAME'] for r in cur.fetchall()]
     snapshots = {n:table_snapshot(conn,n) for n in names}
-    proof = {'format':1,'restore_verified':True,'database':name,'server_uuid':server_identity(conn),
+    proof = {'format':2,'restore_verified':True,'database':name,'server_uuid':server_identity(conn),
         'backup_file':archive.name,'backup_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),
-        'tables':{n:{k:s[k] for k in ('row_count','content_sha256','schema_sha256')} for n,s in snapshots.items()}}
+        'tables':{n:{k:s[k] for k in ('row_count','content_sha256','schema_sha256','columns_sha256')} for n,s in snapshots.items()}}
     manifest = tmp_path/'restore-proof.json'; manifest.write_text(json.dumps(proof))
     try:
         yield conn, db, config, Retirement(conn, manifest), snapshots, event, manifest
@@ -184,7 +184,7 @@ def test_only_aged_completed_payloads_archive_and_control_results_survive(retire
     _, pending = journal.enqueue({'post_type':'message','group_id':1001,'user_id':2001,'message_id':8003})
     with conn.cursor() as cur: cur.execute('UPDATE yunying_ingress SET delivered_at=%s WHERE event_id=%s',(datetime.now()-timedelta(days=31),control))
     proof=json.loads(manifest.read_text()); snap=table_snapshot(conn,'yunying_ingress')
-    proof['tables']['yunying_ingress']={k:snap[k] for k in ('row_count','content_sha256','schema_sha256')}; manifest.write_text(json.dumps(proof))
+    proof['tables']['yunying_ingress']={k:snap[k] for k in ('row_count','content_sha256','schema_sha256','columns_sha256')}; manifest.write_text(json.dumps(proof))
     assert retire.ingress(apply=True)['archived_ingress']==2
     assert journal.group_control(control,1001,'is_chat_mode',False)
     with conn.cursor() as cur:

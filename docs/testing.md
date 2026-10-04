@@ -124,3 +124,6 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 新 SQL fixtures 覆盖：完整归档/恢复、原 Prompt 与 NULL/空字符串、tokens/task ID、媒体路径与字段顺序、撤回 tombstone、旧表缺失的历史读取、过期 ingress与命令幂等、陈旧证明/租约/未决发送拒绝、腐坏归档拒绝、DDL 中断重试和恢复后管理员改动保护。fixture 中合成证明只用于测试各 guard，不代表已经做过生产备份恢复；实际全库 SQL 的独立恢复证明与部署结果须另行登记。此前一次复跑因 SSH 测试转发已经退出而连接失败，重新建立只绑定 loopback 的转发后上述完整验证全部通过。
 
 操作与 V3 恢复边界见 [数据退役流程](v4-retirement.md)。Social Prompt 字节、官方 Session/Compaction、Memory 工具权限和模型目录仍由原回归覆盖，不在这次清理中改写。
+
+
+实际 MySQL 恢复证明的 schema 表示修订后，补充冗余 charset / 实际类型和排序规则 / 默认值与备注原文的差异回归；最终 Python114 / Node30（独立 MySQL8.0.36及官方双进程，无 skip）。证明对实际列定义也独立做哈希；不能以 DDL 等价归一化掩盖真实 schema 差异。
