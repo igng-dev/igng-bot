@@ -53,6 +53,10 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 两条命令串行运行，因为数据库独占租约主动阻止两个 Profile 同时拥有同一 DB。双进程测试需 Node >=24、pnpm 和已安装官方 `dsh`；可选 `YUNYING_TEST_DSH_BIN` 指定其实际 CLI 路径。
 
+## CI
+
+已有 `.github/workflows/ci.yml` 已扩展：Python3.12/Node24、官方 CLI、一次性 loopback MySQL8.4、schema 初始化、两个完整测试套件（含双进程故障恢复）、语法和凭据扫描。CI 不使用生产配置，不发布或部署。实际远端 run 结果另在 PR 记录。
+
 ## 2026-10-04 实际结果
 
 环境：CPython3.12.13，Node24.18.0，官方 DSH0.2.1-alpha.1，独立 loopback MariaDB11.8.6（MySQL 协议/InnoDB，33316），独立 Compose CLI2.40.3。没有使用生产 MySQL、真实 QQ 或模型凭据。
