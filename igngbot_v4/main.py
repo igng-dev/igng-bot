@@ -18,8 +18,8 @@ from igngbot_v3.message_parser import parse_message
 from igngbot_v3.onebot_client import OneBotClient
 from igngbot_v3.mc_ticket_notifications import McTicketNotifier
 from igngbot_v3.timeutil import unix_to_utc_naive
-from igngbot_v3.call_log_db import ensure_call_logs_table, insert_call_log, mirror_call_to_site, close_call_log_pool
-from .ai_records import mirror_native_record
+from igngbot_v3.call_log_db import mirror_call_to_site, close_call_log_pool
+from .ai_records import mirror_native_record, historical_record
 from .journal import Journal, decode, encode
 from .migrate import connect, migrate
 from .settings import Settings, signed_conversation
@@ -32,7 +32,7 @@ class Infrastructure:
     def __init__(self, config=None, settings=None):
         self.config = config or Config()
         self.settings = settings or Settings.from_env()
-        self.db = DBHandler(self.config)
+        self.db = DBHandler(self.config, legacy_compat=False)
         self.storage = StorageHandler(self.config)
         self.media_text = MediaTextExtractor(self.config)
         self.conn = None
@@ -387,38 +387,20 @@ class Infrastructure:
             source = cur.fetchone()
             if not source:
                 raise web.HTTPNotFound()
-        native = decode(source["payload"])
-        if native.get("task_key"):
-            mirrored = await mirror_native_record(record_id, native)
-            if native.get("record_kind") == "task-end":
-                return {"ok": bool(mirrored), "callLogId": None}
-        else:
-            mirrored = None
-        # Compatibility history has its own idempotent link. Universal export above
-        # has no call_log_id dependency and can succeed even if compatibility fails.
-        self.conn.begin()
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT call_log_id,payload FROM yunying_ai_records WHERE record_id=%s FOR UPDATE", (record_id,))
-                row = cur.fetchone()
-                if not row:
-                    raise web.HTTPNotFound()
-                payload = decode(row["payload"])
-                call_id = row["call_log_id"]
-                if not call_id:
-                    columns = ["group_id", "sender_id", "sender_name", "message_text", "call_type", "model", "system_prompt", "user_prompt", "response_content", "tool_calls", "token_usage", "duration_ms", "success", "error_message"]
-                    values = [encode(payload.get(k)) if k in {"tool_calls", "token_usage"} else payload.get(k, "") for k in columns]
-                    cur.execute("INSERT INTO call_logs (" + ",".join(columns) + ") VALUES (" + ",".join(["%s"] * len(columns)) + ")", values)
-                    call_id = cur.lastrowid
-                    cur.execute("UPDATE yunying_ai_records SET call_log_id=%s WHERE record_id=%s", (call_id, record_id))
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        if mirrored is None:
+        payload = decode(source["payload"])
+        if payload.get("task_key"):
+            return {"ok": bool(await mirror_native_record(record_id, payload)), "callLogId": None}
+        # Already-linked V4 baseline records retain their original website job IDs.
+        # No new call_logs rows are ever produced by V4, including replay/retry.
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT call_log_id FROM yunying_ai_records WHERE record_id=%s", (record_id,))
+            call_id = cur.fetchone()["call_log_id"]
+        if call_id:
             mirrored = await mirror_call_to_site(call_log_id=call_id, durable=True, **{k: v for k, v in payload.items() if k in {
-            "group_id", "sender_id", "sender_name", "message_text", "call_type", "model", "system_prompt", "user_prompt",
-            "response_content", "token_usage", "duration_ms", "success", "error_message", "provider"}})
+                "group_id", "sender_id", "sender_name", "message_text", "call_type", "model", "system_prompt", "user_prompt",
+                "response_content", "token_usage", "duration_ms", "success", "error_message", "provider"}})
+        else:
+            mirrored = await mirror_native_record(record_id, historical_record(record_id, payload))
         return {"ok": bool(mirrored), "callLogId": call_id}
 
     async def run(self):
@@ -434,7 +416,6 @@ class Infrastructure:
                 raise RuntimeError("another V4 OneBot consumer owns this database")
         self.journal = Journal(self.conn)
         self.storage.check_available()
-        await ensure_call_logs_table()
         self.http = ClientSession()
         app = web.Application(client_max_size=4 * 1024 * 1024)
         async def health(_request):

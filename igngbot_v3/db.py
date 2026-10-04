@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class DBHandler:
-    def __init__(self, config):
+    def __init__(self, config, *, legacy_compat=True):
         self.config = config
+        # V3 rollback opts into its old schema. V4 never creates, reads or writes it.
+        self.legacy_compat = legacy_compat
         self._conn = None
         self._identity_conn = None
         self._identity_lock = threading.Lock()
@@ -48,9 +50,17 @@ class DBHandler:
                     raise
         return self._conn
 
+    @property
+    def _media_columns(self):
+        return "attachments_json, file_url, file_type" if self.legacy_compat else "attachments_json"
+
     def init_message_tables(self):
+        legacy_columns = """
+                    file_url VARCHAR(500) COMMENT '文件地址',
+                    file_type VARCHAR(50) COMMENT '文件类型(image/video/file/audio)',
+                    audio_file_path VARCHAR(500) COMMENT '语音文件路径',""" if self.legacy_compat else ""
         with self.conn.cursor() as cursor:
-            cursor.execute("""
+            cursor.execute(f"""
                 CREATE TABLE IF NOT EXISTS message_logs (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     group_id BIGINT NOT NULL COMMENT '群号',
@@ -61,9 +71,7 @@ class DBHandler:
                     attachments_json MEDIUMTEXT COMMENT '附件JSON',
                     reply_to_msg_id VARCHAR(50) COMMENT '回复的消息ID',
                     msg_id VARCHAR(50) NOT NULL COMMENT '消息ID',
-                    file_url VARCHAR(500) COMMENT '文件地址',
-                    file_type VARCHAR(50) COMMENT '文件类型(image/video/file/audio)',
-                    audio_file_path VARCHAR(500) COMMENT '语音文件路径',
+                    {legacy_columns}
                     audio_transcript TEXT COMMENT '语音转写文本',
                     is_self TINYINT(1) DEFAULT 0 COMMENT '是否是自己发送的消息',
                     message_source VARCHAR(32) NOT NULL DEFAULT 'inbound' COMMENT '消息来源',
@@ -106,6 +114,8 @@ class DBHandler:
                 "ALTER TABLE message_logs ADD COLUMN recall_operator_id BIGINT NULL COMMENT '执行撤回的QQ号'",
                 "ALTER TABLE message_logs ADD COLUMN message_source VARCHAR(32) NOT NULL DEFAULT 'inbound' COMMENT '消息来源'",
             ):
+                if not self.legacy_compat and "audio_file_path" in sql:
+                    continue
                 try:
                     cursor.execute(sql)
                 except Exception as exc:
@@ -564,20 +574,17 @@ class DBHandler:
         normalized_source = str(
             message_source or ("onebot_event" if is_self else "inbound")
         ).strip()[:32] or ("onebot_event" if is_self else "inbound")
-        sql = """
-            INSERT INTO message_logs
-            (group_id, sender_id, message_content, plain_text_content, message_structure,
-             attachments_json, reply_to_msg_id, msg_id, file_url, file_type,
-             audio_file_path, audio_transcript, created_at, is_self, message_source,
-             is_recalled, recalled_at, recall_operator_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        values = (
-            normalized_group_id, sender_id, message_content, plain_text_content, message_structure,
-            attachments_json, reply_to_msg_id, normalized_msg_id, file_url, file_type,
-            audio_file_path, audio_transcript, stored_created_at, is_self, normalized_source,
-            1 if is_recalled else 0, stored_recalled_at, recall_operator_id,
-        )
+        columns = ["group_id", "sender_id", "message_content", "plain_text_content", "message_structure",
+                   "attachments_json", "reply_to_msg_id", "msg_id"]
+        values = (normalized_group_id, sender_id, message_content, plain_text_content, message_structure,
+                  attachments_json, reply_to_msg_id, normalized_msg_id)
+        if self.legacy_compat:
+            columns += ["file_url", "file_type", "audio_file_path"]
+            values += (file_url, file_type, audio_file_path)
+        columns += ["audio_transcript", "created_at", "is_self", "message_source", "is_recalled", "recalled_at", "recall_operator_id"]
+        values += (audio_transcript, stored_created_at, is_self, normalized_source,
+                   1 if is_recalled else 0, stored_recalled_at, recall_operator_id)
+        sql = "INSERT INTO message_logs (" + ", ".join(columns) + ") VALUES (" + ", ".join(["%s"] * len(columns)) + ")"
         for attempt in range(2):
             try:
                 with self.conn.cursor() as cursor:
@@ -640,12 +647,7 @@ class DBHandler:
                             if pending_recall.get("recall_operator_id") is not None
                             else recall_operator_id
                         )
-                        values = (
-                            normalized_group_id, sender_id, message_content, plain_text_content, message_structure,
-                            attachments_json, reply_to_msg_id, normalized_msg_id, file_url, file_type,
-                            audio_file_path, audio_transcript, stored_created_at, is_self, normalized_source,
-                            1, stored_recalled_at, recall_operator_id,
-                        )
+                        values = values[:-3] + (1, stored_recalled_at, recall_operator_id)
                     cursor.execute(sql, values)
                     if pending_recall:
                         cursor.execute(
@@ -771,7 +773,7 @@ class DBHandler:
                             for row in matched_messages
                             if row.get("id") is not None
                         ]
-                        if message_ids:
+                        if self.legacy_compat and message_ids:
                             cursor.execute(
                                 """
                                 UPDATE context_summaries
@@ -833,9 +835,9 @@ class DBHandler:
     def get_recent_messages(self, group_id, limit=10):
         with self.conn.cursor() as cursor:
             cursor.execute(
-                """
+                f"""
                 SELECT id AS _db_id, msg_id, sender_id, message_content, plain_text_content,
-                       attachments_json, file_url, file_type, created_at, is_self, is_recalled
+                       {self._media_columns}, created_at, is_self, is_recalled
                 FROM message_logs
                 WHERE group_id = %s
                 ORDER BY created_at DESC, id DESC
@@ -868,9 +870,9 @@ class DBHandler:
             if not anchor:
                 return self.get_recent_messages(group_id, limit)
             cursor.execute(
-                """
+                f"""
                 SELECT id AS _db_id, msg_id, sender_id, message_content, plain_text_content,
-                       attachments_json, file_url, file_type, created_at, is_self, is_recalled
+                       {self._media_columns}, created_at, is_self, is_recalled
                 FROM message_logs
                 WHERE group_id = %s AND id >= %s
                 ORDER BY id ASC
@@ -883,9 +885,9 @@ class DBHandler:
     def get_messages_after_id(self, group_id, after_id=0, limit=5000):
         with self.conn.cursor() as cursor:
             cursor.execute(
-                """
+                f"""
                 SELECT id AS _db_id, msg_id, sender_id, message_content, plain_text_content,
-                       attachments_json, file_url, file_type, created_at, is_self, is_recalled
+                       {self._media_columns}, created_at, is_self, is_recalled
                 FROM message_logs
                 WHERE group_id = %s AND id > %s
                 ORDER BY id ASC
@@ -936,9 +938,9 @@ class DBHandler:
             if not anchor:
                 return []
             anchor_id = anchor["id"]
-            sql = """
+            sql = f"""
                 SELECT msg_id, sender_id, message_content, plain_text_content,
-                       attachments_json, file_url, file_type, created_at, is_self, is_recalled
+                       {self._media_columns}, created_at, is_self, is_recalled
                 FROM message_logs
                 WHERE group_id = %s AND id < %s
                 ORDER BY id DESC
@@ -946,9 +948,9 @@ class DBHandler:
             """
             params = (group_id, anchor_id, int(limit))
         else:
-            sql = """
+            sql = f"""
                 SELECT msg_id, sender_id, message_content, plain_text_content,
-                       attachments_json, file_url, file_type, created_at, is_self, is_recalled
+                       {self._media_columns}, created_at, is_self, is_recalled
                 FROM message_logs
                 WHERE group_id = %s
                 ORDER BY id DESC

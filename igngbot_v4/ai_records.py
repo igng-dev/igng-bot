@@ -94,3 +94,52 @@ async def mirror_native_record(record_id, record):
                 raise
             finally:
                 await cur.execute("SELECT RELEASE_LOCK(%s)", (lock,))
+
+
+def historical_record(record_id, payload):
+    """Baseline requests without a compatibility link keep a stable isolated job.
+
+    This is historical accounting, never a manufactured native turn or token bill.
+    """
+    return {**payload, "task_key": "dsh-legacy:" + record_id, "task_type": "dsh_legacy_attempt",
+            "record_kind": "attempt", "attempt_no": 1,
+            "task_status": "success" if payload.get("success") else "failed",
+            "end_reason": "historical-attempt"}
+
+
+async def drain_outbox():
+    """Operator-only export before a consistent maintenance snapshot."""
+    from .main import Infrastructure
+    from .migrate import connect
+    if not legacy.Config.SITE_AI_RECORDS_ENABLED:
+        raise RuntimeError("website accounting must be enabled before retirement")
+    app = Infrastructure.__new__(Infrastructure)
+    app.conn = connect()
+    exported = 0
+    try:
+        while True:
+            with app.conn.cursor() as cur:
+                cur.execute("SELECT record_id FROM yunying_ai_records WHERE mirror_status='pending' ORDER BY dsh_session_id,request_seq LIMIT 100")
+                rows = list(cur.fetchall())
+            if not rows:
+                break
+            for row in rows:
+                result = await app.ai_record({"recordId": row["record_id"]})
+                if not result["ok"]:
+                    raise RuntimeError("AI accounting export deferred")
+                with app.conn.cursor() as cur:
+                    cur.execute("UPDATE yunying_ai_records SET mirror_status='mirrored' WHERE record_id=%s", (row["record_id"],))
+                exported += 1
+        return {"exported_records": exported}
+    finally:
+        app.conn.close()
+        await legacy.close_call_log_pool()
+
+
+if __name__ == "__main__":
+    import argparse
+    import asyncio
+    parser = argparse.ArgumentParser(description="Drain the durable AI outbox without invoking a model")
+    parser.add_argument("--drain", action="store_true", required=True)
+    parser.parse_args()
+    print(json.dumps(asyncio.run(drain_outbox())))

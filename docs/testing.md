@@ -112,3 +112,15 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 真实 SQL 记账测试覆盖：网站连接故障时 native outbox 仍 pending、恢复后重复投递去重；三次模型调用聚合到一个 job；未知 usage 保留 NULL与未知次数，cache/input正确合计；compaction为独立任务；原生三次重试保持一个turn，Session历史回放产生相同task/request ID。既有跨群Person Memory/私有隔离、撤回、图片/语音/转发、官方compaction和重启测试继续通过。
 
 这些结果不等于真实QQ风格、付费提供方计费一致性、NAS长时运行或真实OCR/ASR模型验收。原部署快照仍在部署记录中；本轮迁移003/004只在临时库应用。站点旧摘要/人格控件保留在另一个仓库，未修改或部署；V4侧已停止旧摘要/Prompt bootstrap与业务摘要生成。依赖安全告警未作为本轮功能改动处理。
+
+## 数据退役与归档恢复
+
+清理实现使用独立 loopback MySQL8.0.36（与 NAS 主库相同版本），端口43316经只绑定127.0.0.1的 SSH 转发到独立测试容器；没有指向生产数据库。最终运行：
+
+- `YUNYING_TEST_DB=yunying_v4_test YUNYING_TEST_DB_PORT=43316 YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q`：**113 passed，无 skip**；73条已知幂等建表/旧 ping warnings。
+- `YUNYING_TEST_DB=yunying_v4_test YUNYING_TEST_DB_PORT=43316 npm --prefix yunying-dsh test`：**30 passed，无 skip**。
+- `npm --prefix yunying-dsh run check`、两个部署脚本与 Profile shell 的语法检查、`bash scripts/privacy-scan.sh`、`git diff --check`：通过。
+
+新 SQL fixtures 覆盖：完整归档/恢复、原 Prompt 与 NULL/空字符串、tokens/task ID、媒体路径与字段顺序、撤回 tombstone、旧表缺失的历史读取、过期 ingress与命令幂等、陈旧证明/租约/未决发送拒绝、腐坏归档拒绝、DDL 中断重试和恢复后管理员改动保护。fixture 中合成证明只用于测试各 guard，不代表已经做过生产备份恢复；实际全库 SQL 的独立恢复证明与部署结果须另行登记。此前一次复跑因 SSH 测试转发已经退出而连接失败，重新建立只绑定 loopback 的转发后上述完整验证全部通过。
+
+操作与 V3 恢复边界见 [数据退役流程](v4-retirement.md)。Social Prompt 字节、官方 Session/Compaction、Memory 工具权限和模型目录仍由原回归覆盖，不在这次清理中改写。
