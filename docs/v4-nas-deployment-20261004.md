@@ -1,5 +1,7 @@
 # 2026-10-04 V4 NAS 部署与实测记录
 
+这份文件记录首次切换的历史快照；当前现役版本和恢复点见 [后续功能升级记录](v4-nas-update-20261004-579e33f.md)，当前清理顺序见 [数据库清理计划](v4-database-audit.md)。
+
 V4 已替换 NAS 的唯一 V3 bot 消费者，存储根保持 `/vol2/1000/Docker/igngbot`。没有删除生产记录、数据卷或旧镜像。`docker-compose.yml` 与 `docker-compose.v4.yml` 合并为同一个 `igngbot` Compose project；数据库仍是原外部 MySQL，网站仍独立部署。
 
 ## 实际运行版本与存储

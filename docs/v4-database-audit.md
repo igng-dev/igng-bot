@@ -1,77 +1,101 @@
-# V4 数据库审查与清理计划
+# V4 数据库清理计划与现役审查
 
-本次只读审查 `igng_bot`，未执行 DROP、DELETE 或历史内容清空。证据是生产 MySQL8.0.36 的 information_schema、只读一致性快照中的统计，以及 bot/站点当前调用链。站点代码基线为 `17c14b36b156b7e0179a2ffbb001c66af0a4a940`。统计为时间点值，会随在线消息增长；没有把真实群号、账号、消息正文或凭据写进本报告。
+本计划依据 NAS 现役 `579e33f22617`、生产 MySQL `8.0.36` 的只读一致性快照和 bot/网站调用链。快照时间：**2026-10-04 20:42:58 UTC+08:00**。`igng_bot` 仍为23张表。统计会随在线流量增长；报告只含聚合结果，不含群号、账号、消息正文或凭据。
 
-## 产品需求调整后的修正
+本轮只完成 V4 正常升级的003/004增量迁移，**没有执行数据库清理、DROP、DELETE、TRUNCATE、表重命名或历史正文清空**。部署、校验和回滚点见 [本次 NAS 升级记录](v4-nas-update-20261004-579e33f.md)；首次部署快照另见 [旧记录](v4-nas-deployment-20261004.md)。
 
-下面行数为原部署审查快照，不代表本轮重新统计生产库。2026-10-04 后续功能调整要求长期保留 `group_configs.is_chat_mode`：它已重新用于 V4 的自主参与/明确呼叫模式，**不属于清理候选**。硬暂停继续用 `social_paused`。
+## 建议先做什么
 
-V4 bootstrap 已拆出仅消息/撤回初始化，旧 `context_summaries`/`system_prompts` 的建表和 seed 只留 V3 rollback。网站通用 AI 表继续复用，以原生任务/attempt 聚合；`call_logs` 仍兼容旧调用页。数据库清理仍搁置，未删除任何表、字段或历史。本轮新增003/004迁移的状态、授权与索引详见架构文档。
+先退役4张 V3 专用表，保留全部机械记录、群开关、通用 AI 记录、V4 队列/账本和 Memory。4张候选表合计只有14行，收益主要是去掉失效模型和维护依赖；它们不是当前主要空间来源。`call_logs` 的 InnoDB data_length 约81.6MiB，是本库最大单表，但它仍有消费者和历史记录，不能因 V4 改用通用 AI 表就整表删除。
 
-## 结论
+**当前不能直接删 `context_summaries`。** `igngbot_v3/db.py::mark_message_recalled` 在与 `message_logs`、`message_recall_events` 同一事务中执行 `UPDATE context_summaries`。V4 复用此机械撤回路径；缺表会使真实撤回事务失败/回滚。拆掉 V4 bootstrap 的旧摘要建表并不等于已经拆掉所有依赖。清理前必须把旧摘要失效逻辑移到 V3 专用路径，并用不含该表的真实 SQL 数据库验证撤回。
 
-V4 不需要旧上下文摘要、旧人格选择和旧系统 Prompt 表参与推理。但四张表仍承载网站旧管理页或 V3 回滚，当前不能直接删除。最大的冗余来自调用日志的重复 Prompt 和附件兼容字段。新增 Session/队列/发送账本/AI 镜像/Memory 表均有明确职责，空表不代表没用。
+## 第一批候选退役表
 
-### 旧表
-
-2026-10-04 11:27:35（Asia/Shanghai），切换前快照：
-
-| 表 | 行数 | 当前用途与判断 | 计划 |
+| 表 | 实际行数 | 现存依赖 | 退役前必须完成 |
 | --- | ---: | --- | --- |
-| `context_summaries` | 5 | V3 ContextManager 摘要；V4 不读取。站点 groups/summary API 与 groups JOIN 仍读取；DBHandler 启动仍建表。 | 冻结为 V3 历史，先替换站点查询、拆开 V4 bootstrap，再归档/退役。不能自动转成长期 Memory。 |
-| `personality_profiles` | 3 | 当前 bot 的 V3/V4 均无执行引用；站点 groups API 仍列出人格。 | 移除网站无效人格控件与查询，完整归档后退役。 |
-| `group_personality_configs` | 5 | 当前 bot 不使用；网站仍 JOIN、写入、删除关联。 | 与人格表一同退役，先断开网站读写。 |
-| `system_prompts` | 1 | V4 使用原 reserved2 Prompt；表只服务 V3 回滚和旧迁移脚本。DBHandler 启动仍建表/seed。 | 回滚窗口结束后拆开 bootstrap 与 V3 Prompt 工具，再归档退役。 |
-| `group_configs` | 9 | 群名与管理配置仍用。新增 `social_paused` 为明确的 V4 暂停权限；旧 `is_chat_mode` 只是“闲聊/仅艾特”，不可当暂停。 | 保留表、群名/时间、`social_paused` 与 `is_chat_mode`，后者已恢复为 V4 触发控制。 |
-| `message_logs` | 40,188 | QQ 原始历史、引用、撤回、媒体和网站聊天镜像的基础。 | 保留，媒体列整理见下；历史保留期需另定。 |
-| `message_recall_events` | 152 | 先撤回后补入消息时的持久 tombstone 与补偿状态。 | 保留；不能因 processed 就直接删除。 |
-| `call_logs` | 3,408 | 站点调用列表、详情和概览仍读；V4 继续写入并镜像 ai_jobs/attempts。 | 保留表；旧 filter/summary 记录是历史审计，考虑冷归档而非即时删除。 |
-| `mc_ticket_notification_state` | 2 | MC 工单增量游标。 | 保留，删除会丢失通知位置。 |
-| `mc_ticket_notification_deliveries` | 116 | MC 通知去重账本。 | 保留，删除会有重发风险。 |
+| `context_summaries` | 5 | V3 模型上下文摘要；V4 Agent 不使用，但复用撤回事务仍更新它，网站两条摘要 API 和群列表 JOIN 仍读取。 | 先将摘要失效逻辑移回 V3 专用路径，再移除网站摘要控件/API/JOIN。 |
+| `personality_profiles` | 3 | V4 使用原 reserved2 Social Prompt；站点仍列出人格列表，群查询仍 JOIN。 | 移除无效人格控件、列表查询和关联 JOIN。 |
+| `group_personality_configs` | 5 | V4 不按人格表选择 Prompt；网站 PATCH 仍写入/删除该关联。 | 与人格表同时移除网站读写，先解除关联依赖再退役父表。 |
+| `system_prompts` | 1 | V4 不读取；V3 SystemPromptStore 与原回滚入口仍依赖，旧建表/seed 已限于 V3。 | 保留到 V3 回滚窗口结束；备份后再退役。 |
 
-站点依据：`apps/account/app/api/admin/yunying/groups/route.js:29,45-52,118-121`；`groups/summary/route.js:23`；`calls/route.js:21,78`；`calls/[id]/route.js:21`；`overview/route.js`。聊天媒体依赖 `apps/igngchat/lib/chatlogs.js`。V4 依据：`igngbot_v4/main.py`、`views.py`、`journal.py` 与 `yunying-dsh/src/store.js/runtime.js`。
+移除旧人格或摘要不等于改写 Social Prompt：reserved2 原文继续保留，也不把旧摘要自动灌入长期 Memory。V3 镜像/代码备份继续保留；退役旧表后，V3 回滚必须先恢复对应旧 schema/数据，不能声称仅切镜像即可完整回滚。
 
-部署后第二次只读快照为2026-10-04 15:25：23张表，原消息40579、撤回156、调用日志3437行。4张退役候选表行数未变；`file_url` 的5634个非空路径仍全部出现在attachments中，语音路径15个全部覆盖。`thinking_content` 仍无非空值。具体切换/备份/Session重启证据见 [NAS部署记录](v4-nas-deployment-20261004.md)。
+## 字段候选与明确保留项
 
-### 旧字段
-
-| 字段 | 生产快照证据 | 判断与处理 |
+| 字段 | 当前证据 | 清理方案 |
 | --- | --- | --- |
-| `group_configs.is_chat_mode` | 9行，其中1为1；V3 网站文案明确“关闭仍保留定向 @ 回复”。 | 已重新用于 V4自主参与开关，保留。0仍允许明确 @/回复，不能解释为硬暂停。 |
-| `call_logs.thinking_content` | 3,408行中0行非空，0内容字节。 | V4 不写；网站详情仍有可选显示分支。可在移除该分支和旧 bootstrap 后退役，直接删的空间收益很小。 |
-| `call_logs.task_id` | 8行有值，网站列表仍返回 taskId。 | 有历史关联，先保留。核对这8条关联是否仍需展示，不能按“V4不写”直接删。 |
-| `call_logs.system_prompt/user_prompt` | 非空各3,408行，内容分别22,086,897与20,209,373字节。 | 约40.3MiB文本。旧日志大量重复，V4 不再存完整运行上下文；站点详情仍展示。先把历史 Prompt 按 hash 去重或冷归档并保留查阅入口，再迁移字段。不能混作 Memory。 |
-| `message_logs.file_url/file_type` | 5,592行有值；5,592个路径都已出现在 `attachments_json[*].stored_path`。 | 具备整理为 attachments 的基础，但 V4 图片读取还有 file_url fallback，复用 ingest 仍双写，V3 回滚也读它。先删依赖/双写并验历史图片、文件、转发，再退役列。 |
-| `message_logs.audio_file_path` | 15行有值，15个路径均在 attachments 中。 | 同样可在媒体契约迁移后退役；当前 ingest 仍写，不能直接删。 |
-| `message_logs.audio_transcript` | 0行非空。 | OCR/ASR 流程仍使用、写入此字段，并非死字段。先统一 attachments 中的转写契约与旧记录显示再判断，空值不能作为删列理由。 |
-| `message_content/plain_text_content/message_structure/attachments_json` | 文本、消息段与附件分别被模型 view、转发/引用和网站使用。 | 保留。它们分别是原始表示、可检索文本、结构与媒体元数据，不应粗暴合成一个字段。 |
-| `msg_id/reply_to_msg_id/is_self/is_recalled/recalled_at/recall_operator_id/message_source` | 去重、引用、自身回声、撤回权限和来源链仍使用。 | 保留。 |
+| `call_logs.thinking_content` | 3560行，非空0行。V4 不写；旧 UI 和 V3 INSERT/建表仍有契约。 | 低优先级退役候选：先清 UI/API 和 V4 建表契约，结束或适配 V3 回滚后再删列。不是空间清理重点。 |
+| `call_logs.system_prompt` | 3560条非空，共22,096,321字节；729个 SHA-256 内容。去重正文约4,963,336字节。 | 优先考虑内容 hash 去重/受限冷归档，保留按原 call ID 查阅的权限入口。重复正文理论差额约16.3MiB；不是可直接释放的磁盘空间。 |
+| `call_logs.user_prompt` | 3536条非空，共20,219,826字节；3433个内容，去重正文仍约20,016,016字节。 | 内容大多不同，hash 去重收益很小；若减体积应采用有索引、可检索的历史归档，不能直接置空。 |
+| `message_logs.file_url/file_type` | 路径和类型各5657条非空；全部路径都在 `attachments_json[*].stored_path` 中。 | 第二批契约整理候选。先去 ingest 双写、DB INSERT/SELECT 和 V4 image fallback，统一读 attachments，再验证历史图片、文件、转发和网站预览。 |
+| `message_logs.audio_file_path` | 15条非空；全部有 attachments 路径覆盖。 | 随媒体契约统一后再退役；当前录入仍写，不能先删列。 |
+| `message_logs.audio_transcript` | 当前非空0行，但 ASR 录入仍使用此字段。 | 保留；只有转写正文、状态与显示全部迁移到 attachments 后才重新评估。空表/空列不是死契约的证据。 |
+| `call_logs.task_id` | 8条非空，网站调用列表返回 taskId。 | 保留历史关联，先核对外部任务和查阅需求。 |
+| `group_configs.is_chat_mode/social_paused` | 9群，1群自主模式开启，硬暂停0群。 | 两列都保留：前者控制自主参与/仅明确呼叫，后者禁止呼叫与发言。旧计划中“移除聊天模式”的条目已经撤销。 |
 
-数据量来自 `OCTET_LENGTH` 合计，不等于 InnoDB 实际磁盘回收量；DROP/压缩也不能承诺立即释放表文件空间。附件覆盖是快照匹配，并不替代文件存在、转发嵌套结构或旧站点消费者的验收。
+两类 Prompt 合计 **40.4MiB** 文本，不代表它们可全部删除，也不代表 DROP/OPTIMIZE 能立即释放同等物理空间。附件覆盖仅证明数据库路径重复，不替代实际文件、嵌套转发、OCR/ASR 或旧版本恢复验收。
 
-## V4 新结构与保留边界
+`message_content/plain_text_content/message_structure/attachments_json` 分别承载原始表示、可检索文本、结构和媒体元数据，均保留；消息 ID、引用、自身回声、来源、撤回状态/时间/操作者字段也保留。
 
-新增12张业务表加1张 migration 登记表，数据库从10张变为23张；第二条迁移只为 `group_configs` 增加默认0的 `social_paused`，保留旧值并支持 DDL 已提交、checksum 未登记时重试。
+## 调用日志和网站通用 AI 表
 
-| 表 | 为什么要保留 |
-| --- | --- |
-| `yunying_sessions` | QQ↔官方 DSH Session 映射、provider、provisioning、社会状态和运行态 paused；DSH真实历史仍在官方持久目录。 |
-| `yunying_ingress` | OneBot 原事件/媒体预处理后的持久 FIFO、失败重试，不能先删 pending。 |
-| `yunying_events` | 原生 Inbox 的稳定消息 ID、序列、水位恢复和 Memory 来源。当前恢复会读取此表，不能直接按 delivered/日期清空。 |
-| `yunying_sends` | 幂等发送账本，unknown 不能自动重发；清空会破坏去重。 |
-| `yunying_ai_records` | DSH事件↔call_logs↔网站镜像的幂等/outbox；历史回放依赖稳定 record ID。 |
-| `memory_identities/memory_identity_bindings/memory_identity_audit` | 跨平台身份、本人共享授权与审计；群私有权限不由昵称决定。 |
-| `memory_documents/memory_versions/memory_sources/memory_audit` | Markdown正式记忆、CAS版本/回滚、原事件来源与访问/修改审计。 |
-| `yunying_schema_migrations` | 已应用迁移 checksum 与可重试性边界。 |
+`igng_sites.ai_jobs/ai_job_attempts` 是正式用量与任务账本，继续使用。本快照 bot service 有320个 job、324个 attempt；现役原生 v2 记账已出现并完成 `social_turn`，工具续接的多次模型请求属于同一 job，compaction 单独记账。未知 provider 用量继续 NULL，不能把失败/旧记录补造为零账单。
 
-短期没有记忆文档，只表示尚未写入，不能删 Memory 的空表。MySQL Memory、原始QQ消息和 DSH Session 是三层；不把旧 summary 灌进 Memory，也不把官方 JSONL 改成散落的 Markdown。
+`call_logs` 暂时还不能退役：站点的 calls 列表、两个详情入口和 overview 仍查询它。按既有 `service='igng-bot'` 与旧 `task_key=call_log_id` 主键关联，**3560行中只有319行有旧格式站点映射**。新原生记账按 Session/turn/request 主键，数量不一一对应；不能据此宣称剩余明细已经在站点完整备份。
 
-## 清理顺序
+建议后续把调用管理页面/概览迁到通用 AI 表，同时给旧 call ID 提供受限历史归档索引。两边结果可对账、历史可查且保留原 task_key/request_id 后，再停止 V4 兼容双写。历史迁移与查询适配不能重复累计 tokens，也不能清掉原失败、filter 或 summary 审计。`yunying_ai_records.call_log_id` 仍有当前兼容关联，先保留；通用记账已经不依赖它成功。
 
-1. **先改消费者。** 站点移除旧人格、聊天模式和摘要读写；提供受控的 Session状态/明确暂停及 Memory 管理入口。V4 bootstrap 拆出必要消息/配置/调用表，停止创建已退役表/列，V3 仍留独立回滚入口。
-2. **保留回滚窗口。** 建议至少稳定运行30天再关闭 V3 回滚；时间是建议，尚未执行。先备份候选表/列与索引、核对行数和 checksum，并验证恢复。归档要在受保护目录/库，不把用户数据提交 Git。
-3. **优先减重复体积。** 对历史 call_logs Prompt 做内容 hash 去重或冷归档；站点详情仍能按归档指针查阅。媒体字段先去双写与 fallback，经图片/语音/转发/旧日志验收后再迁移。保留原始历史和审计关系。
-4. **再做队列与 outbox 保留策略。** `yunying_ingress` 仅考虑已完成且超过保留期的预处理大 payload；Native事件必须先建立持久恢复 checkpoint 和 Memory 来源快照。发送/AI镜像即使裁掉大正文，也保留稳定 ID、状态、payload hash、message/call_log ID 等去重 tombstone。当前不能直接删 delivered/sent 记录，否则重启回放可能重建/重复写入。
-5. **最后才有破坏性 migration。** 逐表/字段列出范围并获得明确授权；先验证网站不再 JOIN/SELECT、程序不会重建，再 DROP。此次没有执行这些操作，原始记录和 Memory 未被清空。
+## 明确保留的基础表
 
-当前 schema 没有外键、view、routine 或 trigger，并不代表没有软关联；网站SQL、Memory sources、发送去重与MC游标都是实际依赖。涉及 `igng_sites`、`mc` 的数据另属站点/MC，不纳入本次清理。
+| 表 | 行数 | 用途 |
+| --- | ---: | --- |
+| `message_logs` | 40665 | QQ 原始消息、引用、结构化历史、图片/语音和网站聊天镜像。 |
+| `message_recall_events` | 156 | 撤回先于原消息时的 tombstone 与补偿状态，不能按 processed 清空。 |
+| `group_configs` | 9 | 群名、`is_chat_mode` 和独立 `social_paused`；聊天模式必须保留。 |
+| `call_logs` | 3560 | 旧网站列表/详情/概览和未完整映射的历史审计；本轮不列为可直接删除的表。 |
+| `mc_ticket_notification_state` | 2 | MC 工单通知游标，删除会丢失通知位置。 |
+| `mc_ticket_notification_deliveries` | 116 | MC 通知幂等账本，删除可能重发通知。 |
+
+## 明确保留的 V4 表
+
+| 表 | 行数 | 用途 |
+| --- | ---: | --- |
+| `yunying_sessions` | 9 | QQ↔官方 DSH Session 映射、恢复状态和呼叫授权。 |
+| `yunying_ingress` | 490 | 独立机械记录与 DSH 投递的持久 FIFO、重试和命令幂等。 |
+| `yunying_events` | 478 | 原生 Inbox 接纳、消息序列/水位恢复、观察历史和 Memory 来源。 |
+| `yunying_sends` | 15 | 稳定 request ID、发送结果与去重，unknown 必须人工核对。 |
+| `yunying_ai_records` | 189 | 原生 attempt/task-end 的幂等 outbox；站点故障不丢记账。 |
+| `yunying_schema_migrations` | 4 | 001—004 已应用版本/checksum，不能清空或改写历史迁移。 |
+| `memory_identities` | 24 | 跨会话 person identity。 |
+| `memory_identity_bindings` | 24 | QQ/其他平台绑定和本人共享授权。 |
+| `memory_identity_audit` | 24 | 绑定/授权审计。 |
+| `memory_documents` | 0 | MySQL 正式 Markdown 长期记忆；当前为空不是废表。 |
+| `memory_versions` | 0 | 版本、CAS 更新、回滚。 |
+| `memory_sources` | 0 | 原事件与可见性来源链。 |
+| `memory_audit` | 5 | Memory 访问、拒绝、修改与遗忘审计。 |
+
+原始 QQ 数据、DSH 官方 Session、MySQL 长期 Memory 是三个独立层次。不能删 DSH 日志当作“context 清理”，不能把 compaction summary 当长期记忆，也不能因 Memory 文档目前为0而删它的正式结构。
+
+## 分阶段执行顺序
+
+1. **消费者和契约修复，无破坏性 SQL。** 在 bot 中将摘要失效处理移到 V3 专用撤回路径；V4 仅更新消息/撤回账本。站点移除摘要/人格 UI、API 和 JOIN，保留群名、聊天模式、权限和历史消息。核对 CLI/旧迁移工具的 system_prompts 依赖，并运行旧表缺失的真实 SQL 撤回测试以及网站群列表/保存测试。这些修改未在本次部署中执行。
+2. **冻结并验证第一批归档。** 对4张候选表的 schema、索引、全量记录、行数和 checksum 做受保护 SQL 归档；在隔离库实际恢复验证。建议 V4 从本次升级开始稳定运行至少30天，再结束无需 schema 恢复的 V3 回滚窗口；这是建议，尚未设定自动删除日期。历史记录不自动转成 Memory。
+3. **独立、受控的第一批退役 migration。** 归档与消费者验收完成后，逐项列出 `group_personality_configs`、`personality_profiles`、`context_summaries`、`system_prompts` 的退役 SQL。确认具体范围后执行；不把破坏性动作偷偷混入普通启动/升级，不改001—004已应用文件。恢复以归档 schema/数据为依据，不能只新建空表/seed 掩盖丢失。
+4. **调用记录统一与 Prompt 归档。** 先让网站主要查询通用 AI 表，完成旧 call ID 查询/权限及 tokens 对账，再停止兼容双写；优先去重 system_prompt，user_prompt 采用可回查的冷归档。候选新引用字段/归档索引和 nullable 策略另做 additive migration，读写切换和数据核对通过后才退役旧正文列。
+5. **附件字段统一。** 用 attachments 作为路径/类型/转写的唯一契约，先改写入与读取并对比新旧路径，再测试图片、文件、语音、OCR/ASR、嵌套转发、撤回隐藏和网站预览。之后才退役 `file_url/file_type/audio_file_path`；`audio_transcript` 需另行确认转写迁移完成。保护原附件文件，数据库去重不触发物理文件 GC。
+6. **最后建立运行数据保留策略。** 可以从“已 recorded + delivered、超过30天”的 ingress 大 payload 评估冷归档，但必须先建立恢复 checkpoint、可验证的 Memory 来源快照和保留去重记录。`yunying_events`/`yunying_sends`/`yunying_ai_records` 的稳定 ID、序列、水位、hash、结果与关联不可随正文一并清空；pending/unknown 未决记录保留。没有这个前置能力时不执行日期 DELETE 或 TRUNCATE。
+
+每一阶段都单独交付代码/迁移、完整备份 manifest、实际验收和回滚方法。此次只交付计划，没有执行这些清理阶段；也没有修改 `igng_sites` 的通用表 schema、MC 数据或网站源码。
+
+## 依赖依据与清理验收
+
+bot 基线：`579e33f22617465816c6b6335c6fbbba6ef3e5ec`。网站只读基线：`17c14b36b156b7e0179a2ffbb001c66af0a4a940`；其他站点任务工作区未被修改。
+
+- 撤回软依赖：`igngbot_v3/db.py::mark_message_recalled`；V4 通过原 message ingest/client 路径复用。
+- 媒体依赖：`igngbot_v3/message_ingest.py`、`db.py::insert_message`、`igngbot_v4/views.py::image_paths`；网站 `apps/igngchat/lib/chatlogs.js` 当前主要读取 attachments/structure。
+- 网站旧模型：`apps/account/app/api/admin/yunying/groups/route.js` 的 GET JOIN 与 PATCH 人格写入；`groups/summary/route.js`。
+- 网站旧调用页：`calls/route.js`、`calls/[id]/route.js`、`overview/route.js`；正式原生记账：`igngbot_v4/ai_records.py`。
+- 本库无外键、view、routine、trigger，仍有上述真实 SQL/恢复/来源软关联，不能用“没有外键”作为可直接删除的依据。
+
+最终清理验收至少包括：旧表缺失时群列表/开关/撤回正常；开关关闭记录仍增长且明确呼叫可工作；附件与旧历史可查；站点 attempt/jobs 不重复计费、unknown 不被变零；Memory 权限和版本/来源完整；相同 QQ↔DSH 映射及官方 Session 重启可恢复；归档在隔离库恢复成功。网站尚未适配、真实 OCR/ASR 和长期运行尚未验收的部分，不能在清理完成报告里略过。
