@@ -64,3 +64,9 @@ Ingress 策略仅归档 `recording_status=recorded`、`delivery_status=delivered
 ## 验证
 
 本轮在独立 loopback MySQL8.0.36、官方 DSH0.2.1-alpha.1 上执行完整 Python/Node 套件；具体结果登记于测试和部署记录。新增真实 SQL 测试覆盖旧表缺失时撤回/历史/ASR字段、Prompt 完整还原、任务/未知 tokens 保留、过期入站与 pending 隔离、命令幂等、陈旧证明拒绝、未知发送拒绝、归档腐坏拒绝和中断重试。真实模型风格、真实 OCR/ASR 模型与长期在线压测没有因 SQL fixture 而自动完成。
+
+### MySQL 恢复证明的 schema 表示
+
+真实 MySQL8.0.36 dump/restore 演练暴露：相同有效列定义在 `SHOW CREATE TABLE` 中可能补出 `CHARACTER SET utf8mb4`，而原表示仅有同一 `COLLATE utf8mb4_general_ci`。校验现在仅归一化排序规则已经确定的冗余字符集声明，另逐列校验 information_schema 的类型、默认值、空值性、字符集/排序规则、EXTRA、备注与生成表达式哈希。索引、表参数、约束与 AUTO_INCREMENT 仍由完整规范 DDL 校验；引号内的默认值/备注不做替换。依据 [MySQL8.0列字符集规范](https://dev.mysql.com/doc/refman/8.0/en/charset-column.html)。证明格式升级为2，拒绝缺少独立列定义校验的旧证明。归档中的原建表原文不改写。
+
+发现表示差异时没有继续退役生产数据；先恢复旧 V4 在线，再补充回归与完整验证。重新进入清理窗口时须重新生成 SQL/DSH 配对备份与全库证明，不能沿用恢复在线前的陈旧消息快照。
