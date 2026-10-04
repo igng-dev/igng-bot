@@ -52,6 +52,23 @@ export class MySQLStore {
     return { ...rows[0], social_state: json(rows[0].social_state) };
   }
   async mappings() { return this.query('SELECT * FROM yunying_sessions ORDER BY created_at'); }
+  async policy(key) {
+    if(key.startsWith('private:')) {
+      const [row]=await this.query('SELECT paused FROM yunying_sessions WHERE conversation_key=?',[key]);
+      return {chatMode:true,paused:!!row?.paused};
+    }
+    const [row]=await this.query('SELECT is_chat_mode,social_paused FROM group_configs WHERE group_id=?',[key.split(':')[1]]);
+    return {chatMode:!!row?.is_chat_mode,paused:!row||!!row.social_paused};
+  }
+  async beginDirect(key,eventId) {
+    const [event]=await this.query('SELECT payload FROM yunying_events WHERE event_id=? AND conversation_key=?',[eventId,key]);
+    const message=event&&json(event.payload);
+    if(!message||message.isSelf||message.commandHandled||!(message.atBot||message.replyToBot))throw new PolicyError('缺少真实呼叫来源');
+    await this.query('UPDATE yunying_sessions SET direct_event_id=?,direct_expires_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 10 MINUTE) WHERE conversation_key=?',[eventId,key]);
+  }
+  async endDirect(key,eventId) {
+    await this.query('UPDATE yunying_sessions SET direct_event_id=NULL,direct_expires_at=NULL WHERE conversation_key=? AND direct_event_id=?',[key,eventId]);
+  }
   async ready(key) { await this.query("UPDATE yunying_sessions SET provisioning_status='ready' WHERE conversation_key=?", [key]); }
   async saveState(state) { await this.query('UPDATE yunying_sessions SET social_state=? WHERE conversation_key=?', [JSON.stringify(state.snapshot()), state.key]); }
   async setPaused(key, paused) { await this.query('UPDATE yunying_sessions SET paused=? WHERE conversation_key=?', [Number(paused), key]); }

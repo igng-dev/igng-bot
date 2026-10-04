@@ -35,6 +35,11 @@ def test_real_mysql_migration_fifo_retry_restart_and_identity_consent():
         ids.append(second)
         other_key, third = journal.enqueue({**raw,'group_id':group+1,'message_id':mid+2})
         ids.append(third)
+        assert journal.pending() is None  # recording precedes delivery
+        assert journal.pending_recording()['event_id'] == first
+        journal.prepare(first, {'eventId':first,'key':key,'kind':'message'})
+        journal.prepare(second, {'eventId':second,'key':key,'kind':'message'})
+        journal.prepare(third, {'eventId':third,'key':other_key,'kind':'message'})
         assert journal.pending()['event_id'] == first
         journal.prepare(first, {'eventId':first,'key':key,'kind':'message'})
         journal.retry(first, 0, RuntimeError())
@@ -73,12 +78,18 @@ def test_real_mysql_call_log_and_site_mirror_retry_are_idempotent(monkeypatch):
     # Website schema-shaped fixtures live only in the disposable test database.
     with conn.cursor() as cur:
         cur.execute('''CREATE TABLE IF NOT EXISTS ai_jobs (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,service VARCHAR(50),task_type VARCHAR(50),task_key VARCHAR(80),operator_type VARCHAR(20),operator_id BIGINT NULL,
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,service VARCHAR(50),task_type VARCHAR(50),task_key VARCHAR(191),operator_type VARCHAR(20),operator_id BIGINT NULL,
           strategy JSON,system_prompt TEXT,user_prompt TEXT,status VARCHAR(20),attempt_count INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,
-          round INT,last_error TEXT,final_result TEXT) ENGINE=InnoDB''')
+          round INT,last_provider VARCHAR(100),last_error TEXT,final_result TEXT,created_at DATETIME,updated_at DATETIME) ENGINE=InnoDB''')
         cur.execute('''CREATE TABLE IF NOT EXISTS ai_job_attempts (
           id BIGINT AUTO_INCREMENT PRIMARY KEY,job_id BIGINT,provider VARCHAR(50),model VARCHAR(80),attempt_no INT,round INT,is_fallback INT,
-          started_at DATETIME,ended_at DATETIME,ok INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,error_message TEXT,raw_response TEXT,selected INT) ENGINE=InnoDB''')
+          started_at DATETIME,ended_at DATETIME,ok INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,error_kind VARCHAR(50),error_message TEXT,raw_response TEXT,request_id VARCHAR(191),selected INT) ENGINE=InnoDB''')
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE ai_jobs MODIFY task_key VARCHAR(191)")
+        for table,column,kind in [('ai_jobs','last_provider','VARCHAR(100)'),('ai_jobs','created_at','DATETIME'),('ai_jobs','updated_at','DATETIME'),
+                                  ('ai_job_attempts','request_id','VARCHAR(191)'),('ai_job_attempts','error_kind','VARCHAR(50)')]:
+            cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s", (table,column))
+            if not cur.fetchone()['n']:cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     config = dict(host='127.0.0.1',port=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),user='root',password='',db='yunying_v4_test',charset='utf8mb4')
     monkeypatch.setattr(call_log_db, 'DB_CONFIG', config)
     monkeypatch.setattr(call_log_db, 'SITE_AI_DB_CONFIG', config)
@@ -132,3 +143,113 @@ def test_real_mysql_group_pause_migration_can_resume_after_ddl_without_resetting
             assert cur.fetchone()['n']==1
     finally:
         conn.close()
+
+
+def test_recording_continues_while_dsh_delivery_retries_and_admin_toggle_is_once():
+    from igngbot_v4.settings import Settings
+    from igngbot_v3.db import DBHandler
+    from unittest.mock import MagicMock
+    class Response:
+        async def __aenter__(self):raise ConnectionError()
+        async def __aexit__(self,*_):return False
+    conn=connection()
+    group=int(uuid4().int%10**8)+5000000000
+    config=SimpleNamespace(DB_HOST='127.0.0.1',DB_PORT=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),DB_USER='root',DB_PASSWORD='',DB_NAME='yunying_v4_test')
+    app=Infrastructure.__new__(Infrastructure)
+    app.conn=conn;app.db=DBHandler(config);app.journal=Journal(conn)
+    app.settings=Settings(str(uuid4()),groups=frozenset({str(group)}));app._stopping=False
+    app._journal_signal=asyncio.Event();app._delivery_signal=asyncio.Event()
+    app.http=MagicMock();app.http.post.return_value=Response()
+    ids=[]
+    async def prepare(row):
+        app.db.insert_message(group_id=group,sender_id=2001,reply_to_msg_id=None,msg_id=row['event_id'],message_content='附件已保存',plain_text_content='OCR/ASR记录',
+            attachments_json=encode([{'type':'image','stored_path':'fixture.png','ocr_text':'图片文字'}]))
+        return {'eventId':row['event_id'],'key':row['conversation_key'],'kind':'message'}
+    app.prepare=prepare
+    async def scenario():
+        record=asyncio.create_task(app.record());deliver=asyncio.create_task(app.deliver())
+        try:
+            for mid in range(3):
+                _,identity=app.journal.enqueue({'post_type':'message','group_id':group,'user_id':2001,'message_id':mid+1})
+                ids.append(identity)
+            for _ in range(200):
+                with conn.cursor() as cur:
+                    cur.execute('SELECT COUNT(*) n FROM message_logs WHERE group_id=%s',(group,))
+                    if cur.fetchone()['n']==3:break
+                await asyncio.sleep(.01)
+            with conn.cursor() as cur:
+                cur.execute('SELECT recording_status,delivery_status,prepared_event FROM yunying_ingress WHERE conversation_key=%s ORDER BY id',('group:'+str(group),))
+                rows=cur.fetchall()
+                assert len(rows)==3 and all(row['recording_status']=='recorded' and row['delivery_status']=='pending' for row in rows)
+            # Retrying the same toggle after a crash cannot undo it.
+            assert app.journal.group_control(ids[0],group,'is_chat_mode') is True
+            assert app.journal.group_control(ids[0],group,'is_chat_mode') is True
+            assert app.group_policy(group)=={'chatMode':True,'pause':False}
+        finally:
+            app._stopping=True;record.cancel();deliver.cancel()
+            await asyncio.gather(record,deliver,return_exceptions=True)
+    try:asyncio.run(scenario())
+    finally:
+        for identity in ids:app.journal.finish(identity)
+        app.db.conn.close();conn.close()
+
+
+def test_v4_message_initializer_does_not_create_or_seed_legacy_ai_context():
+    from unittest.mock import MagicMock
+    from igngbot_v3.db import DBHandler
+    handler=DBHandler(SimpleNamespace(PROMPT_DIR='/tmp/no-v3-seed'))
+    handler._conn=MagicMock()
+    handler.init_message_tables()
+    statements=' '.join(str(call.args[0]) for call in handler._conn.cursor.return_value.__enter__.return_value.execute.call_args_list)
+    assert 'message_logs' in statements and 'message_recall_events' in statements
+    assert 'context_summaries' not in statements and 'system_prompts' not in statements
+
+
+def test_native_job_attempt_aggregation_unknown_usage_compaction_and_replay(monkeypatch):
+    conn=connection()
+    config=dict(host='127.0.0.1',port=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),user='root',password='',db='yunying_v4_test',charset='utf8mb4')
+    monkeypatch.setattr(call_log_db,'SITE_AI_DB_CONFIG',config)
+    monkeypatch.setattr(call_log_db.Config,'SITE_AI_RECORDS_ENABLED',True)
+    app=Infrastructure.__new__(Infrastructure);app.conn=conn
+    sid=str(uuid4());key='dsh:'+sid+':turn:1'
+    base={'task_key':key,'task_type':'social_turn','record_kind':'attempt','group_id':'1001','sender_id':'2001','sender_name':'fixture',
+          'message_text':'自然沉默也要计费','call_type':'agent','model':'script','provider':'script','system_prompt':'official Session',
+          'user_prompt':'自然沉默也要计费','response_content':'','tool_calls':[], 'duration_ms':20,'success':True,'error_message':'',
+          'started_at':1700000000000,'ended_at':1700000000020,'native_turn':1,'native_step':1}
+    records=[{**base,'attempt_no':1,'success':False,'token_usage':None},
+             {**base,'attempt_no':2,'token_usage':{'inputTokens':20,'cacheReadTokens':10,'outputTokens':5}},
+             {**base,'attempt_no':3,'token_usage':{'inputTokens':40,'cacheWriteTokens':2,'outputTokens':8}},
+             {**base,'record_kind':'task-end','task_status':'success','end_reason':'completed'},
+             {**base,'task_key':'dsh:'+sid+':compaction:fixture','task_type':'dsh_compaction','attempt_no':1,'token_usage':{'inputTokens':5,'outputTokens':2},'task_status':'success','end_reason':'completed'}]
+    async def scenario():
+        original_pool=call_log_db._get_site_pool
+        failures=[True]
+        async def recoverable_site():
+            if failures and failures.pop():raise ConnectionError('synthetic website outage')
+            return await original_pool()
+        monkeypatch.setattr(call_log_db,'_get_site_pool',recoverable_site)
+        try:
+            for seq,record in enumerate(records,1):
+                rid=f'{sid}:{seq}'
+                with conn.cursor() as cur:cur.execute('INSERT INTO yunying_ai_records (record_id,dsh_session_id,request_seq,payload) VALUES (%s,%s,%s,%s)',(rid,sid,seq,encode(record)))
+                if seq==1:
+                    with pytest.raises(ConnectionError):await app.ai_record({'recordId':rid})
+                    with conn.cursor() as cur:
+                        cur.execute('SELECT mirror_status,call_log_id FROM yunying_ai_records WHERE record_id=%s',(rid,))
+                        assert cur.fetchone()=={'mirror_status':'pending','call_log_id':None}
+                assert (await app.ai_record({'recordId':rid}))['ok']
+                assert (await app.ai_record({'recordId':rid}))['ok']
+            with conn.cursor() as cur:
+                cur.execute('SELECT * FROM ai_jobs WHERE service=%s AND task_key=%s',('igng-bot',key));job=cur.fetchone()
+                assert job['status']=='success' and job['attempt_count']==3
+                assert (job['prompt_tokens'],job['completion_tokens'],job['total_tokens'],job['cached_tokens'])==(72,13,85,12)
+                import json
+                assert json.loads(job['strategy'])['usage_unknown_attempts']==1
+                cur.execute('SELECT * FROM ai_job_attempts WHERE job_id=%s ORDER BY attempt_no',(job['id'],));attempts=cur.fetchall()
+                assert len(attempts)==3 and attempts[0]['total_tokens'] is None
+                assert [r['selected'] for r in attempts]==[0,0,1]
+                assert len({r['request_id'] for r in attempts})==3
+                cur.execute('SELECT COUNT(*) n FROM ai_jobs WHERE task_key LIKE %s',('dsh:'+sid+':%',));assert cur.fetchone()['n']==2
+        finally:await call_log_db.close_call_log_pool()
+    try:asyncio.run(scenario())
+    finally:conn.close()

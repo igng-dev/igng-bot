@@ -1,6 +1,6 @@
 # IGNG Bot V4 · 云萤
 
-云萤是运行在官方 DeepSeek Harness 上的长期在线 Social Agent。每个 QQ 群/私聊有持久 DSH Session；每条启用会话的来信都进入原生 Inbox，模型通过 QQ 工具决定发言或沉默。运行上下文与压缩交给 DSH，长期 Markdown Memory 以 MySQL 为权威存储。
+云萤是运行在官方 DeepSeek Harness 上的长期在线 Social Agent。每个 QQ 群/私聊有持久 DSH Session；消息和附件始终机械记录；开启聊天模式的群消息进入原生 Inbox，关闭时仅明确 @/回复触发模型轮次，普通消息作为可查询的观察历史。模型通过 QQ 工具决定发言或沉默。运行上下文与压缩交给 DSH，长期 Markdown Memory 以 MySQL 为权威存储。
 
 - [V4 架构、数据库、V3 复用与 donor 差异](docs/v4-architecture.md)
 - [配置、迁移、NAS 切换和回滚](docs/v4-operations.md)

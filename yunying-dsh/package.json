@@ -18,7 +18,7 @@
   },
   "scripts": {
     "test": "node --test --test-concurrency=1 tests/*.test.js",
-    "check": "node --check src/index.js"
+    "check": "for file in src/*.js; do node --check \"$file\" || exit; done"
   },
   "dependencies": {
     "mysql2": "3.24.5",

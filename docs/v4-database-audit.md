@@ -2,6 +2,12 @@
 
 本次只读审查 `igng_bot`，未执行 DROP、DELETE 或历史内容清空。证据是生产 MySQL8.0.36 的 information_schema、只读一致性快照中的统计，以及 bot/站点当前调用链。站点代码基线为 `17c14b36b156b7e0179a2ffbb001c66af0a4a940`。统计为时间点值，会随在线消息增长；没有把真实群号、账号、消息正文或凭据写进本报告。
 
+## 产品需求调整后的修正
+
+下面行数为原部署审查快照，不代表本轮重新统计生产库。2026-10-04 后续功能调整要求长期保留 `group_configs.is_chat_mode`：它已重新用于 V4 的自主参与/明确呼叫模式，**不属于清理候选**。硬暂停继续用 `social_paused`。
+
+V4 bootstrap 已拆出仅消息/撤回初始化，旧 `context_summaries`/`system_prompts` 的建表和 seed 只留 V3 rollback。网站通用 AI 表继续复用，以原生任务/attempt 聚合；`call_logs` 仍兼容旧调用页。数据库清理仍搁置，未删除任何表、字段或历史。本轮新增003/004迁移的状态、授权与索引详见架构文档。
+
 ## 结论
 
 V4 不需要旧上下文摘要、旧人格选择和旧系统 Prompt 表参与推理。但四张表仍承载网站旧管理页或 V3 回滚，当前不能直接删除。最大的冗余来自调用日志的重复 Prompt 和附件兼容字段。新增 Session/队列/发送账本/AI 镜像/Memory 表均有明确职责，空表不代表没用。
@@ -16,7 +22,7 @@ V4 不需要旧上下文摘要、旧人格选择和旧系统 Prompt 表参与推
 | `personality_profiles` | 3 | 当前 bot 的 V3/V4 均无执行引用；站点 groups API 仍列出人格。 | 移除网站无效人格控件与查询，完整归档后退役。 |
 | `group_personality_configs` | 5 | 当前 bot 不使用；网站仍 JOIN、写入、删除关联。 | 与人格表一同退役，先断开网站读写。 |
 | `system_prompts` | 1 | V4 使用原 reserved2 Prompt；表只服务 V3 回滚和旧迁移脚本。DBHandler 启动仍建表/seed。 | 回滚窗口结束后拆开 bootstrap 与 V3 Prompt 工具，再归档退役。 |
-| `group_configs` | 9 | 群名与管理配置仍用。新增 `social_paused` 为明确的 V4 暂停权限；旧 `is_chat_mode` 只是“闲聊/仅艾特”，不可当暂停。 | 保留表、群名/时间与 `social_paused`；网站改为 V4 后再移除 `is_chat_mode`。 |
+| `group_configs` | 9 | 群名与管理配置仍用。新增 `social_paused` 为明确的 V4 暂停权限；旧 `is_chat_mode` 只是“闲聊/仅艾特”，不可当暂停。 | 保留表、群名/时间、`social_paused` 与 `is_chat_mode`，后者已恢复为 V4 触发控制。 |
 | `message_logs` | 40,188 | QQ 原始历史、引用、撤回、媒体和网站聊天镜像的基础。 | 保留，媒体列整理见下；历史保留期需另定。 |
 | `message_recall_events` | 152 | 先撤回后补入消息时的持久 tombstone 与补偿状态。 | 保留；不能因 processed 就直接删除。 |
 | `call_logs` | 3,408 | 站点调用列表、详情和概览仍读；V4 继续写入并镜像 ai_jobs/attempts。 | 保留表；旧 filter/summary 记录是历史审计，考虑冷归档而非即时删除。 |
@@ -31,7 +37,7 @@ V4 不需要旧上下文摘要、旧人格选择和旧系统 Prompt 表参与推
 
 | 字段 | 生产快照证据 | 判断与处理 |
 | --- | --- | --- |
-| `group_configs.is_chat_mode` | 9行，其中1为1；V3 网站文案明确“关闭仍保留定向 @ 回复”。 | V4 推理不读取；属于待退役字段，不能把0解释为暂停。先改网站 API/UI，回滚窗口结束后删除。 |
+| `group_configs.is_chat_mode` | 9行，其中1为1；V3 网站文案明确“关闭仍保留定向 @ 回复”。 | 已重新用于 V4自主参与开关，保留。0仍允许明确 @/回复，不能解释为硬暂停。 |
 | `call_logs.thinking_content` | 3,408行中0行非空，0内容字节。 | V4 不写；网站详情仍有可选显示分支。可在移除该分支和旧 bootstrap 后退役，直接删的空间收益很小。 |
 | `call_logs.task_id` | 8行有值，网站列表仍返回 taskId。 | 有历史关联，先保留。核对这8条关联是否仍需展示，不能按“V4不写”直接删。 |
 | `call_logs.system_prompt/user_prompt` | 非空各3,408行，内容分别22,086,897与20,209,373字节。 | 约40.3MiB文本。旧日志大量重复，V4 不再存完整运行上下文；站点详情仍展示。先把历史 Prompt 按 hash 去重或冷归档并保留查阅入口，再迁移字段。不能混作 Memory。 |

@@ -43,16 +43,57 @@ class Journal:
 
     def pending(self):
         with self.conn.cursor() as cur:
-            cur.execute("""SELECT i.* FROM yunying_ingress i WHERE i.delivery_status='pending'
+            cur.execute("""SELECT i.* FROM yunying_ingress i WHERE i.delivery_status='pending' AND i.recording_status='recorded'
                 AND i.available_at<=UTC_TIMESTAMP(6) AND NOT EXISTS (
                   SELECT 1 FROM yunying_ingress earlier WHERE earlier.conversation_key=i.conversation_key
                     AND earlier.delivery_status='pending' AND earlier.id<i.id)
                 ORDER BY i.id LIMIT 1""")
             return cur.fetchone()
 
+    def pending_recording(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""SELECT i.* FROM yunying_ingress i WHERE i.recording_status='pending' AND i.delivery_status='pending'
+                AND i.recording_available_at<=UTC_TIMESTAMP(6) AND NOT EXISTS (
+                  SELECT 1 FROM yunying_ingress earlier WHERE earlier.conversation_key=i.conversation_key
+                    AND earlier.recording_status='pending' AND earlier.id<i.id)
+                ORDER BY i.id LIMIT 1""")
+            return cur.fetchone()
+
+    def recording_retry(self, event_id, attempts, error):
+        delay = min(60, 2 ** min(6, attempts))
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE yunying_ingress SET recording_attempts=recording_attempts+1,recording_error=%s,recording_available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL %s SECOND) WHERE event_id=%s",
+                        (type(error).__name__, delay, event_id))
+
+    def group_control(self, event_id, group_id, field, desired=None):
+        """Apply a mechanical control once even after a crash before its acknowledgement."""
+        if field not in {"is_chat_mode", "social_paused"}:
+            raise ValueError("invalid group control")
+        self.conn.begin()
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT command_result FROM yunying_ingress WHERE event_id=%s FOR UPDATE", (event_id,))
+                prior = cur.fetchone()
+                if not prior:
+                    raise ValueError("control event is not durable")
+                if prior["command_result"]:
+                    result = decode(prior["command_result"])
+                else:
+                    cur.execute("INSERT IGNORE INTO group_configs (group_id) VALUES (%s)", (group_id,))
+                    cur.execute(f"SELECT {field} FROM group_configs WHERE group_id=%s FOR UPDATE", (group_id,))
+                    current = bool(cur.fetchone()[field])
+                    result = {field: not current if desired is None else bool(desired)}
+                    cur.execute(f"UPDATE group_configs SET {field}=%s WHERE group_id=%s", (int(result[field]), group_id))
+                    cur.execute("UPDATE yunying_ingress SET command_result=%s WHERE event_id=%s", (encode(result), event_id))
+            self.conn.commit()
+            return result[field]
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def prepare(self, event_id, payload):
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE yunying_ingress SET prepared_event=%s WHERE event_id=%s", (encode(payload), event_id))
+            cur.execute("UPDATE yunying_ingress SET prepared_event=%s,recording_status='recorded',recorded_at=UTC_TIMESTAMP(6),recording_error=NULL WHERE event_id=%s", (encode(payload) if payload is not None else None, event_id))
 
     def finish(self, event_id):
         with self.conn.cursor() as cur:

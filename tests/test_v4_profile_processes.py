@@ -143,14 +143,19 @@ async def process_scenario():
       'STORAGE_REQUIRE_MOUNT':'0','MEDIA_OCR_ENABLED':'0','MEDIA_ASR_ENABLED':'0','MC_TICKET_NOTIFICATION_GROUP':'0','MC_TICKET_TECH_NOTIFICATION_GROUP':'0',
       'SITE_AI_RECORDS_ENABLED':'0','DEEPSEEK_API_KEY':secrets.token_hex(32),'DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server_port}/anthropic',
       'YUNYING_SEARCH_PROVIDER':'deepseek','DEEPSEEK_SEARCH_BASE_URL':f'http://127.0.0.1:{server_port}/anthropic/v1','NO_PROXY':'127.0.0.1,localhost'}
-    def set_group_mode(enabled):
+    def set_pause(enabled):
         conn = pymysql.connect(host='127.0.0.1', port=int(env['DB_PORT']), user='root', database='yunying_v4_test', autocommit=True)
         try:
             with conn.cursor() as cur:
-                cur.execute('INSERT INTO group_configs (group_id,is_chat_mode,social_paused) VALUES (%s,0,%s) ON DUPLICATE KEY UPDATE social_paused=VALUES(social_paused)', (group, int(not enabled)))
+                cur.execute('INSERT INTO group_configs (group_id,is_chat_mode,social_paused) VALUES (%s,1,%s) ON DUPLICATE KEY UPDATE social_paused=VALUES(social_paused)', (group, int(not enabled)))
         finally:
             conn.close()
-    set_group_mode(True)
+    def set_chat_mode(enabled):
+        conn = pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test',autocommit=True)
+        try:
+            with conn.cursor() as cur:cur.execute('UPDATE group_configs SET is_chat_mode=%s WHERE group_id=%s',(int(enabled),group))
+        finally:conn.close()
+    set_pause(True)
     processes=[]
     logs=[]
     async def start_processes():
@@ -193,6 +198,7 @@ async def process_scenario():
         await eventually(lambda: asyncio.sleep(0,result=counters['requests']>=1))
         await asyncio.sleep(.3)
         assert not received
+        set_chat_mode(False)
         phase.update(action='remember',step=0)
         gate.clear()
         await incoming(2,'记住我喜欢红茶，顺便查下天气',at=True)
@@ -254,7 +260,7 @@ async def process_scenario():
         assert received[-1]['message'][0]=={'type':'reply','data':{'id':'13'}}
         assert counters['max_active']==1
         # Exercise the V4 pause permission, without sending a new wake message.
-        # The legacy is_chat_mode remains 0 throughout; @ replies above must still work.
+        # Call-only mode remains OFF across restart; hard pause also blocks explicit calls.
         phase.update(action='silence',step=0)
         async def has_pause(value):
             conn=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
@@ -264,7 +270,7 @@ async def process_scenario():
                     return bool(cur.fetchone()[0]) == value
             finally:
                 conn.close()
-        set_group_mode(False)
+        set_pause(False)
         await eventually(lambda:has_pause(True),15)
         requests=counters['requests']
         await incoming(14,'暂停期间仍应保存并排队',at=True)
@@ -281,8 +287,11 @@ async def process_scenario():
         await eventually(paused_event_saved)
         await asyncio.sleep(.3)
         assert counters['requests']==requests and len(received)==2
-        set_group_mode(True)
+        set_pause(True)
         await eventually(lambda:has_pause(False),15)
+        await asyncio.sleep(.4)
+        assert counters['requests']==requests,'hard-pause resume must not replay a call-only backlog'
+        await incoming(15,'恢复后重新呼叫',at=True)
         await eventually(lambda:asyncio.sleep(0,result=counters['requests']>requests))
         assert mapping()==before and counters['max_active']==1
     finally:

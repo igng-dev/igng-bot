@@ -1,0 +1,35 @@
+-- Separate durable recording from DSH delivery and bound direct-call permissions.
+-- Guard every ALTER for interrupted-DDL retries. No legacy tables or history are removed.
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_ingress' AND COLUMN_NAME='recording_status') > 0, 'SELECT 1', 'ALTER TABLE yunying_ingress ADD COLUMN recording_status VARCHAR(16) NOT NULL DEFAULT ''pending''');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_ingress' AND COLUMN_NAME='recording_attempts') > 0, 'SELECT 1', 'ALTER TABLE yunying_ingress ADD COLUMN recording_attempts INT UNSIGNED NOT NULL DEFAULT 0');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_ingress' AND COLUMN_NAME='recording_error') > 0, 'SELECT 1', 'ALTER TABLE yunying_ingress ADD COLUMN recording_error VARCHAR(255) NULL');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_ingress' AND COLUMN_NAME='recording_available_at') > 0, 'SELECT 1', 'ALTER TABLE yunying_ingress ADD COLUMN recording_available_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_ingress' AND COLUMN_NAME='recorded_at') > 0, 'SELECT 1', 'ALTER TABLE yunying_ingress ADD COLUMN recorded_at DATETIME(6) NULL');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_ingress' AND COLUMN_NAME='command_result') > 0, 'SELECT 1', 'ALTER TABLE yunying_ingress ADD COLUMN command_result JSON NULL');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_sessions' AND COLUMN_NAME='direct_event_id') > 0, 'SELECT 1', 'ALTER TABLE yunying_sessions ADD COLUMN direct_event_id VARCHAR(96) NULL');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+SET @yunying_ddl = IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='yunying_sessions' AND COLUMN_NAME='direct_expires_at') > 0, 'SELECT 1', 'ALTER TABLE yunying_sessions ADD COLUMN direct_expires_at DATETIME(6) NULL');
+PREPARE yunying_stmt FROM @yunying_ddl;
+EXECUTE yunying_stmt;
+DEALLOCATE PREPARE yunying_stmt;
+UPDATE yunying_ingress SET recording_status='recorded',recorded_at=COALESCE(delivered_at,created_at) WHERE recording_status='pending' AND (prepared_event IS NOT NULL OR delivery_status='delivered');
