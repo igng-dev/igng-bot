@@ -43,20 +43,20 @@ test('native DSH: every concurrent event persists once and same-session model wo
  }finally{unblock();await runtime.close();await ctx.fiber.dispose();}
 });
 
-test('official JSONL recovery: SQL acknowledgement failure and native dispose retain one pending logical input',async()=>{
+test('official JSONL recovery: SQL acknowledgement failure keeps one logical input without duplication',async()=>{
  const store=new FixtureStore();let first=await harness(),runtime=new SocialRuntime(first.ctx,store,testSettings(),async()=>({ok:true}));
- // A paused conversation lets us inspect the official durable inbox without consuming it.
- await runtime.load('group:1001');const before=runtime.conversations.get('group:1001');before.state.paused=true;await store.setPaused('group:1001',true);
+ await runtime.load('group:1001');const before=runtime.conversations.get('group:1001');
  store.failDeliveryOnce=true;await assert.rejects(runtime.accept(event('recover')));
  const sessionId=before.state.sessionId;await runtime.close();await first.ctx.fiber.dispose();
  const second=await harness(new ScriptAdapter(),first.root);runtime=new SocialRuntime(second.ctx,store,testSettings(),async()=>({ok:true}));
  try{
   await runtime.restore();const after=runtime.conversations.get('group:1001');assert.equal(after.state.sessionId,sessionId);
-  assert.equal(after.handle.agent.inbox.nextStep.filter(m=>m.content.some(c=>c.text?.includes('recover'))).length,1);
   assert.equal(store.rows.get('recover').delivered,1);
-  const logs=await durableEvents(second.ctx,sessionId);assert.equal(logs.filter(e=>e.type==='agent/inbox/spliced').flatMap(e=>e.data.inserted).filter(m=>m.content.some(c=>c.text?.startsWith('【QQ事件'))).length,2);
-  // Native disposal durably cancels the first insertion. Recovery re-admits the same input id exactly once.
-  assert.equal(after.handle.agent.inbox.nextStep.length,1);
+  await settle(runtime);
+  // The failed acknowledgement is re-delivered but the logical input is never injected twice.
+  const qqEvents=(await durableEvents(second.ctx,sessionId)).filter(e=>e.type==='user/message')
+    .flatMap(e=>e.data.content||[]).filter(c=>c.type==='text'&&c.text?.startsWith('【QQ事件')&&c.text.includes('recover'));
+  assert.equal(qqEvents.length,1);
  }finally{await runtime.close();await second.ctx.fiber.dispose();}
 });
 
@@ -81,14 +81,12 @@ test('real official DSH Compaction continues after Session restart; summary stay
 });
 
 
-test('authorized resume drives queued native Inbox while pause prevents model activity',async()=>{
+test('native DSH: a legacy pause payload is inert and direct calls still drive the inbox',async()=>{
  const {ctx,adapter}=await harness(),store=new FixtureStore(),runtime=new SocialRuntime(ctx,store,testSettings(),async()=>({ok:true}));
  try{
-  await runtime.accept(event('pause-command','group:1001',{commandHandled:true,pause:true}));
-  await runtime.accept(event('queued-while-paused','group:1001',{atBot:true}));
-  assert.equal(adapter.requests.length,0);
-  await runtime.accept(event('resume-command','group:1001',{commandHandled:true,pause:false}));await settle(runtime);
-  assert.equal(adapter.requests.length,1);assert.equal(runtime.conversations.get('group:1001').state.lastWakeReason,'resume');
-  assert.ok(adapter.requests[0].messages.some(m=>m.content.some(c=>c.text?.includes('queued-while-paused'))));
+  await runtime.accept(event('legacy-pause','group:1001',{commandHandled:true,pause:true}));
+  await runtime.accept(event('queued-call','group:1001',{atBot:true}));await settle(runtime);
+  assert.equal(adapter.requests.length,1);
+  assert.ok(adapter.requests[0].messages.some(m=>m.content.some(c=>c.text?.includes('queued-call'))));
  }finally{await runtime.close();await ctx.fiber.dispose();}
 });

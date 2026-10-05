@@ -38,7 +38,7 @@ flowchart LR
 
 WebSocket 来信先落 `yunying_ingress`。机械 worker 复用 V3 下载附件、OCR/ASR、保存消息、撤回和管理控制，再提交 prepared outbox；独立 delivery worker 才联系 DSH。两阶段各自按会话 FIFO、backoff 和状态恢复。DSH 不在线不会阻塞后续 `message_logs`/附件保存。媒体提交前进程中断时复用已提交的消息行，不重复下载/转写。普通模型文本输出不转发 QQ。
 
-`group_configs.is_chat_mode` 继续作为网站/QQ 的同一个开关：开启时所有来信可参与原 reserved2 行为；关闭时普通消息只观察，不 inject、不自主 wake，明确 @ 或引用云萤才建立一次调用。该轮带最近最多20条/约6000字符上下文，可继续读取新到达的观察消息和旧历史。个人私聊不受群开关影响。`social_paused` 为独立硬暂停，连明确呼叫也禁止，机械记录始终继续。
+`group_configs.is_chat_mode` 继续作为网站/QQ 的同一个开关：开启时所有来信可参与原 reserved2 行为；关闭时普通消息只观察，不 inject、不自主 wake，明确 @ 或引用云萤才建立一次调用。该轮带最近最多20条/约6000字符上下文，可继续读取新到达的观察消息和旧历史。个人私聊不受群开关影响。群配置只剩聊天模式一个开关；机械记录始终继续。
 
 许可在事件投递、所有 wake 路径、官方 `agent/pre-step`、工具执行和 Python 发送端收口。关闭模式不会因 bootstrap、pending Inbox、有限 sleep、reply check、提醒、proactive 或恢复而自行启动模型；开关恢复不会自动重放旧积压。真实呼叫的临时权限记录来源 event、最长10分钟，原生 `turn/end` 撤销；模型只能改变 wake 意愿，不能授予聊天权限。切换保持原 Session UUID，旧待处理输入通过官方 Inbox 的取消记录移除，不改 Session 文件。
 

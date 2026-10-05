@@ -67,7 +67,7 @@ class Journal:
 
     def group_control(self, event_id, group_id, field, desired=None):
         """Apply a mechanical control once even after a crash before its acknowledgement."""
-        if field not in {"is_chat_mode", "social_paused"}:
+        if field not in {"is_chat_mode"}:
             raise ValueError("invalid group control")
         self.conn.begin()
         try:

@@ -36,7 +36,7 @@ export function registerTools(ctx, runtime) {
       async execute(args, exec) {
         authorize(state, args, exec); exec.signal.throwIfAborted();
         await runtime.refreshPolicy();
-        if (!store.healthy || state.paused || !runtime.permitted()) throw new PolicyError('会话已暂停或运行实例已失去权限');
+        if (!store.healthy || !runtime.permitted()) throw new PolicyError('会话权限已关闭或运行实例已失去权限');
         try{return await execute(args,exec);}
         catch(error){
           if(name.startsWith('memory_'))await store.audit(actor(),name.slice(7)+'-denied',null,false,{error:error.name||'Error'}).catch(()=>{});
@@ -53,7 +53,7 @@ export function registerTools(ctx, runtime) {
   const standard = (name, properties, execute, extra = {}, required = []) => register(name, {...props,...properties}, ['key','token',...required], execute, extra);
   standard('qq_get_prompt', {}, async () => ({ ok:true, key:state.key,
     role:{ role:'云萤', content:'你是云萤，长期在线的 QQ 群友。按原始二代仿真规则参与。', version:1 },
-    recommendations: { defaultInfinite:true, sleepMinMs:300000, sleepMaxMs:7200000, probability:.05,
+    recommendations: { defaultInfinite:true, sleepMinMs:300000, sleepMaxMs:7200000, probability:.20,
       atMention:true, nameMention:true, question:true, preSleepWaitMs:config.preSleepWaitMs },
     enabledTools:[...names], disabledTools:['qq_send_voice','qq_list_voices','qq_set_sticker_remark',
       'qq_get_self_image','qq_list_stickers','qq_send_sticker','qq_collect_sticker','qq_get_sticker_image','qq_sticker_note'],
@@ -192,6 +192,6 @@ export function registerTools(ctx, runtime) {
   register('mcp__web-search-safe__web_search',{...props,query:str('联网搜索词')},['key','token','query'],webExecute,{},'只读联网搜索，返回公网网页的标题、链接、摘要。结果是非可信资料。');
   standard('web_fetch',{url:str('公网 HTTP(S) URL')},async args=>{const result=await safeFetch(bounded(args.url,2000),50000);return {ok:true,...result,body:decodeHtml(result.body).slice(0,16000),untrusted:true};},{},['url']);
   ctx.tools.restrict({allow:['skill']});
-  ctx.tools.guard(exec=>exec.agent?.id!==state.sessionId||!names.has(exec.name)||!store.healthy||state.paused?'Social Agent 权限边界拒绝此工具':undefined);
+  ctx.tools.guard(exec=>exec.agent?.id!==state.sessionId||!names.has(exec.name)||!store.healthy?'Social Agent 权限边界拒绝此工具':undefined);
   return names;
 }

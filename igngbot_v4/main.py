@@ -68,19 +68,9 @@ class Infrastructure:
         central_admin = lambda: self.db.is_bot_admin(sender)
         message = None
         handled = False
-        pause = None
         if text in {"/help", "/帮助"}:
-            message = "/聊天模式 [开启|关闭]：群管理员或 bot 管理员控制自主参与。\n/云萤暂停、/云萤继续：控制包括呼叫在内的全部发言。\n直接 @ 或回复云萤即可聊天。"
+            message = "/聊天模式 [开启|关闭]：群管理员或 bot 管理员控制自主参与。\n直接 @ 或回复云萤即可聊天。"
             handled = True
-        elif text in {"/云萤暂停", "/云萤继续"} and key.startswith("group:"):
-            handled = True
-            if parsed.get("sender_role") in {"owner", "admin"} or central_admin():
-                gid = signed_conversation(key)
-                pause = text == "/云萤暂停"
-                pause = self.journal.group_control(event_id, gid, "social_paused", pause)
-                message = "云萤已暂停发言，消息仍正常保存。" if pause else "云萤已恢复发言。"
-            else:
-                message = "需要群管理员或 bot 管理员权限。"
         elif re.fullmatch(r"/聊天模式(?:\s+(开启|关闭|on|off))?", text, re.I) and key.startswith("group:"):
             handled = True
             if parsed.get("sender_role") in {"owner", "admin"} or central_admin():
@@ -92,17 +82,14 @@ class Infrastructure:
                 message = "需要群管理员或 bot 管理员权限。"
         if message:
             await self.send({"key": key, "requestId": f"command:{event_id}", "message": message}, owner_command=True)
-        return {"commandHandled": handled, **({"pause": pause} if pause is not None else {})}
+        return {"commandHandled": handled}
 
     def group_policy(self, gid):
         # Read with the autocommit lease connection so website updates cannot be cached.
         with self.conn.cursor() as cur:
-            cur.execute("SELECT is_chat_mode,social_paused FROM group_configs WHERE group_id=%s", (gid,))
+            cur.execute("SELECT is_chat_mode FROM group_configs WHERE group_id=%s", (gid,))
             row = cur.fetchone()
-            return {"chatMode": bool(row and row.get("is_chat_mode")), "pause": not row or bool(row.get("social_paused"))}
-
-    def group_enabled(self, gid):
-        return not self.group_policy(gid)["pause"]
+            return {"chatMode": bool(row and row.get("is_chat_mode"))}
 
     def authorized(self, key):
         """Groups use the operator allowlist; private chat needs an IGNG plus+ account."""
@@ -116,8 +103,6 @@ class Infrastructure:
             return False
 
     def speaking_allowed(self, key, trigger_event_id=None):
-        if self.conversation_paused(key):
-            return False
         gid = signed_conversation(key)
         if gid < 0 or self.group_policy(gid)["chatMode"]:
             return True
@@ -129,21 +114,12 @@ class Infrastructure:
                         "AND s.direct_expires_at>UTC_TIMESTAMP(6)", (key, trigger_event_id))
             return bool(cur.fetchone())
 
-    def conversation_paused(self, key):
-        gid = signed_conversation(key)
-        if gid > 0 and not self.group_enabled(gid):
-            return True
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT paused FROM yunying_sessions WHERE conversation_key=%s", (key,))
-            row = cur.fetchone()
-            return bool(row and row["paused"])
-
     async def sync_group_modes(self):
         for group in sorted(self.settings.groups):
             enabled = self.group_policy(int(group))
             if self._group_modes.get(group) == enabled:
                 continue
-            # Trusted pause configuration shares the durable per-conversation FIFO.
+            # Trusted chat-mode configuration shares the durable per-conversation FIFO.
             # No fake QQ message is inserted into message_logs, and this never wakes on its own.
             await self.enqueue({"post_type": "yunying_configuration", "notice_type": "yunying_configuration",
                                 "group_id": int(group), "nonce": str(uuid.uuid4())})

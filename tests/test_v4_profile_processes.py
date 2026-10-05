@@ -259,40 +259,17 @@ async def process_scenario():
         await eventually(lambda:asyncio.sleep(0,result=len(received)==2))
         assert received[-1]['message'][0]=={'type':'reply','data':{'id':'13'}}
         assert counters['max_active']==1
-        # Exercise the V4 pause permission, without sending a new wake message.
-        # Call-only mode remains OFF across restart; hard pause also blocks explicit calls.
+        # The hard pause was removed. The legacy social_paused column is inert: even
+        # with it set, an explicit call still wakes the model and messages keep flowing.
         phase.update(action='silence',step=0)
-        async def has_pause(value):
-            conn=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
-            try:
-                with conn.cursor() as cur:
-                    cur.execute('SELECT paused FROM yunying_sessions WHERE conversation_key=%s',(key,))
-                    return bool(cur.fetchone()[0]) == value
-            finally:
-                conn.close()
-        set_pause(False)
-        await eventually(lambda:has_pause(True),15)
         requests=counters['requests']
-        await incoming(14,'暂停期间仍应保存并排队',at=True)
-        async def paused_event_saved():
-            conn=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
-            try:
-                with conn.cursor() as cur:
-                    cur.execute('SELECT COUNT(*) FROM message_logs WHERE group_id=%s AND msg_id=%s',(group,'14'))
-                    raw=cur.fetchone()[0]
-                    cur.execute("SELECT COUNT(*) FROM yunying_events WHERE conversation_key=%s AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.messageId'))='14' AND delivered=1",(key,))
-                    return raw==1 and cur.fetchone()[0]==1
-            finally:
-                conn.close()
-        await eventually(paused_event_saved)
-        await asyncio.sleep(.3)
-        assert counters['requests']==requests and len(received)==2
-        set_pause(True)
-        await eventually(lambda:has_pause(False),15)
-        await asyncio.sleep(.4)
-        assert counters['requests']==requests,'hard-pause resume must not replay a call-only backlog'
-        await incoming(15,'恢复后重新呼叫',at=True)
+        set_pause(False)
+        await incoming(14,'暂停已移除，呼叫仍应处理',at=True)
         await eventually(lambda:asyncio.sleep(0,result=counters['requests']>requests))
+        assert len(received)==2 and counters['max_active']==1
+        set_pause(True)
+        await incoming(15,'继续闲聊',at=True)
+        await eventually(lambda:asyncio.sleep(0,result=counters['requests']>requests+1))
         assert mapping()==before and counters['max_active']==1
     finally:
         await stop_processes()
