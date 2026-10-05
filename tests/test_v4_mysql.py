@@ -18,7 +18,7 @@ def connection():
     return pymysql.connect(host='127.0.0.1', port=int(os.getenv('YUNYING_TEST_DB_PORT', '33316')), user='root', database='yunying_v4_test', autocommit=True, charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor, init_command="SET time_zone = '+00:00'")
 
 
-def test_real_mysql_migration_fifo_retry_restart_and_identity_consent():
+def test_real_mysql_migration_fifo_retry_restart_and_memory_qq_schema():
     conn = connection()
     journal = Journal(conn)
     mid = int(uuid4().int % 10**12)
@@ -57,14 +57,9 @@ def test_real_mysql_migration_fifo_retry_restart_and_identity_consent():
         journal.finish(first)
         assert journal.pending()['event_id'] == second
         journal.finish(second)
-        qq = str(int(uuid4().int % 10**9)+10**9)
-        journal.set_sharing(qq, True)
-        journal.set_sharing(qq, False)
         with conn.cursor() as cur:
-            cur.execute("SELECT identity_id,shared_memory_opt_in FROM memory_identity_bindings WHERE provider='qq' AND external_id=%s", (qq,))
-            assert cur.fetchone()['shared_memory_opt_in'] == 0
-            cur.execute("SELECT COUNT(*) total FROM memory_identity_audit WHERE external_id=%s AND operation='sharing-consent'", (qq,))
-            assert cur.fetchone()['total'] == 2
+            cur.execute("SELECT COUNT(*) total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_documents' AND COLUMN_NAME='person_qq'")
+            assert cur.fetchone()['total'] == 1
     finally:
         if not conn.open:
             conn = connection()

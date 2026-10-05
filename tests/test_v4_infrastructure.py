@@ -140,6 +140,43 @@ def test_uncertain_send_outcome_is_preserved_and_not_retried():
     asyncio.run(scenario())
 
 
+def test_group_allowlist_and_private_plus_tier_authorization():
+    app = Infrastructure.__new__(Infrastructure)
+    app.settings = Settings("x" * 32, groups=frozenset({"1001"}))
+    app.db = MagicMock()
+    app.db.private_allowed.side_effect = lambda qq: str(qq) == "2001"
+    assert app.authorized("group:1001") is True
+    assert app.authorized("group:1002") is False
+    assert app.authorized("private:2001") is True
+    assert app.authorized("private:2999") is False
+    app.db.private_allowed.side_effect = RuntimeError("identity database unavailable")
+    assert app.authorized("private:2001") is False
+
+
+def test_identity_capability_expands_the_account_qqs_and_drops_invalid_values():
+    async def scenario():
+        app = Infrastructure.__new__(Infrastructure)
+        app.db = MagicMock()
+        app.db.resolve_bound_igng_account_id.side_effect = lambda qq: {"2001": "acct-1"}.get(str(qq))
+        app.db.get_account_qqs.side_effect = lambda account: ["2001", "2002"] if account == "acct-1" else []
+        result = await app.identity({"qqs": ["2001", "2999", "not-a-qq"]})
+        assert result == {"ok": True, "qqs": ["2001", "2002", "2999"]}
+    asyncio.run(scenario())
+
+
+def test_permission_group_and_memory_sharing_commands_are_removed():
+    async def scenario():
+        app = app_for_send(Response())
+        for text in ("/用户组 pro 2001", "/用户组", "/记忆共享 开启"):
+            result = await app.command({}, {"message_content": text, "sender_id": 2001, "sender_role": "admin"},
+                                       "group:1001", f"cmd-{text}")
+            assert result == {"commandHandled": False}
+        assert not hasattr(app.journal, "set_sharing")
+        app.db.set_user_group.assert_not_called()
+        app.http.post.assert_not_called()
+    asyncio.run(scenario())
+
+
 def test_member_prompt_cannot_elevate_owner_command_permissions():
     async def scenario():
         app = app_for_send(Response({"status": "ok", "retcode": 0, "data": {"message_id": 9902}}))

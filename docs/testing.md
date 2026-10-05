@@ -78,7 +78,7 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 | 连续多人来信 | 原生21条并发事件恰好入 Inbox 一次、max model concurrency=1；双进程 OneBot fixture 连续12条事件落库且无并发调用/重复发送。 |
 | 主动读取、wait/wake/潜水 | 未读 source ID 与连续 watermark、分页/新到达不能越水位、10秒静默与300秒观察分离、取消、有限时间唤醒、无限潜水安全。测试缩短计时，不等待生产分钟级时长。 |
 | 搜索后自然回复 | 原生工具结果→模型→QQ 的协议链；双进程经官方 DeepSeek search provider 的 Messages wire fixture。真实公网结果和模型风格尚未验收。 |
-| Person Memory 跨群 CRUD / 私有隔离 | 真实 SQL 的本人共享授权、来源校验、跨群检索/更新、CAS、撤销授权、忘记、Owner rollback、审计；别群私有搜索和直接 read 均拒绝。 |
+| Person Memory 跨群 CRUD / 账号聚合 | 真实 SQL 的本人来源校验、QQ 跨群检索/更新、同一 IGNG 账号多 QQ 聚合、CAS、忘记、Owner rollback、审计；无 IGNG 归属的 QQ 只看自己，群记忆仍只在原群可读。 |
 | 撤回、图片、语音、旧历史 | V3 媒体/语音/转发/撤回回归；V4 当前 DB 行、撤回 tombstone、路径隔离、OCR/转写 view；原生图片 tool admission、模型 image content 和重启后的持久引用。没有重跑真实 OCR/ASR 模型下载。 |
 | Compaction 后继续 | 实际官方 `compactNow` 创建 durable summary，下一 QQ 事件继续；JSONL 恢复后仍保持摘要和同一 Session。生产自动压缩组件保留，没有自建 summary。 |
 | 重启恢复 | 真实 SQL journal/FIFO/backoff、identity/Memory、native JSONL Inbox 取消/重入；实际断开 Python+官方CLI 两个测试进程的 DB 租约连接，二者退出再启动，同一 Session UUID、Memory read 与 QQ reply 恢复。 |
@@ -109,7 +109,7 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 新增回归覆盖：DSH 接收失败时，同会话连续消息/附件元数据仍全部机械提交；断点恢复不重复执行切换命令；OFF群普通消息不生成模型请求，@/reply 携带最近受限上下文且最多一个 Agent；OFF下 wait 能在当前呼叫轮看到普通新消息，active wake config、提醒与定时器不能开启新轮；OFF恢复、先开启再重启均不重放观察积压；实际 CLI 在OFF模式完成 Memory→搜索→回复，并在租约故障后恢复原 Session；硬暂停阻断呼叫，解除硬暂停后等待新呼叫。
 
-真实 SQL 记账测试覆盖：网站连接故障时 native outbox 仍 pending、恢复后重复投递去重；三次模型调用聚合到一个 job；未知 usage 保留 NULL与未知次数，cache/input正确合计；compaction为独立任务；原生三次重试保持一个turn，Session历史回放产生相同task/request ID。既有跨群Person Memory/私有隔离、撤回、图片/语音/转发、官方compaction和重启测试继续通过。
+真实 SQL 记账测试覆盖：网站连接故障时 native outbox 仍 pending、恢复后重复投递去重；三次模型调用聚合到一个 job；未知 usage 保留 NULL与未知次数，cache/input正确合计；compaction为独立任务；原生三次重试保持一个turn，Session历史回放产生相同task/request ID。既有跨群 Person Memory/账号聚合、撤回、图片/语音/转发、官方compaction和重启测试继续通过。
 
 这些结果不等于真实QQ风格、付费提供方计费一致性、NAS长时运行或真实OCR/ASR模型验收。原部署快照仍在部署记录中；本轮迁移003/004只在临时库应用。站点旧摘要/人格控件保留在另一个仓库，未修改或部署；V4侧已停止旧摘要/Prompt bootstrap与业务摘要生成。依赖安全告警未作为本轮功能改动处理。
 

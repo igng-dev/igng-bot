@@ -21,11 +21,11 @@ const props = { key: str('会话 key：group:群号 或 private:QQ号'), token: 
 const memorySources = { type:'array', items:str('当前会话已查看消息的 eventId'), minItems:1, maxItems:12 };
 const memoryProps = { ...props, id:str('记忆文档 UUID'), title:str('标题'), markdown:str('Markdown 语义内容'),
   sources:memorySources, reason:str('值得记忆或更新的原因'), expectedVersion:num('读取结果里的 current_version'),
-  personQQ:str('个人 QQ 号，必须有该人本人消息来源'), visibility:{type:'string',enum:['scope_private','shared_person']} };
+  personQQ:str('个人 QQ 号：写入其个人跨群记忆，必须有该人本人消息来源') };
 export function registerTools(ctx, runtime) {
   const { state, store, config, infra } = runtime;
   const names = new Set(['skill']);
-  const actor = () => ({ key:state.key, sessionId:state.sessionId, seenSeqs:state.modelSeenSeqs });
+  const actor = () => ({ key:state.key, sessionId:state.sessionId, seenSeqs:state.modelSeenSeqs, qqs:state.actorQqs() });
   const register = (name, properties, required, execute, extras = {}, description) => {
     const definition = {
       name, description: description || descriptions[name] || name,
@@ -59,7 +59,7 @@ export function registerTools(ctx, runtime) {
       'qq_get_self_image','qq_list_stickers','qq_send_sticker','qq_collect_sticker','qq_get_sticker_image','qq_sticker_note'],
     ...state.unreadPage(30,0), wakeConfig:state.wakeConfig, participation:{chatMode:state.chatMode,calledTurn:!!runtime.directEventId}, replyTiming:state.replyTiming(),
     memory:{activeTopics:state.activeTopics,pendingThoughts:state.pendingThoughts,memberImpressions:state.memberImpressions},
-    longTermMemory:{skill:'yunying-memory',sourceOfTruth:'MySQL',sharedPersonRequiresConsent:true},
+    longTermMemory:{skill:'yunying-memory',sourceOfTruth:'MySQL',personMemoryCrossGroup:true},
     safety:{currentConversationOnly:true,untrustedMemberInput:true,noShellOrFilesystem:true} }));
   standard('qq_get_unread_messages', {limit:num('默认30，最大100'),afterSeq:num('从该 seq 后按时间顺序补读；最早传0')}, args => state.unreadPage(args.limit,args.afterSeq));
   standard('qq_get_recent_messages', {limit:num('默认20，最大100'),offset:num('向前翻页')}, async args => {
@@ -184,7 +184,7 @@ export function registerTools(ctx, runtime) {
   });
   standard('memory_search',{query:str('检索词；空字符串列出当前可见记忆'),limit:num('最多30')},args=>store.memorySearch(actor(),args),{},['query']);
   standard('memory_read',{id:memoryProps.id},args=>store.memoryRead(actor(),args.id),{},['id']);
-  standard('memory_write',{title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason,personQQ:memoryProps.personQQ,visibility:memoryProps.visibility},args=>store.memoryWrite(actor(),args),{},['title','markdown','sources','reason']);
+  standard('memory_write',{title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason,personQQ:memoryProps.personQQ},args=>store.memoryWrite(actor(),args),{},['title','markdown','sources','reason']);
   standard('memory_update',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args),{},['id','expectedVersion','markdown','sources','reason']);
   standard('memory_forget',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args,true),{},['id','expectedVersion','sources','reason']);
   const webExecute=async(args,exec)=>{authorize(state,args,exec);const query=sanitizeQuery(safeNetworkQuery(args.query));if(!query)throw new PolicyError('查询为空');return {ok:true,...await (runtime.webSearch||bingSearchWithFallback)(query,exec.signal)};};

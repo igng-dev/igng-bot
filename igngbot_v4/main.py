@@ -69,14 +69,8 @@ class Infrastructure:
         message = None
         handled = False
         pause = None
-        consent = re.fullmatch(r"/记忆共享\s+(开启|关闭|on|off)", text, re.I)
-        if consent:
-            enabled = consent.group(1).lower() in {"开启", "on"}
-            self.journal.set_sharing(sender, enabled)
-            message = "个人记忆跨群共享已开启。只有你本人提供的信息可写入共享记忆。" if enabled else "个人记忆跨群共享已关闭；其他会话将无法读取你的共享记忆。"
-            handled = True
-        elif text in {"/help", "/帮助"}:
-            message = "/聊天模式 [开启|关闭]：群管理员或 bot 管理员控制自主参与。\n/云萤暂停、/云萤继续：控制包括呼叫在内的全部发言。\n/用户组 [pro|plus IGNG用户ID]：沿用网站权限。\n/记忆共享 开启|关闭：本人选择个人记忆是否跨群可见。\n直接 @ 或回复云萤即可聊天。"
+        if text in {"/help", "/帮助"}:
+            message = "/聊天模式 [开启|关闭]：群管理员或 bot 管理员控制自主参与。\n/云萤暂停、/云萤继续：控制包括呼叫在内的全部发言。\n直接 @ 或回复云萤即可聊天。"
             handled = True
         elif text in {"/云萤暂停", "/云萤继续"} and key.startswith("group:"):
             handled = True
@@ -96,18 +90,6 @@ class Infrastructure:
                 message = "聊天模式已开启，云萤可自主参与。" if enabled else "聊天模式已关闭；消息照常记录，@ 或回复云萤仍可呼叫。"
             else:
                 message = "需要群管理员或 bot 管理员权限。"
-        else:
-            match = re.fullmatch(r"/用户组(?:\s+(pro|plus)\s+#?(\d+))?", text, re.I)
-            if match:
-                handled = True
-                if match.group(1):
-                    if central_admin():
-                        self.db.set_user_group(match.group(2), match.group(1).lower())
-                        message = f"IGNG 用户 {match.group(2)} 已设置为 {match.group(1).lower()} 组。"
-                    else:
-                        message = "只有 bot 管理员可以设置用户组。"
-                else:
-                    message = f"当前用户组：{self.db.get_user_group(sender)}"
         if message:
             await self.send({"key": key, "requestId": f"command:{event_id}", "message": message}, owner_command=True)
         return {"commandHandled": handled, **({"pause": pause} if pause is not None else {})}
@@ -121,6 +103,17 @@ class Infrastructure:
 
     def group_enabled(self, gid):
         return not self.group_policy(gid)["pause"]
+
+    def authorized(self, key):
+        """Groups use the operator allowlist; private chat needs an IGNG plus+ account."""
+        kind, value = key.split(":", 1)
+        if kind == "group":
+            return value in self.settings.groups
+        try:
+            return self.db.private_allowed(value)
+        except Exception as error:
+            logger.warning("Private authorization denied after error: %s", type(error).__name__)
+            return False
 
     def speaking_allowed(self, key, trigger_event_id=None):
         if self.conversation_paused(key):
@@ -198,7 +191,7 @@ class Infrastructure:
         bot_id = str(raw.get("self_id") or self.config.BOT_USER_ID)
         ats = [str(item.get("qq")) for item in parsed.get("message_structure", []) if item.get("type") == "at"]
         reply = self.db.get_message_by_msg_id(parsed["group_id"], parsed["reply_to_msg_id"]) if parsed.get("reply_to_msg_id") else None
-        command = {} if parsed.get("is_self") or not self.settings.allowed(key) else await self.command(raw, parsed, key, event_id)
+        command = {} if parsed.get("is_self") or not self.authorized(key) else await self.command(raw, parsed, key, event_id)
         return {**view, **command, "eventId": event_id, "key": key, "kind": "message",
                 "sender": str(sender.get("card") or sender.get("nickname") or parsed["sender_id"])[:120],
                 "atBot": bot_id in ats, "replyToBot": bool(reply and reply.get("is_self")),
@@ -241,7 +234,7 @@ class Infrastructure:
                 continue
             try:
                 payload = decode(row["prepared_event"])
-                if payload is not None and self.settings.allowed(row["conversation_key"]):
+                if payload is not None and self.authorized(row["conversation_key"]):
                     gid = signed_conversation(row["conversation_key"])
                     if gid > 0:
                         payload = {**payload, **self.group_policy(gid)}
@@ -260,7 +253,7 @@ class Infrastructure:
 
     async def send(self, data, owner_command=False):
         key = data["key"]
-        if not self.settings.allowed(key):
+        if not self.authorized(key):
             raise web.HTTPForbidden(text="conversation denied")
         gid = signed_conversation(key)
         message = data.get("message")
@@ -331,7 +324,15 @@ class Infrastructure:
         key = data.get("key", "")
         if request.path == "/ai-records":
             return web.json_response(await self.ai_record(data))
-        if not self.settings.allowed(key):
+        if request.path == "/identity":
+            return web.json_response(await self.identity(data))
+        if request.path == "/authorized":
+            try:
+                allowed_key = self.authorized(str(data.get("key", "")))
+            except Exception:
+                allowed_key = False
+            return web.json_response({"ok": True, "allowed": allowed_key})
+        if not self.authorized(key):
             raise web.HTTPForbidden()
         gid = signed_conversation(key)
         if request.path == "/send":
@@ -379,6 +380,30 @@ class Infrastructure:
                 self.journal.finish_send(data["requestId"], "unknown", {"ok": False, "status": "unknown"})
                 return web.json_response({"ok": False, "status": "unknown"})
         raise web.HTTPNotFound()
+
+    async def identity(self, data):
+        """Resolve QQ(s) to every QQ of their IGNG account for cross-group memory reads."""
+        values = data.get("qqs")
+        if not isinstance(values, list):
+            values = [data.get("qq")]
+        base = []
+        for value in values:
+            text = str(value)
+            if re.fullmatch(r"[1-9][0-9]{0,19}", text) and text not in base:
+                base.append(text)
+        base = base[:50]
+        expanded = set(base)
+        accounts = set()
+        for qq in base:
+            account = await asyncio.to_thread(self.db.resolve_bound_igng_account_id, qq)
+            if account:
+                accounts.add(account)
+        for account in accounts:
+            for qq in await asyncio.to_thread(self.db.get_account_qqs, account):
+                if re.fullmatch(r"[1-9][0-9]{0,19}", str(qq)):
+                    expanded.add(str(qq))
+        ordered = sorted(expanded, key=int)[:200]
+        return {"ok": True, "qqs": ordered}
 
     async def ai_record(self, data):
         record_id = data["recordId"]
