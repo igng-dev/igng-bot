@@ -177,7 +177,7 @@ def test_recording_continues_while_dsh_delivery_retries_and_admin_toggle_is_once
             # Retrying the same toggle after a crash cannot undo it.
             assert app.journal.group_control(ids[0],group,'is_chat_mode') is True
             assert app.journal.group_control(ids[0],group,'is_chat_mode') is True
-            assert app.group_policy(group)=={'chatMode':True,'pause':False}
+            assert app.group_policy(group)=={'chatMode':True}
         finally:
             app._stopping=True;record.cancel();deliver.cancel()
             await asyncio.gather(record,deliver,return_exceptions=True)

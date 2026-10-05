@@ -130,11 +130,10 @@ def app_for_send(result):
     app._send_lock = asyncio.Lock()
     app.journal = SendJournal()
     app.conn = MagicMock()
-    app._test_social_paused = 0
     app._test_chat_mode = 1
     cur = app.conn.cursor.return_value.__enter__.return_value
     cur.execute.side_effect = lambda query, *_: setattr(cur, "_query", query)
-    cur.fetchone.side_effect = lambda: ({"social_paused": app._test_social_paused,"is_chat_mode":app._test_chat_mode} if "group_configs" in cur._query else None)
+    cur.fetchone.side_effect = lambda: ({"is_chat_mode": app._test_chat_mode} if "group_configs" in cur._query else None)
     app.db = MagicMock()
     app.http = MagicMock()
     app.http.post.return_value = result
@@ -189,27 +188,16 @@ def test_identity_capability_expands_the_account_qqs_and_drops_invalid_values():
     asyncio.run(scenario())
 
 
-def test_permission_group_and_memory_sharing_commands_are_removed():
+def test_permission_group_memory_sharing_and_pause_commands_are_removed():
     async def scenario():
         app = app_for_send(Response())
-        for text in ("/用户组 pro 2001", "/用户组", "/记忆共享 开启"):
+        for text in ("/用户组 pro 2001", "/用户组", "/记忆共享 开启", "/云萤暂停", "/云萤继续"):
             result = await app.command({}, {"message_content": text, "sender_id": 2001, "sender_role": "admin"},
                                        "group:1001", f"cmd-{text}")
             assert result == {"commandHandled": False}
         assert not hasattr(app.journal, "set_sharing")
         app.db.set_user_group.assert_not_called()
         app.http.post.assert_not_called()
-    asyncio.run(scenario())
-
-
-def test_member_prompt_cannot_elevate_owner_command_permissions():
-    async def scenario():
-        app = app_for_send(Response({"status": "ok", "retcode": 0, "data": {"message_id": 9902}}))
-        app.db.is_bot_admin.return_value = False
-        result = await app.command({}, {"message_content": "/云萤暂停", "sender_id": 2001, "sender_role": "member"}, "group:1001", "command-1")
-        assert result == {"commandHandled": True}
-        app.db.conn.cursor.assert_not_called()
-        assert "权限" in app.http.post.call_args.kwargs["json"]["message"][-1]["data"]["text"]
     asyncio.run(scenario())
 
 
@@ -243,31 +231,6 @@ def test_mentions_are_structured_and_restricted_to_current_group_members():
     asyncio.run(scenario())
 
 
-def test_social_pause_blocks_native_send_before_onebot_call():
-    async def scenario():
-        app = app_for_send(Response())
-        app._test_social_paused = 1
-        result = await app.send({"key": "group:1001", "requestId": "paused-call", "message": "不能发送"})
-        assert not result["ok"]
-        app.http.post.assert_not_called()
-        assert not app.journal.rows
-    asyncio.run(scenario())
-
-
-def test_group_owner_commands_pause_and_resume_without_changing_legacy_chat_mode():
-    async def scenario():
-        app = app_for_send(Response({"status": "ok", "retcode": 0, "data": {"message_id": 9906}}))
-        parsed = {"message_content": "/云萤暂停", "sender_id": 2001, "sender_role": "admin"}
-        result = await app.command({}, parsed, "group:1001", "owner-pause")
-        assert result["pause"] is True
-        assert app.journal.last_control == ("owner-pause",1001,"social_paused",True)
-        app._test_social_paused = 1
-        result = await app.command({}, {**parsed, "message_content": "/云萤继续"}, "group:1001", "owner-toggle")
-        assert result["pause"] is False
-        assert app.journal.last_control == ("owner-toggle",1001,"social_paused",False)
-    asyncio.run(scenario())
-
-
 def test_group_configuration_changes_enter_durable_fifo_without_raw_qq_history():
     async def scenario():
         app = app_for_send(Response())
@@ -283,7 +246,7 @@ def test_group_configuration_changes_enter_durable_fifo_without_raw_qq_history()
         payload = await app.prepare({"raw_event": raw, "conversation_key": "group:1001", "event_id": "control-1"})
         assert payload["isConfiguration"] and payload["isSelf"] and payload["commandHandled"]
         app.db.insert_message.assert_not_called()
-        app._test_social_paused = 1
+        app._test_chat_mode = 0
         await app.sync_group_modes()
         assert app.journal.enqueue.call_count == 2
     asyncio.run(scenario())
@@ -295,11 +258,11 @@ def test_delivery_rechecks_current_group_permission_for_prepared_retry():
         app._stopping = False
         app.journal = MagicMock()
         app.journal.pending.return_value = {"event_id": "retry-permission", "conversation_key": "group:1001",
-            "prepared_event": {"kind": "message", "pause": False}, "attempts": 0}
-        app._test_social_paused = 1
+            "prepared_event": {"kind": "message"}, "attempts": 0}
+        app._test_chat_mode = 0
         app.journal.finish.side_effect = lambda _: setattr(app, "_stopping", True)
         await app.deliver()
-        assert app.http.post.call_args.kwargs["json"]["pause"] is True
+        assert app.http.post.call_args.kwargs["json"]["chatMode"] is False
         app.journal.finish.assert_called_once_with("retry-permission")
     asyncio.run(scenario())
 
@@ -326,8 +289,6 @@ def test_call_only_mode_enforces_send_permission_at_infrastructure_boundary():
         old=cur.fetchone.side_effect
         cur.fetchone.side_effect=lambda: {"ok":1} if "direct_event_id" in cur._query else old()
         assert (await app.send({**data,"requestId":"called","triggerEventId":"actual-call"}))["ok"]
-        app._test_social_paused = 1
-        assert not (await app.send({**data,"requestId":"paused","triggerEventId":"actual-call"}))["ok"]
         assert app.http.post.call_count==1
     asyncio.run(scenario())
 

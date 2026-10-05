@@ -21,7 +21,7 @@ python -m pip install -r requirements-dev.txt
 | `DB_HOST/PORT/USER/PASSWORD/NAME` | 与原 bot 同一 MySQL；生产账号仅给本应用所需表权限。迁移账号需要建表权限。 |
 | `DB_SSL` / `DB_SSL_VERIFY` / `DB_SSL_CA` | 阿里云 RDS 强制 `require_secure_transport`，生产设 `DB_SSL=1`，让 pymysql、aiomysql（工单/站点记账池）与 DSH Profile 的 Node mysql2 全部走 TLS。默认加密但不校验证书；配置 `DB_SSL_CA` 指向 RDS CA 后开启校验。 |
 | `YUNYING_INTERNAL_SECRET` | Python 与 Profile 的独立 capability 凭据，至少32字符；两进程相同。 |
-| `YUNYING_ALLOW_GROUPS` | 群的会话授权边界，逗号分隔，为空拒绝；群发言还受独立的 `group_configs.social_paused` 控制，原始历史仍保存。 |
+| `YUNYING_ALLOW_GROUPS` | 群的会话授权边界，逗号分隔，为空拒绝；群自主参与还受 `group_configs.is_chat_mode` 控制，原始历史仍保存。 |
 | `YUNYING_ALLOW_PRIVATE` | 已废弃、被忽略。私聊改由 QQ 所属 IGNG 账号的 `yunying.plus`/`yunying.pro`（或 admin）权限判定，未绑定账号或权限不足一律拒绝。 |
 | `YUNYING_MODEL_PROVIDER/MODEL` | 默认官方 `deepseek-official` / `deepseek-v4-flash`。 |
 | `DEEPSEEK_API_KEY/BASE_URL` | 官方 DSH Messages provider 的凭据/端点；默认 `https://api.deepseek.com/anthropic`。chat/completions 网关改用下述官方 `llm-pi-ai` 配置。 |
@@ -73,7 +73,7 @@ DSH 官方 `llm-pi-ai` 已包含在固定 CLI 依赖中。可以在 `$DSH_HOME/p
 
 聊天模式沿用 `group_configs.is_chat_mode`。`/聊天模式` 由群 owner/admin 或 bot 管理员幂等切换；也可显式 `/聊天模式 开启|关闭`。网站现有 `isChatMode` PATCH 写同一字段，无须新建配置表。关闭时普通来信仍记录、可供已呼叫的 Agent 读取，但只允许明确 @ 或回复云萤开始模型轮次；名字提问和普通拍一拍不构成关闭模式的呼叫。
 
-`social_paused` 为独立硬暂停，由 `/云萤暂停`、`/云萤继续` 控制。5秒监测把配置变更放入持久队列；Profile 同时读数据库当前权限，原生 pre-step 与发送端再次核对，因此旧 retry/wake config 不能恢复旧权限。关闭聊天模式时恢复硬暂停不会重放积压呼叫；新 @/回复可再次开启一轮。授权私聊不受群开关影响。
+群配置只有一个 `is_chat_mode` 开关（`/聊天模式`）；历史硬暂停机制与 `/云萤暂停`、`/云萤继续` 指令已移除。5秒监测把聊天模式变更放入持久队列；Profile 同时读数据库当前权限，原生 pre-step 与发送端再次核对，因此旧 retry/wake config 不能恢复旧权限。切换聊天模式不会重放积压呼叫；新 @/回复可再次开启一轮。授权私聊不受群开关影响。
 
 网站旧摘要/人格管理页面仍在独立站点仓库中，本轮不修改或部署站点；机器人不再生成群业务摘要，不再启动初始化旧摘要/Prompt，但保留历史表以供旧页面读取与 V3 回滚。本站开关已经与 V4 重新对齐，通用 AI 表的 schema 不变。
 

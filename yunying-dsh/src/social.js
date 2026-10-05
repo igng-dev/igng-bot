@@ -9,7 +9,7 @@ export const EXPLICIT_END_RE = /(?:不聊了|不说了|晚安|睡了|先睡了|�
 export const defaultWakeConfig = (now = Date.now()) => ({
   mode: 'diving', infinite: true, sleepUntil: null,
   triggers: { atMention: true, nameMention: true, question: true, poke: true, anyMessage: false,
-    probability: .05, speakerIds: [], keywords: [] },
+    probability: .20, speakerIds: [], keywords: [] },
   batchWindowMs: 8000, lastWakeAt: 0, wakeCount: 0, noActionCount: 0, confirmedAt: 0, confirmedBy: 'default',
 });
 export function normalizeSpeakerIds(values) {
@@ -20,12 +20,14 @@ export class SocialState {
     this.key = key; this.sessionId = sessionId; this.config = config; this.clock = clock;
     this.agentToken = saved.agentToken || randomBytes(16).toString('hex');
     this.wakeConfig = saved.wakeConfig || defaultWakeConfig();
+    // The old 0.05 default is migrated once to the new 0.20; deliberate custom values stay.
+    if (this.wakeConfig?.triggers?.probability === 0.05) this.wakeConfig.triggers.probability = 0.20;
     for (const name of ['lastIncomingAt', 'lastAiReplyAt', 'lastActionAt', 'lastReadThroughSeq', 'preSleepWaitSatisfiedAt', 'preSleepWaitObservedAt', 'lastProactiveAt']) this[name] = Number(saved[name]) || 0;
     this.bootstrapSent = !!saved.bootstrapSent; this.lastWakeReason = saved.lastWakeReason || '';
     this.activeTopics = saved.activeTopics || []; this.pendingThoughts = saved.pendingThoughts || [];
     this.memberImpressions = saved.memberImpressions || {};
     this.wakeTimes = saved.wakeTimes || []; this.sendTimes = saved.sendTimes || [];
-    this.chatMode = true; this.paused = false; this.recentMessages = []; this.unread = []; this.modelSeenSeqs = new Set();
+    this.chatMode = true; this.recentMessages = []; this.unread = []; this.modelSeenSeqs = new Set();
     this.lastUnreadSeq = 0; this.waiting = false;
     this.ensureWakeable();
   }
@@ -148,7 +150,7 @@ export class SocialState {
     return { ok: true, wakeConfig: this.wakeConfig, readThroughSeq: this.readThrough(), unreadCount: this.unread.length };
   }
   wakeReason(msg, random = Math.random) {
-    if (this.paused || msg.isSelf || msg.commandHandled) return null;
+    if (msg.isSelf || msg.commandHandled) return null;
     if (this.key.startsWith('private:')) return 'private';
     if (msg.atBot || msg.replyToBot) return 'atMention'; // Product guarantee: direct requests bypass ordinary cost throttles.
     if (!this.chatMode || msg.observeOnly || msg.isConfiguration) return null;
@@ -205,7 +207,7 @@ export class SocialState {
         }
         await pause(Math.min(300, timeout - (this.clock() - start)));
       }
-      signal?.throwIfAborted(); if (this.paused) throw new PolicyError('会话已暂停');
+      signal?.throwIfAborted();
       const waitedMs = this.clock() - start, quiet = (reply || arrived) && this.clock() - lastNewAt >= quietMs;
       const preSleepWaitMs = this.config.preSleepWaitMs ?? 300000;
       const satisfied = !reply && (!arrived ? waitedMs >= preSleepWaitMs : quiet && this.clock() - lastNewAt >= preSleepWaitMs);

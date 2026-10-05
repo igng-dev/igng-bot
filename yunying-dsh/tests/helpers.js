@@ -50,14 +50,13 @@ export async function harness(adapter=new ScriptAdapter(),root) {
 }
 export class FixtureStore {
  constructor(){this.healthy=true;this.maps=new Map();this.rows=new Map();this.bindings=new Map();this.calls=[];this.failDeliveryOnce=false;}
- async mapping(key){if(!this.maps.has(key))this.maps.set(key,{conversation_key:key,dsh_session_id:randomUUID(),provisioning_status:'provisioning',social_state:null,paused:0});return structuredClone(this.maps.get(key));}
+ async mapping(key){if(!this.maps.has(key))this.maps.set(key,{conversation_key:key,dsh_session_id:randomUUID(),provisioning_status:'provisioning',social_state:null});return structuredClone(this.maps.get(key));}
  async mappings(){return [...this.maps.values()].map(v=>structuredClone(v));}
- async policy(key){const row=this.maps.get(key);return {chatMode:row?.chatMode??true,paused:!!row?.paused};}
+ async policy(key){const row=this.maps.get(key);return {chatMode:row?.chatMode??true};}
  async beginDirect(key,eventId){this.maps.get(key).directEventId=eventId;}
  async endDirect(key,eventId){if(this.maps.get(key).directEventId===eventId)this.maps.get(key).directEventId=null;}
  async ready(key){this.maps.get(key).provisioning_status='ready';}
  async saveState(state){this.maps.get(state.key).social_state=state.snapshot();}
- async setPaused(key,paused){this.maps.get(key).paused=Number(paused);}
  async accept(payload){if(this.rows.has(payload.eventId))return structuredClone(this.rows.get(payload.eventId));
   const event={event_id:payload.eventId,conversation_key:payload.key,seq:[...this.rows.values()].filter(e=>e.conversation_key===payload.key).length+1,payload,delivered:0,dsh_message:null};this.rows.set(event.event_id,structuredClone(event));return event;}
  async events(key){return [...this.rows.values()].filter(e=>e.conversation_key===key).map(v=>structuredClone(v));}

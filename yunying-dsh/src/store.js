@@ -66,12 +66,11 @@ export class MySQLStore {
   }
   async mappings() { return this.query('SELECT * FROM yunying_sessions ORDER BY created_at'); }
   async policy(key) {
-    if(key.startsWith('private:')) {
-      const [row]=await this.query('SELECT paused FROM yunying_sessions WHERE conversation_key=?',[key]);
-      return {chatMode:true,paused:!!row?.paused};
-    }
-    const [row]=await this.query('SELECT is_chat_mode,social_paused FROM group_configs WHERE group_id=?',[key.split(':')[1]]);
-    return {chatMode:!!row?.is_chat_mode,paused:!row||!!row.social_paused};
+    // Private conversations always participate (the infrastructure gates them by tier);
+    // groups follow the single chat-mode switch.
+    if(key.startsWith('private:')) return {chatMode:true};
+    const [row]=await this.query('SELECT is_chat_mode FROM group_configs WHERE group_id=?',[key.split(':')[1]]);
+    return {chatMode:!!row?.is_chat_mode};
   }
   async beginDirect(key,eventId) {
     const [event]=await this.query('SELECT payload FROM yunying_events WHERE event_id=? AND conversation_key=?',[eventId,key]);
@@ -84,7 +83,6 @@ export class MySQLStore {
   }
   async ready(key) { await this.query("UPDATE yunying_sessions SET provisioning_status='ready' WHERE conversation_key=?", [key]); }
   async saveState(state) { await this.query('UPDATE yunying_sessions SET social_state=? WHERE conversation_key=?', [JSON.stringify(state.snapshot()), state.key]); }
-  async setPaused(key, paused) { await this.query('UPDATE yunying_sessions SET paused=? WHERE conversation_key=?', [Number(paused), key]); }
   async accept(payload) {
     bounded(payload.eventId, 96); canonicalKey(payload.key);
     return this.transaction(async conn => {

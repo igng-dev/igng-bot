@@ -40,6 +40,13 @@ test('reserved2 direct mentions/private wake, optional speaker IDs, finite and i
  append(s,1,'晚安');s.note(s.unread);s.setWake({infinite:false,sleepMs:60000},1);assert.ok(Date.parse(s.wakeConfig.sleepUntil)>Date.now());
  s.setWake({infinite:true,triggers:{atMention:false,nameMention:false,question:false,poke:false,probability:0,speakerIds:[],keywords:[]}});assert.equal(s.wakeConfig.triggers.atMention,true);
 });
+test('default wake probability is 0.20 and the old 0.05 default migrates once',()=>{
+ const fresh=state();assert.equal(fresh.wakeConfig.triggers.probability,0.20);
+ const legacy=new SocialState('group:1001','test',{wakeConfig:{...fresh.wakeConfig,triggers:{...fresh.wakeConfig.triggers,probability:0.05}}});
+ assert.equal(legacy.wakeConfig.triggers.probability,0.20);
+ const custom=new SocialState('group:1001','test',{wakeConfig:{...fresh.wakeConfig,triggers:{...fresh.wakeConfig.triggers,probability:0.3}}});
+ assert.equal(custom.wakeConfig.triggers.probability,0.3);
+});
 test('recall tombstone removes content and media from unread/recent views',()=>{
  const s=state();append(s,1,'秘密内容');s.unread[0].media=[{type:'image'}];s.append({seq:2,payload:{kind:'recall',messageId:'1',text:'[消息已撤回]'}});
  const row=s.unreadPage(10,0).messages[0];assert.equal(row.text,'[消息已撤回]');assert.equal(row.plain,undefined);assert.deepEqual(row.media,undefined);

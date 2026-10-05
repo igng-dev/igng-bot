@@ -107,7 +107,7 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 | `bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh` | 通过。 |
 | `bash scripts/privacy-scan.sh`、`git diff --check` | 通过；提交前再次校验暂存范围。 |
 
-新增回归覆盖：DSH 接收失败时，同会话连续消息/附件元数据仍全部机械提交；断点恢复不重复执行切换命令；OFF群普通消息不生成模型请求，@/reply 携带最近受限上下文且最多一个 Agent；OFF下 wait 能在当前呼叫轮看到普通新消息，active wake config、提醒与定时器不能开启新轮；OFF恢复、先开启再重启均不重放观察积压；实际 CLI 在OFF模式完成 Memory→搜索→回复，并在租约故障后恢复原 Session；硬暂停阻断呼叫，解除硬暂停后等待新呼叫。
+新增回归覆盖：DSH 接收失败时，同会话连续消息/附件元数据仍全部机械提交；断点恢复不重复执行切换命令；OFF群普通消息不生成模型请求，@/reply 携带最近受限上下文且最多一个 Agent；OFF下 wait 能在当前呼叫轮看到普通新消息，active wake config、提醒与定时器不能开启新轮；OFF恢复、先开启再重启均不重放观察积压；实际 CLI 在OFF模式完成 Memory→搜索→回复，并在租约故障后恢复原 Session；旧的硬暂停字段已不再阻断呼叫，移除指令后仅聊天模式控制参与。
 
 真实 SQL 记账测试覆盖：网站连接故障时 native outbox 仍 pending、恢复后重复投递去重；三次模型调用聚合到一个 job；未知 usage 保留 NULL与未知次数，cache/input正确合计；compaction为独立任务；原生三次重试保持一个turn，Session历史回放产生相同task/request ID。既有跨群 Person Memory/账号聚合、撤回、图片/语音/转发、官方compaction和重启测试继续通过。
 
