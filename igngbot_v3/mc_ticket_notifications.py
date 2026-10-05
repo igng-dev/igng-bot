@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiomysql
 
+from .config import Config
 from .onebot_api import OUTBOUND_SOURCE_NOTIFICATION, send_group_text, send_private_text
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class MySqlNotificationStore:
             password=self.config.DB_PASSWORD,
             db=self.config.DB_NAME,
             charset="utf8mb4",
+            ssl=Config.db_ssl_context(),
             autocommit=True,
             minsize=1,
             maxsize=2,
@@ -182,6 +184,7 @@ class McTicketNotifier:
             password=self.config.IGNG_SITE_DB_PASSWORD,
             db=self.config.IGNG_SITE_DB_NAME,
             charset="utf8mb4",
+            ssl=Config.db_ssl_context(),
             autocommit=True,
             minsize=1,
             maxsize=3,

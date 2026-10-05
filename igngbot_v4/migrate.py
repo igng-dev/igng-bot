@@ -10,6 +10,7 @@ def connect(config=None):
     return pymysql.connect(host=c.DB_HOST, port=c.DB_PORT, user=c.DB_USER,
                            password=c.DB_PASSWORD, database=c.DB_NAME, charset="utf8mb4",
                            autocommit=True, cursorclass=pymysql.cursors.DictCursor,
+                           ssl=Config.db_ssl_context(),
                            connect_timeout=10, read_timeout=10, write_timeout=10,
                            init_command="SET time_zone = '+00:00'")
 
