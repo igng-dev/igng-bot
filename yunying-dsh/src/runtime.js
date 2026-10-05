@@ -23,8 +23,26 @@ export function createInfra(config) {
 export class SocialRuntime {
   constructor(ctx,store,config,infra=createInfra(config)) {
     this.ctx=ctx;this.store=store;this.config=config;this.infra=infra;
-    this.conversations=new Map();this.serial=new Map();this.stopping=false;
+    this.conversations=new Map();this.serial=new Map();this.stopping=false;this.ownerCache=new Map();
+    // Memory visibility resolves each QQ to its IGNG account through the Python
+    // infrastructure, then aggregates every QQ of that account.
+    if(store)store.ownerResolver=qqs=>this.resolveOwnerQqs(qqs);
     store.onOwnershipLost=()=>{this.stopping=true;for(const runtime of this.conversations.values())runtime.handle?.agent.cancel({kind:'hook',reason:'social runtime ownership lost'},{keepInbox:true});};
+  }
+  async resolveOwnerQqs(qqs) {
+    const base=[...new Set((Array.isArray(qqs)?qqs:[]).map(String).filter(q=>/^[1-9][0-9]{0,19}$/.test(q)))];
+    if(!base.length)return base;
+    const cacheKey=base.slice().sort().join(',');
+    const cached=this.ownerCache.get(cacheKey);
+    if(cached&&cached.expires>Date.now())return cached.qqs;
+    try{
+      const result=await this.infra('/identity',{qqs:base});
+      const expanded=[...new Set([...base,...(Array.isArray(result?.qqs)?result.qqs:[])])]
+        .map(String).filter(q=>/^[1-9][0-9]{0,19}$/.test(q));
+      if(this.ownerCache.size>500)this.ownerCache.clear();
+      this.ownerCache.set(cacheKey,{qqs:expanded,expires:Date.now()+300000});
+      return expanded;
+    }catch(error){this.report(error);return base;}
   }
   runSerial(key,work) {
     const previous=this.serial.get(key)||Promise.resolve();
@@ -321,7 +339,16 @@ export class SocialRuntime {
   }
   report(error) { this.ctx.logger?.warn(`YunYing runtime deferred operation: ${error.name||'Error'}`); }
   async restore() {
-    for(const row of await this.store.mappings())if(allowed(row.conversation_key,this.config))await this.runSerial(row.conversation_key,()=>this.load(row.conversation_key));
+    for(const row of await this.store.mappings()) {
+      if(!allowed(row.conversation_key,this.config))continue;
+      // Private conversations are authorized by the infrastructure; do not resume a
+      // session after the account lost plus/pro, so it cannot proactively wake.
+      if(row.conversation_key.startsWith('private:')&&!await this.authorizedCapability(row.conversation_key))continue;
+      await this.runSerial(row.conversation_key,()=>this.load(row.conversation_key));
+    }
+  }
+  async authorizedCapability(key) {
+    try{return (await this.infra('/authorized',{key}))?.allowed===true;}catch(error){this.report(error);return false;}
   }
   async close() {
     if(!this.closing)this.closing=this.closeOwned();

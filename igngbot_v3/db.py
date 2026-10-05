@@ -4,6 +4,7 @@ import logging
 import json
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,10 @@ class DBHandler:
         self._conn = None
         self._identity_conn = None
         self._identity_lock = threading.Lock()
+        # Short-lived cache of the YunYing feature tier so private sends do not
+        # hit the identity database on every message.
+        self._tier_cache = {}
+        self._tier_lock = threading.Lock()
 
     def connect(self):
         self._conn = pymysql.connect(
@@ -372,6 +377,58 @@ class DBHandler:
         if snapshot is None:
             return False
         return self._snapshot_has_permission(snapshot, "yunying.manage")
+
+    def yunying_tier(self, user_id):
+        """Resolve the YunYing feature tier from the central permission center.
+
+        Returns (plus|pro|admin) only for an IGNG account that actually holds the
+        feature. A QQ with no bound IGNG account, or an account without the
+        permission, returns None so private access fails closed.
+        """
+        cache_key = str(user_id)
+        now = time.monotonic()
+        with self._tier_lock:
+            cached = self._tier_cache.get(cache_key)
+            if cached and cached[0] > now:
+                return cached[1]
+        snapshot = self._get_unified_permission_snapshot(user_id)
+        tier = None
+        if snapshot is not None:
+            if snapshot.get("is_superadmin") or self._snapshot_has_permission(snapshot, "yunying.manage"):
+                tier = "admin"
+            else:
+                groups = snapshot.get("groups") or set()
+                if "yunying.pro" in groups or self._snapshot_has_permission(snapshot, "yunying.image.pro_models"):
+                    tier = "pro"
+                elif "yunying.plus" in groups or self._snapshot_has_permission(snapshot, "yunying.task.system_prompt"):
+                    tier = "plus"
+        with self._tier_lock:
+            if len(self._tier_cache) > 4096:
+                self._tier_cache.clear()
+            self._tier_cache[cache_key] = (now + 60, tier)
+        return tier
+
+    def private_allowed(self, user_id):
+        """Only plus and above may talk to YunYing in private; unbound QQs are denied."""
+        return self.yunying_tier(user_id) in ("plus", "pro", "admin")
+
+    def get_account_qqs(self, account_id):
+        """Every QQ bound to one IGNG account, for cross-group person memory reads."""
+        try:
+            with self._identity_lock:
+                with self._identity_connection().cursor() as cursor:
+                    cursor.execute(
+                        "SELECT qq_number FROM user_qqs WHERE user_id = %s",
+                        (str(account_id),),
+                    )
+                    return [
+                        str(row["qq_number"])
+                        for row in cursor.fetchall()
+                        if row.get("qq_number") not in (None, "")
+                    ]
+        except Exception as exc:
+            logger.warning("Failed to read QQs for account %s: %s", account_id, exc)
+            return []
 
     def get_bot_admin_qqs(self):
         try:

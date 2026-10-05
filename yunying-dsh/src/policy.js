@@ -36,7 +36,10 @@ export function settings(env = process.env) {
 }
 export function allowed(key, config) {
   const [kind, id] = canonicalKey(key).split(':');
-  return (kind === 'group' ? config.groups : config.private).has(id);
+  // Groups keep the operator allowlist. Private conversations are authorized by the
+  // Python infrastructure against the IGNG account tier (plus/pro/admin); the profile
+  // trusts the internal capability and no longer keeps a private allowlist.
+  return kind === 'group' ? config.groups.has(id) : true;
 }
 export function authorize(state, args, exec) {
   if (!exec?.agent || exec.agent.id !== state.sessionId || canonicalKey(args.key) !== state.key || !equalSecret(args.token, state.agentToken)) throw new PolicyError();

@@ -121,20 +121,3 @@ class Journal:
     def finish_send(self, request_id, status, result):
         with self.conn.cursor() as cur:
             cur.execute("UPDATE yunying_sends SET status=%s,message_id=%s,result=%s WHERE request_id=%s", (status, result.get("message_id"), encode(result), request_id))
-
-    def set_sharing(self, user_id, enabled):
-        identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"identity:qq:{user_id}"))
-        self.conn.begin()
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT identity_id FROM memory_identity_bindings WHERE provider='qq' AND external_id=%s FOR UPDATE", (str(user_id),))
-                prior = cur.fetchone()
-                if prior:
-                    identity = prior["identity_id"]
-                cur.execute("INSERT IGNORE INTO memory_identities (id) VALUES (%s)", (identity,))
-                cur.execute("INSERT INTO memory_identity_bindings (provider,external_id,identity_id,verified_by,shared_memory_opt_in) VALUES ('qq',%s,%s,'onebot-user',%s) ON DUPLICATE KEY UPDATE shared_memory_opt_in=VALUES(shared_memory_opt_in)", (str(user_id), identity, int(enabled)))
-                cur.execute("INSERT INTO memory_identity_audit (provider,external_id,identity_id,operation,actor,detail) VALUES ('qq',%s,%s,'sharing-consent',%s,%s)", (str(user_id), identity, f"qq:{user_id}", encode({"enabled": enabled})))
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise

@@ -70,7 +70,7 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 
 `yunying_ai_records` 保存按原生 seq 排序的尝试/任务结束 outbox，网站故障时重试；官方 Session 回放可重建相同键。导出首先按原生 task key 写通用表，独立于 call_log_id；随后兼容写 `call_logs`，供尚未迁移的网站旧调用页读取。历史日志与既有旧镜像 job 保留，不重算过去的0用量。
 
-Memory 默认 `scope_private`，SQL 在匹配、计数、snippet 之前过滤 scope。跨群 `shared_person` 必须由本人开启 `/记忆共享 开启`，来源必须是已查看的本人真实群消息；服务端生成共享标题和引用 Markdown，禁止模型把别群私有 prose 粘入共享文档。私聊不能升级为共享；跨群结果不返回来源群号。身份按 provider+external_id 唯一绑定；跨平台绑定只可经独立 Owner API，模型不能绑定身份或改共享授权。
+Memory 分两层，SQL 在匹配、计数、snippet 之前过滤。**群记忆**按会话（`scope_key`）保存，只在本群/本私聊可读；**个人记忆**以 QQ 号（`memory_documents.person_qq`）为基准保存，天然跨群。读取时把最近发言的 QQ 解析到其 IGNG 账号（`igng_sites.user_qqs`，经 Python `/identity` capability），聚合该账号名下全部 QQ 的个人记忆，再叠加当前会话的群记忆；QQ 没有 IGNG 归属时只返回它自己的个人记忆，解析失败按"只看自己"失败关闭。个人记忆来源必须是本人已查看、未撤回的真实消息，正文由服务端引用本人原话生成，禁止模型把别群私有 prose 粘入；来源链与访问审计保留在 `memory_sources`/`memory_audit`，跨群结果不返回来源群号。身份按 provider+external_id 唯一绑定；跨平台绑定只可经独立 Owner API，模型不能绑定身份。
 
 更新使用 `expectedVersion` 乐观锁，版本、hash、来源和审计在同一事务提交。Forget 对模型隐藏内容，保留受控审计版本；Owner rollback 创建新版本。Owner secret 与 infrastructure secret 必须分开，默认无 owner endpoint 的 host port。以后网站可直接使用管理 API；本次不改站点仓库或清理用户历史；正式记忆未灌入伪造测试文档。
 

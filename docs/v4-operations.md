@@ -20,7 +20,8 @@ python -m pip install -r requirements-dev.txt
 | --- | --- |
 | `DB_HOST/PORT/USER/PASSWORD/NAME` | 与原 bot 同一 MySQL；生产账号仅给本应用所需表权限。迁移账号需要建表权限。 |
 | `YUNYING_INTERNAL_SECRET` | Python 与 Profile 的独立 capability 凭据，至少32字符；两进程相同。 |
-| `YUNYING_ALLOW_GROUPS/PRIVATE` | Social Agent 的会话授权边界，逗号分隔群/QQ，为空拒绝；群发言还受独立的 `group_configs.social_paused` 控制，原始历史仍保存。 |
+| `YUNYING_ALLOW_GROUPS` | 群的会话授权边界，逗号分隔，为空拒绝；群发言还受独立的 `group_configs.social_paused` 控制，原始历史仍保存。 |
+| `YUNYING_ALLOW_PRIVATE` | 已废弃、被忽略。私聊改由 QQ 所属 IGNG 账号的 `yunying.plus`/`yunying.pro`（或 admin）权限判定，未绑定账号或权限不足一律拒绝。 |
 | `YUNYING_MODEL_PROVIDER/MODEL` | 默认官方 `deepseek-official` / `deepseek-v4-flash`。 |
 | `DEEPSEEK_API_KEY/BASE_URL` | 官方 DSH Messages provider 的凭据/端点；默认 `https://api.deepseek.com/anthropic`。chat/completions 网关改用下述官方 `llm-pi-ai` 配置。 |
 | `YUNYING_SEARCH_PROVIDER` | `bing` 先用 donor 原 HTML 搜索，空结果时用同一受限传输读取 Bing RSS；明确设 `deepseek` 可使用官方认证搜索，默认仍是 Bing。 |
@@ -120,6 +121,6 @@ Bing RSS 回退仍使用 donor `safeFetch`：全 DNS 公网检查、逐跳重定
 
 ## 实际群聊验收
 
-自动化证据与运行命令见 [testing.md](testing.md)。上线前用专用测试群和允许私聊验收：普通连续聊天可沉默；直接 @/引用回应；多人快速来信无重复/并发回复；读取新消息后 wait/wake/潜水；真实搜索结果自然引用；本人授权后跨群记忆可读、更新、忘记，别群私有正文和来源群号不可见；撤回、图片/OCR、语音/ASR、合并转发和旧历史；长会话自动 compaction 后继续；重启后恢复同一 Session、发送账本与 Memory。
+自动化证据与运行命令见 [testing.md](testing.md)。上线前用专用测试群和 plus+ 账号私聊验收：普通连续聊天可沉默；直接 @/引用回应；多人快速来信无重复/并发回复；读取新消息后 wait/wake/潜水；真实搜索结果自然引用；个人跨群记忆可在别群读/更新/忘记、同一 IGNG 账号的多个 QQ 互相可见，群记忆仍只在原群可读，别群正文和来源群号不可见；非 plus 私聊与未绑定账号一律不回复；撤回、图片/OCR、语音/ASR、合并转发和旧历史；长会话自动 compaction 后继续；重启后恢复同一 Session、发送账本与 Memory。
 
 本地协议替身可以检验实际程序与协议，无法替代真实账号、模型风格、公网 DNS、OCR 模型首次下载、NAS 卷/容器重启和长期运行验收。

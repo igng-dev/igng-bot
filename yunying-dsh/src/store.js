@@ -9,12 +9,13 @@ const identityId = qq => {
   const hex=bytes.toString('hex');return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 };
 const visible = (actor,doc) => {
-  if(actor.admin||doc.visibility!=='shared_person')return doc;
+  // Person memory is cross-group; never leak the conversation that sourced it.
+  if(actor.admin||doc.document_type!=='person')return doc;
   const {scope_key,...result}=doc;return {...result,scope:'person'};
 };
 const signedId = key => key.startsWith('group:') ? key.split(':')[1] : '-' + key.split(':')[1];
 export class MySQLStore {
-  constructor(pool, lockConnection) { this.pool = pool; this.lockConnection = lockConnection; this.healthy = true; }
+  constructor(pool, lockConnection) { this.pool = pool; this.lockConnection = lockConnection; this.healthy = true; this.ownerResolver = null; }
   static async open(env = process.env) {
     const opts = { host: env.DB_HOST || '127.0.0.1', port: Number(env.DB_PORT || 3306), user: env.DB_USER,
       password: env.DB_PASSWORD, database: env.DB_NAME || 'igng_bot', charset: 'utf8mb4',
@@ -105,19 +106,32 @@ export class MySQLStore {
       return bindings[0];
     });
   }
-  access(actor, prefix = 'd') {
+  async access(actor, prefix = 'd') {
     // Visibility is enforced by SQL before matching, counting or producing snippets.
+    // Group documents stay scoped to their conversation; person documents are keyed by
+    // QQ and readable across groups by every QQ of the same IGNG account.
     if (actor.admin === true) return { sql: '1=1', values: [] };
-    return { sql: `(${prefix}.scope_key=? AND ${prefix}.visibility='scope_private' OR
-      ${prefix}.visibility='shared_person' AND EXISTS (SELECT 1 FROM memory_identity_bindings b
-        WHERE b.identity_id=${prefix}.identity_id AND b.shared_memory_opt_in=1))`, values: [actor.key] };
+    let qqs = Array.isArray(actor.qqs) && actor.qqs.length ? actor.qqs : (actor.qq ? [actor.qq] : []);
+    qqs = [...new Set(qqs.map(String).filter(q => /^[1-9][0-9]{0,19}$/.test(q)))].slice(0, 50);
+    if (qqs.length && typeof this.ownerResolver === 'function') {
+      try {
+        const expanded = await this.ownerResolver(qqs);
+        if (Array.isArray(expanded) && expanded.length) {
+          qqs = [...new Set(expanded.map(String).filter(q => /^[1-9][0-9]{0,19}$/.test(q)))].slice(0, 500);
+        }
+      } catch { /* fail closed: keep only the literal QQs on resolver failure */ }
+    }
+    const group = `(${prefix}.document_type='group' AND ${prefix}.scope_key=?)`;
+    if (!qqs.length) return { sql: group, values: [actor.key] };
+    const placeholders = qqs.map(() => '?').join(',');
+    return { sql: `(${group} OR ${prefix}.person_qq IN (${placeholders}))`, values: [actor.key, ...qqs] };
   }
   async audit(actor, operation, doc, permitted, detail = {}) {
     await this.query('INSERT INTO memory_audit (document_id,version,operation,actor,scope_key,allowed,detail) VALUES (?,?,?,?,?,?,?)', [doc?.id || null, doc?.current_version || null, operation, actor.admin ? 'owner-api' : actor.sessionId, actor.key || 'owner', Number(permitted), JSON.stringify(detail)]);
   }
   async memorySearch(actor, args) {
     const query = bounded(args.query, 200, false); const limit = integer(args.limit, 1, 30, 10);
-    const filter = this.access(actor); const match = '%' + query.replace(/[\\%_]/g, s => '\\' + s) + '%';
+    const filter = await this.access(actor); const match = '%' + query.replace(/[\\%_]/g, s => '\\' + s) + '%';
     const rows = await this.query(`SELECT d.id,d.title,d.document_type,d.scope_key,d.visibility,d.identity_id,d.current_version,
       LEFT(d.markdown,800) snippet FROM memory_documents d WHERE ${filter.sql} AND d.status='active'
       AND (d.title LIKE ? OR d.markdown LIKE ?) ORDER BY d.updated_at DESC LIMIT ?`, [...filter.values, match, match, limit]);
@@ -125,11 +139,11 @@ export class MySQLStore {
     return { ok: true, documents: rows.map(doc=>visible(actor,doc)) };
   }
   async memoryRead(actor, id, includeForgotten = false) {
-    bounded(id, 36); const filter = this.access(actor);
+    bounded(id, 36); const filter = await this.access(actor);
     const rows = await this.query(`SELECT d.* FROM memory_documents d WHERE d.id=? AND ${filter.sql} ${includeForgotten && actor.admin ? '' : "AND d.status='active'"}`, [id, ...filter.values]);
     if (!rows.length) { await this.audit(actor, 'read', null, false); throw new PolicyError('记忆不可用'); }
     await this.audit(actor, 'read', rows[0], true);
-    // Sources of shared memories remain public self-statements; group-private provenance is never returned.
+    // Person memory sources stay the person's own statements; the source conversation is never returned.
     return { ok: true, document: visible(actor,rows[0]) };
   }
   async sourceRows(actor, sources, person = null) {
@@ -142,7 +156,7 @@ export class MySQLStore {
     for (const row of rows) {
       row.payload = json(row.payload);
       if (row.event_type !== 'message' || row.is_recalled || row.payload.isSelf || row.payload.commandHandled || !actor.seenSeqs.has(Number(row.seq))) throw new PolicyError('只能引用本轮已查看且未撤回的真实来信');
-      if (person && row.payload.userId !== person.external_id) throw new PolicyError('共享个人记忆只能引用本人陈述');
+      if (person && row.payload.userId !== person.external_id) throw new PolicyError('个人记忆只能引用本人陈述');
     }
     return rows;
   }
@@ -152,53 +166,53 @@ export class MySQLStore {
     await conn.execute('INSERT INTO memory_audit (document_id,version,operation,actor,scope_key,allowed,detail) VALUES (?,?,?,?,?,1,?)', [doc.id, doc.current_version, operation, actor.admin ? 'owner-api' : actor.sessionId, actor.key || 'owner', JSON.stringify({ reason })]);
   }
   async memoryWrite(actor, args) {
-    const visibility = args.visibility || 'scope_private';
-    if (!['scope_private', 'shared_person'].includes(visibility)) throw new PolicyError('可见范围无效');
+    // Person memory is keyed by the subject QQ and readable across groups by the whole
+    // IGNG account; group memory is model-written and stays scoped to this conversation.
     let title = bounded(args.title, 240), markdown = bounded(args.markdown, 24000), person = null;
-    if (visibility === 'shared_person') {
-      if (!actor.key.startsWith('group:') || !args.personQQ) throw new PolicyError('私聊和群私有文档不能提升为跨群可见');
-      person = await this.identity(String(args.personQQ));
-      if (!person.shared_memory_opt_in) throw new PolicyError('本人尚未开启 /记忆共享 开启');
-    } else if (args.personQQ) {
-      person = await this.identity(String(args.personQQ));
-    }
-    const sources = await this.sourceRows(actor, args.sources, visibility === 'shared_person' ? person : null);
+    if (args.personQQ) person = await this.identity(String(args.personQQ));
+    const sources = await this.sourceRows(actor, args.sources, person);
     if (person && !sources.some(s => s.payload.userId === person.external_id)) throw new PolicyError('个人记忆必须有本人来源');
-    if (visibility === 'shared_person') {
-      // The model cannot launder private prose through a shared title or Markdown body.
-      // Shared documents quote only this opt-in person's original group statements.
+    if (person) {
+      // Cross-group person memory quotes only this person's own current-conversation
+      // statements; the model cannot launder private prose into another group.
       title = `Person QQ ${person.external_id}`;
       markdown = sources.map(s => `> ${String(s.payload.plain || s.payload.text).replace(/\n/g, '\n> ')}`).join('\n\n');
     }
     const doc = { id: randomUUID(), title, markdown, document_type: person ? 'person' : 'group', scope_key: actor.key,
-      visibility, identity_id: person?.identity_id || null, current_version: 1, status: 'active' };
+      visibility: person ? 'shared_person' : 'scope_private', identity_id: person?.identity_id || null, person_qq: person?.external_id || null,
+      current_version: 1, status: 'active' };
     await this.transaction(async conn => {
-      await conn.execute('INSERT INTO memory_documents (id,title,markdown,document_type,scope_key,visibility,identity_id,current_version,status) VALUES (?,?,?,?,?,?,?,?,?)', Object.values(doc));
+      await conn.execute('INSERT INTO memory_documents (id,title,markdown,document_type,scope_key,visibility,identity_id,person_qq,current_version,status) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        [doc.id, doc.title, doc.markdown, doc.document_type, doc.scope_key, doc.visibility, doc.identity_id, doc.person_qq, doc.current_version, doc.status]);
       await this.revision(conn, actor, doc, sources, 'write', bounded(args.reason || 'explicit memory', 500));
     });
     return { ok: true, document: visible(actor,doc) };
   }
   async memoryUpdate(actor, args, forget = false) {
-    const expected = integer(args.expectedVersion, 1, 1e9); const filter = this.access(actor);
+    const expected = integer(args.expectedVersion, 1, 1e9); const filter = await this.access(actor);
     const old = (await this.memoryRead(actor, args.id)).document;
     let sources = [];
     if (!forget) {
       let person = null;
-      if (old.visibility === 'shared_person') {
-        const [binding] = await this.query("SELECT * FROM memory_identity_bindings WHERE identity_id=? AND provider='qq' AND shared_memory_opt_in=1 LIMIT 1", [old.identity_id]);
-        if (!binding) throw new PolicyError('共享授权已失效');
-        person = binding;
+      if (old.document_type === 'person') {
+        if (old.person_qq) person = { external_id: String(old.person_qq), identity_id: old.identity_id };
+        else {
+          const [binding] = await this.query("SELECT external_id,identity_id FROM memory_identity_bindings WHERE identity_id=? AND provider='qq' LIMIT 1", [old.identity_id]);
+          if (binding) person = binding;
+        }
+        if (!person) throw new PolicyError('个人记忆缺少身份绑定');
       }
       sources = await this.sourceRows(actor, args.sources, person);
-      if (old.visibility === 'shared_person') {
+      if (person) {
         args = { ...args, title: old.title, markdown: sources.map(s => `> ${String(s.payload.plain || s.payload.text).replace(/\n/g, '\n> ')}`).join('\n\n') };
       }
     } else if (!actor.admin) {
       sources = await this.sourceRows(actor, args.sources);
-      // Forgetting shared identity facts requires a request by that same person.
-      if (old.visibility === 'shared_person') {
+      // Forgetting cross-group person memory requires a request by that same person.
+      if (old.document_type === 'person') {
         const bindings = await this.query("SELECT external_id FROM memory_identity_bindings WHERE identity_id=? AND provider='qq'", [old.identity_id]);
-        if (!sources.some(s => bindings.some(b => b.external_id === s.payload.userId))) throw new PolicyError('删除共享记忆需要本人来源');
+        const owners = new Set([...bindings.map(b => String(b.external_id)), ...(old.person_qq ? [String(old.person_qq)] : [])]);
+        if (!sources.some(s => owners.has(String(s.payload.userId)))) throw new PolicyError('删除个人记忆需要本人来源');
       }
     }
     return this.transaction(async conn => {

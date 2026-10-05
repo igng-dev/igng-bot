@@ -101,6 +101,19 @@ export class SocialState {
     return before - this.unread.length;
   }
   lastIncoming() { return [...this.recentMessages].reverse().find(m => !m.isSelf); }
+  // Memory reads aggregate the IGNG account of the people who spoke most recently.
+  actorQqs(limit = 12) {
+    if (this.key.startsWith('private:')) return [this.key.split(':')[1]];
+    const result = [];
+    for (const message of [...this.recentMessages].reverse()) {
+      if (message.isSelf || !message.userId) continue;
+      const qq = String(message.userId);
+      if (!/^[1-9][0-9]{0,19}$/.test(qq) || result.includes(qq)) continue;
+      result.push(qq);
+      if (result.length >= limit) break;
+    }
+    return result;
+  }
   preSleepBlocked() {
     if (EXPLICIT_END_RE.test(String(this.lastIncoming()?.plain || this.lastIncoming()?.text || ''))) return false;
     const wait = this.config.preSleepWaitMs ?? 300000;

@@ -1,4 +1,26 @@
+from pathlib import Path
+
 from igngbot_v4.retire import canonical_schema
+
+_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations" / "v4"
+_STATEMENT_HEADS = {"CREATE", "ALTER", "SET", "PREPARE", "EXECUTE", "DEALLOCATE", "UPDATE", "SELECT", "INSERT", "DROP", "DELETE"}
+
+
+def test_migrations_are_safe_for_the_naive_semicolon_splitter():
+    """migrate.py splits each file on ';' and executes every fragment in turn.
+
+    A semicolon inside a SQL comment corrupts the following fragment (it starts
+    mid-comment). Guard the whole directory so that can never break startup.
+    """
+    for source in sorted(_MIGRATIONS.glob("*.sql")):
+        for index, fragment in enumerate(source.read_text(encoding="utf-8").split(";")):
+            lines = [line.strip() for line in fragment.splitlines()
+                     if line.strip() and not line.strip().startswith("--")]
+            if not lines:
+                continue
+            head = lines[0].split()[0].upper()
+            assert head in _STATEMENT_HEADS, \
+                f"{source.name} fragment {index} starts with {head!r}: {lines[0][:80]}"
 
 
 def test_mysql_restore_redundant_charset_is_equivalent_but_literals_remain_exact():
