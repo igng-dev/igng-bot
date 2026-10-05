@@ -79,7 +79,7 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 | 主动读取、wait/wake/潜水 | 未读 source ID 与连续 watermark、分页/新到达不能越水位、10秒静默与300秒观察分离、取消、有限时间唤醒、无限潜水安全。测试缩短计时，不等待生产分钟级时长。 |
 | 搜索后自然回复 | 原生工具结果→模型→QQ 的协议链；双进程经官方 DeepSeek search provider 的 Messages wire fixture。真实公网结果和模型风格尚未验收。 |
 | Person Memory 跨群 CRUD / 账号聚合 | 真实 SQL 的本人来源校验、QQ 跨群检索/更新、同一 IGNG 账号多 QQ 聚合、CAS、忘记、Owner rollback、审计；无 IGNG 归属的 QQ 只看自己，群记忆仍只在原群可读。 |
-| 撤回、图片、语音、旧历史 | V3 媒体/语音/转发/撤回回归；V4 当前 DB 行、撤回 tombstone、路径隔离、OCR/转写 view；原生图片 tool admission、模型 image content 和重启后的持久引用。没有重跑真实 OCR/ASR 模型下载。 |
+| 撤回、图片、语音、旧历史 | V3 媒体/语音/转发/撤回回归；V4 当前 DB 行、撤回 tombstone、路径隔离；原生图片 tool admission、模型 image content 和重启后的持久引用。本地 OCR/ASR 已移除，不做模型下载。 |
 | Compaction 后继续 | 实际官方 `compactNow` 创建 durable summary，下一 QQ 事件继续；JSONL 恢复后仍保持摘要和同一 Session。生产自动压缩组件保留，没有自建 summary。 |
 | 重启恢复 | 真实 SQL journal/FIFO/backoff、identity/Memory、native JSONL Inbox 取消/重入；实际断开 Python+官方CLI 两个测试进程的 DB 租约连接，二者退出再启动，同一 Session UUID、Memory read 与 QQ reply 恢复。 |
 | 发送/管理员/权限 | CQ 为纯文本、当前会话引用/@ 校验、同一 call 去重、unknown 不重发、普通成员不能暂停/提升权限、高权限 host tool 隐藏且执行 guard 拒绝、内部错误过滤。 |

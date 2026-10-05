@@ -80,7 +80,6 @@ Dockerfile 内已固定可用的 apt / pip 镜像源。`media` 与 `frpc` 无依
 | --- | --- | --- |
 | `MESSAGE_ROOT` | `/data/message_logs` | 附件根目录（bind 到 NAS 数据目录） |
 | `LOCAL_STORAGE` | `/data/runtime` | 日志、提示词快照、临时文件 |
-| `MEDIA_ASR_MODEL_DIR` | `/data/models` | faster-whisper 模型缓存 |
 
 数据库中保存的是**容器内绝对路径**（`/data/message_logs/<群>/<日期>/<文件>`）。
 路径必须以 `message_logs` 结尾段出现，因为 IGNG 站点据此切分并生成媒体 URL。
@@ -102,15 +101,9 @@ python deploy/migrations/rewrite_media_paths.py --apply    # 执行
 
 完整回滚预案见 `deploy/rollback/cutover-state.md`。
 
-## 图片 OCR 与语音转文字
+## 媒体与多模态
 
-收到图片或语音后，bot 会在写入消息记录和调用聊天 LLM 前提取文字：图片默认使用本地 `rapidocr-onnxruntime`，语音默认使用本地 `faster-whisper`。提取结果会以 `[图片OCR]` 或 `[语音转写]` 标记追加到消息正文，因此文本模型也能直接看到结果。
-
-语音模型默认在第一条语音消息时懒加载；NAS 无法直连 `huggingface.co`，因此 compose 中固定
-`HF_ENDPOINT=https://hf-mirror.com`，模型缓存到 `./models` 后即可离线复用。QQ 常见的
-SILK/AMR 语音会在存在 `ffmpeg` 时先转成 16 kHz 单声道 WAV。若使用远程服务，将 provider
-改为 `vision_llm` 或 `remote`，并填写对应的 `MEDIA_*_BASE_URL`、`MEDIA_*_API_KEY` 和模型名。
-处理失败时附件仍会正常保存，bot 不会伪造转写内容。
+bot 会把图片/表情/视频/语音/文件等附件按原样下载到附件树，并把元数据写入 `message_logs.attachments_json`。**不再做本地 OCR 或语音转文字**：图片由多模态模型通过 `qq_get_message_images` 直接阅读；语音只保留文件与元数据，不做转写。`ffmpeg`/`ffprobe` 仍用于视频转码与缩略图。
 
 ## 消息记录与云萤主动消息
 

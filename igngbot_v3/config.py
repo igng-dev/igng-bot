@@ -252,45 +252,6 @@ class Config:
         "IMAGE_STORAGE_PATH", os.path.join(os.path.dirname(MESSAGE_ROOT), "igngbot", "images")
     )
 
-    # Incoming media text extraction.  The local providers are lazy-loaded so
-    # a missing optional model package does not prevent ordinary bot startup.
-    MEDIA_OCR_ENABLED = os.getenv("MEDIA_OCR_ENABLED", "1").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-    MEDIA_OCR_PROVIDER = os.getenv("MEDIA_OCR_PROVIDER", "rapidocr")
-    MEDIA_OCR_BASE_URL = os.getenv("MEDIA_OCR_BASE_URL", "").rstrip("/")
-    MEDIA_OCR_API_KEY = os.getenv("MEDIA_OCR_API_KEY", "")
-    MEDIA_OCR_MODEL = os.getenv("MEDIA_OCR_MODEL", LLM_LOCAL_MODEL)
-    MEDIA_OCR_TIMEOUT = float(os.getenv("MEDIA_OCR_TIMEOUT", "90"))
-    MEDIA_OCR_MAX_TOKENS = int(os.getenv("MEDIA_OCR_MAX_TOKENS", "1024"))
-    MEDIA_OCR_MIN_SCORE = float(os.getenv("MEDIA_OCR_MIN_SCORE", "0.25"))
-    MEDIA_OCR_MAX_CHARS = int(os.getenv("MEDIA_OCR_MAX_CHARS", "4000"))
-
-    MEDIA_ASR_ENABLED = os.getenv("MEDIA_ASR_ENABLED", "1").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-    MEDIA_ASR_PROVIDER = os.getenv("MEDIA_ASR_PROVIDER", "faster-whisper")
-    MEDIA_ASR_BASE_URL = os.getenv("MEDIA_ASR_BASE_URL", "").rstrip("/")
-    MEDIA_ASR_API_KEY = os.getenv("MEDIA_ASR_API_KEY", "")
-    MEDIA_ASR_MODEL = os.getenv("MEDIA_ASR_MODEL", "small")
-    MEDIA_ASR_MODEL_DIR = os.getenv(
-        "MEDIA_ASR_MODEL_DIR", os.path.join(LOCAL_STORAGE, "media-models")
-    )
-    MEDIA_ASR_DEVICE = os.getenv("MEDIA_ASR_DEVICE", "cpu")
-    MEDIA_ASR_COMPUTE_TYPE = os.getenv("MEDIA_ASR_COMPUTE_TYPE", "int8")
-    MEDIA_ASR_LANGUAGE = os.getenv("MEDIA_ASR_LANGUAGE", "zh")
-    MEDIA_ASR_BEAM_SIZE = int(os.getenv("MEDIA_ASR_BEAM_SIZE", "5"))
-    MEDIA_ASR_CONVERT_AUDIO = os.getenv("MEDIA_ASR_CONVERT_AUDIO", "1").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-    MEDIA_ASR_FFMPEG_BIN = os.getenv("MEDIA_ASR_FFMPEG_BIN", "ffmpeg")
-    MEDIA_ASR_TEMP_DIR = os.getenv("MEDIA_ASR_TEMP_DIR", "")
-    MEDIA_ASR_CONVERT_TIMEOUT = float(os.getenv("MEDIA_ASR_CONVERT_TIMEOUT", "60"))
-    MEDIA_ASR_VAD_FILTER = os.getenv("MEDIA_ASR_VAD_FILTER", "1").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-    MEDIA_ASR_TIMEOUT = float(os.getenv("MEDIA_ASR_TIMEOUT", "180"))
-    MEDIA_ASR_MAX_CHARS = int(os.getenv("MEDIA_ASR_MAX_CHARS", "6000"))
     MAX_FILE_SIZE = 50 * 1024 * 1024
 
     # Central IGNG site database.  The old MC_REPORT_IDENTITY_DB_* names are

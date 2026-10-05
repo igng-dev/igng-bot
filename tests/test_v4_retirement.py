@@ -42,7 +42,7 @@ def retired_db(tmp_path):
         cur.execute("INSERT INTO group_configs (group_id,is_chat_mode) VALUES (1001,0)")
     db.insert_message(group_id=1001,sender_id=2001,message_content='语音',reply_to_msg_id=None,msg_id='fixture-audio',
         attachments_json=encode([{'type':'audio','stored_path':'fixture.wav','transcript':'转写','text_extraction_status':'ok'}]),
-        file_url='fixture.wav',file_type='audio',audio_file_path='fixture.wav',audio_transcript='转写')
+        file_url='fixture.wav',file_type='audio',audio_file_path='fixture.wav')
     db.insert_message(group_id=1001,sender_id=2001,message_content='图片',reply_to_msg_id=None,msg_id='fixture-image',
         attachments_json=encode([{'type':'image','stored_path':'fixture.png','ocr_text':'OCR'}]),file_url='fixture.png',file_type='image')
     journal = Journal(conn)
@@ -86,7 +86,9 @@ def test_retire_restore_preserves_prompts_tokens_media_tombstones_and_session(re
         v4.init_message_tables()  # Restart never recreates retired columns/tables.
         assert v4.mark_message_recalled(1001,'fixture-image')['status'] == 'marked'
         assert v4.get_recent_messages(1001,10)[-1]['is_recalled'] == 1
-        assert v4.get_message_by_msg_id(1001,'fixture-audio')['audio_transcript'] == '转写'
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='message_logs' AND COLUMN_NAME='audio_transcript'")
+            assert cur.fetchone()['n'] == 0
         assert len(v4.get_messages_before(1001,None,10)) == 2
         assert len(v4.get_messages_from_msg_id(1001,'fixture-audio',10)) == 2
         assert len(v4.get_messages_after_id(1001,0,10)) == 2

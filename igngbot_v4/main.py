@@ -12,7 +12,6 @@ from aiohttp import ClientSession, ClientTimeout, web
 from igngbot_v3.config import Config
 from igngbot_v3.db import DBHandler
 from igngbot_v3.storage import StorageHandler
-from igngbot_v3.media_text import MediaTextExtractor
 from igngbot_v3.message_ingest import persist_message
 from igngbot_v3.message_parser import parse_message
 from igngbot_v3.onebot_client import OneBotClient
@@ -34,7 +33,6 @@ class Infrastructure:
         self.settings = settings or Settings.from_env()
         self.db = DBHandler(self.config, legacy_compat=False)
         self.storage = StorageHandler(self.config)
-        self.media_text = MediaTextExtractor(self.config)
         self.conn = None
         self.journal = None
         self.http = None

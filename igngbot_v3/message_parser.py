@@ -12,28 +12,6 @@ SEGMENT_LABELS = {
     "record": "[语音]",
 }
 
-AUDIO_SEGMENT_TYPES = {"audio", "record"}
-
-
-def _extract_audio_text(data):
-    if not isinstance(data, dict):
-        return ""
-    for key in (
-        "text",
-        "transcript",
-        "transcription",
-        "recognized_text",
-        "recognition",
-        "summary",
-        "content",
-        "note",
-    ):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
 def _append_with_sep(parts, text, sep=" "):
     text = (text or "").strip()
     if not text:
@@ -337,7 +315,6 @@ def parse_message(data):
         "msg_id": str(data.get("message_id", "")),
         "message_content": "",
         "plain_text_content": "",
-        "audio_transcript": "",
         "message_structure": [],
         "reply_to_msg_id": None,
         "files": [],
@@ -348,7 +325,6 @@ def parse_message(data):
 
     text_parts = []
     plain_text_parts = []
-    audio_transcripts = []
     structure = []
 
     for segment in message_array:
@@ -364,24 +340,16 @@ def parse_message(data):
             result["reply_to_msg_id"] = str(seg_data.get("id", ""))
             structure.append({"type": "reply", "id": result["reply_to_msg_id"]})
         elif seg_type in ("image", "video", "audio", "record"):
-            transcript = _extract_audio_text(seg_data) if seg_type in AUDIO_SEGMENT_TYPES else ""
             result["files"].append({
                 "type": seg_type,
                 "file": seg_data.get("file", ""),
                 "url": seg_data.get("url", ""),
-                "transcript": transcript,
             })
-            if seg_type in AUDIO_SEGMENT_TYPES and transcript:
-                audio_transcripts.append(transcript)
-                text_parts.append(f"{SEGMENT_LABELS.get(seg_type, f'[{seg_type}]')}（转写: {transcript}）")
-                _append_with_sep(plain_text_parts, transcript)
-            else:
-                text_parts.append(SEGMENT_LABELS.get(seg_type, f"[{seg_type}]"))
+            text_parts.append(SEGMENT_LABELS.get(seg_type, f"[{seg_type}]"))
             structure.append({
                 "type": seg_type,
                 "file": seg_data.get("file", ""),
                 "url": seg_data.get("url", ""),
-                "transcript": transcript,
             })
         elif seg_type == "file":
             name = seg_data.get("name", "未知")
@@ -529,7 +497,6 @@ def parse_message(data):
 
     result["message_content"] = "".join(text_parts)
     result["plain_text_content"] = re.sub(r"\s+", " ", "".join(plain_text_parts)).strip()
-    result["audio_transcript"] = "\n".join(audio_transcripts).strip()
     result["message_structure"] = structure
     return result
 

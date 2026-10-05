@@ -25,8 +25,6 @@ from .onebot_api import (
 )
 from .storage import StorageHandler
 from .system_prompt_store import SystemPromptStore
-from .media_text import MediaTextExtractor, MediaTextResult, append_media_text
-from .message_media import hydrate_structure_media
 from .timeutil import unix_to_utc_naive
 from .user_config_db import close_pool as close_user_config_pool
 from .user_config_db import ensure_group_configs_table
@@ -93,7 +91,6 @@ class App:
             system_prompt_store=self.system_prompt_store,
             storage=self.storage,
         )
-        self.media_text = MediaTextExtractor(self.config)
         self.mc_ticket_notifier = McTicketNotifier(self.config, db=self.db)
         self._chat_workers = {}
         self._chat_pending = {}
