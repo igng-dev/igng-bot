@@ -19,6 +19,7 @@ python -m pip install -r requirements-dev.txt
 | 配置 | 作用 |
 | --- | --- |
 | `DB_HOST/PORT/USER/PASSWORD/NAME` | 与原 bot 同一 MySQL；生产账号仅给本应用所需表权限。迁移账号需要建表权限。 |
+| `DB_SSL` / `DB_SSL_VERIFY` / `DB_SSL_CA` | 阿里云 RDS 强制 `require_secure_transport`，生产设 `DB_SSL=1`，让 pymysql、aiomysql（工单/站点记账池）与 DSH Profile 的 Node mysql2 全部走 TLS。默认加密但不校验证书；配置 `DB_SSL_CA` 指向 RDS CA 后开启校验。 |
 | `YUNYING_INTERNAL_SECRET` | Python 与 Profile 的独立 capability 凭据，至少32字符；两进程相同。 |
 | `YUNYING_ALLOW_GROUPS` | 群的会话授权边界，逗号分隔，为空拒绝；群发言还受独立的 `group_configs.social_paused` 控制，原始历史仍保存。 |
 | `YUNYING_ALLOW_PRIVATE` | 已废弃、被忽略。私聊改由 QQ 所属 IGNG 账号的 `yunying.plus`/`yunying.pro`（或 admin）权限判定，未绑定账号或权限不足一律拒绝。 |

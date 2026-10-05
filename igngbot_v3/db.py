@@ -35,6 +35,7 @@ class DBHandler:
             database=self.config.DB_NAME,
             charset="utf8mb4",
             cursorclass=DictCursor,
+            ssl=self.config.db_ssl_context(),
             init_command=MYSQL_UTC_INIT_COMMAND,
         )
         logger.info("Connected to MySQL database with session time_zone=+00:00")
@@ -582,6 +583,7 @@ class DBHandler:
                 database=self.config.IGNG_SITE_DB_NAME,
                 charset="utf8mb4",
                 cursorclass=DictCursor,
+                ssl=self.config.db_ssl_context(),
             )
         else:
             self._identity_conn.ping(reconnect=True)

@@ -1,6 +1,13 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {MySQLStore} from '../src/store.js';
+import {MySQLStore, dbSslOptions} from '../src/store.js';
 import {SocialState} from '../src/social.js';
+
+test('mysql TLS options follow DB_SSL and only verify when asked',()=>{
+  assert.equal(dbSslOptions({}),null);
+  assert.equal(dbSslOptions({DB_SSL:'0'}),null);
+  assert.deepEqual(dbSslOptions({DB_SSL:'1'}),{rejectUnauthorized:false});
+  assert.deepEqual(dbSslOptions({DB_SSL:'true',DB_SSL_VERIFY:'1'}),{rejectUnauthorized:true});
+});
 
 test('person memory visibility aggregates the IGNG account; group memory stays scoped',async()=>{
   const store=new MySQLStore({},{}); // access() only builds SQL, it never touches the pool

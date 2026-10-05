@@ -37,6 +37,7 @@ async def _get_pool():
             password=DB_CONFIG["password"],
             db=DB_CONFIG["db"],
             charset="utf8mb4",
+            ssl=Config.db_ssl_context(),
             autocommit=True,
         )
     return _pool
@@ -180,6 +181,7 @@ async def _get_site_pool():
             password=SITE_AI_DB_CONFIG["password"],
             db=SITE_AI_DB_CONFIG["db"],
             charset=SITE_AI_DB_CONFIG["charset"],
+            ssl=Config.db_ssl_context(),
             autocommit=True,
             maxsize=3,
             minsize=1,

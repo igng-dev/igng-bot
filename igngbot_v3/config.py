@@ -87,6 +87,29 @@ class Config:
     DB_PASSWORD = os.getenv("DB_PASSWORD", "")
     DB_NAME = os.getenv("DB_NAME", "igng_bot")
 
+    # Aliyun RDS enforces require_secure_transport. DB_SSL turns on TLS for every
+    # MySQL client (pymysql, aiomysql and the Node mysql2 pool). Verification is
+    # off by default because the RDS certificate is not in the container trust
+    # store; point DB_SSL_CA at Aliyun's CA to verify the server instead.
+    DB_SSL = os.getenv("DB_SSL", "").strip().lower() in ("1", "true", "yes", "on")
+    DB_SSL_VERIFY = os.getenv("DB_SSL_VERIFY", "").strip().lower() in ("1", "true", "yes", "on")
+    DB_SSL_CA = os.getenv("DB_SSL_CA", "").strip()
+
+    @staticmethod
+    def db_ssl_context():
+        """One SSLContext shared by pymysql and aiomysql, or None when TLS is off."""
+        if not Config.DB_SSL:
+            return None
+        import ssl as _ssl
+        context = _ssl.create_default_context(cafile=Config.DB_SSL_CA or None)
+        if Config.DB_SSL_CA or Config.DB_SSL_VERIFY:
+            context.check_hostname = True
+            context.verify_mode = _ssl.CERT_REQUIRED
+        else:
+            context.check_hostname = False
+            context.verify_mode = _ssl.CERT_NONE
+        return context
+
     # IGNG site AI records database (ai_jobs / ai_job_attempts). It lives on the
     # same RDS instance as the bot database but in the dedicated site schema.
     # Every bot LLM call is mirrored there in addition to call_logs.

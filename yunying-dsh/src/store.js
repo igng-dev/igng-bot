@@ -1,6 +1,16 @@
 import mysql from 'mysql2/promise';
 import { randomUUID, createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { PolicyError, canonicalKey, bounded, integer } from './policy.js';
+const enabled = value => /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
+// Aliyun RDS enforces require_secure_transport. DB_SSL encrypts the connection;
+// DB_SSL_CA verifies the server certificate, otherwise TLS is unverified.
+export function dbSslOptions(env = process.env) {
+  if (!enabled(env.DB_SSL)) return null;
+  const ca = String(env.DB_SSL_CA || '').trim();
+  if (ca) return { ca: readFileSync(ca), rejectUnauthorized: true };
+  return { rejectUnauthorized: enabled(env.DB_SSL_VERIFY) };
+}
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const identityId = qq => {
@@ -17,9 +27,11 @@ const signedId = key => key.startsWith('group:') ? key.split(':')[1] : '-' + key
 export class MySQLStore {
   constructor(pool, lockConnection) { this.pool = pool; this.lockConnection = lockConnection; this.healthy = true; this.ownerResolver = null; }
   static async open(env = process.env) {
+    const ssl = dbSslOptions(env);
     const opts = { host: env.DB_HOST || '127.0.0.1', port: Number(env.DB_PORT || 3306), user: env.DB_USER,
       password: env.DB_PASSWORD, database: env.DB_NAME || 'igng_bot', charset: 'utf8mb4',
-      timezone: 'Z', dateStrings:true, supportBigNumbers: true, bigNumberStrings: true, connectionLimit: 6 };
+      timezone: 'Z', dateStrings:true, supportBigNumbers: true, bigNumberStrings: true, connectionLimit: 6,
+      ...(ssl ? { ssl } : {}) };
     const pool = mysql.createPool(opts);
     pool.pool.on('connection', connection=>connection.query("SET time_zone = '+00:00'"));
     const lock = await mysql.createConnection(opts);

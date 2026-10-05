@@ -26,6 +26,21 @@ def test_canonical_conversation_and_durable_event_dedup_identity():
         ingress_identity({**raw, "message_id": None})
 
 
+def test_db_ssl_context_is_off_by_default_and_encrypts_when_enabled(monkeypatch):
+    import ssl
+    from igngbot_v3.config import Config
+    monkeypatch.setattr(Config, "DB_SSL", False)
+    assert Config.db_ssl_context() is None
+    monkeypatch.setattr(Config, "DB_SSL", True)
+    monkeypatch.setattr(Config, "DB_SSL_VERIFY", False)
+    monkeypatch.setattr(Config, "DB_SSL_CA", "")
+    context = Config.db_ssl_context()
+    assert context.verify_mode == ssl.CERT_NONE and context.check_hostname is False
+    monkeypatch.setattr(Config, "DB_SSL_VERIFY", True)
+    context = Config.db_ssl_context()
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname is True
+
+
 def test_private_recall_and_poke_notices_reach_optional_v4_callback():
     import json
     got = []
