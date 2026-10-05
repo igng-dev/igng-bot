@@ -41,6 +41,16 @@ def test_db_ssl_context_is_off_by_default_and_encrypts_when_enabled(monkeypatch)
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname is True
 
 
+def test_dbhandler_ssl_comes_from_config_class_not_the_instance(monkeypatch):
+    import pymysql
+    from igngbot_v3.db import DBHandler
+    captured = {}
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: captured.update(kwargs) or object())
+    config = SimpleNamespace(DB_HOST="h", DB_PORT=3306, DB_USER="u", DB_PASSWORD="p", DB_NAME="d")
+    DBHandler(config).connect()
+    assert "ssl" in captured and captured["ssl"] is None
+
+
 def test_private_recall_and_poke_notices_reach_optional_v4_callback():
     import json
     got = []
