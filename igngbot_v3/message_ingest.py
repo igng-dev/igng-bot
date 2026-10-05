@@ -1,12 +1,12 @@
-"""Shared V3/V4 ingress: parse, store media, OCR/ASR, and persist raw QQ history.
-No chat model, reply classifier or context compression runs here.
+"""Shared V3/V4 ingress: parse, store media, and persist raw QQ history.
+No chat model, reply classifier, context compression or media transcription
+runs here.
 """
 import asyncio
 import json
 import logging
 from .message_parser import parse_message, apply_forward_content
 from .onebot_api import get_forward_msg
-from .media_text import MediaTextResult, append_media_text
 from .message_media import hydrate_structure_media
 from .timeutil import unix_to_utc_naive
 logger = logging.getLogger(__name__)
@@ -43,14 +43,13 @@ async def persist_message(self, data):
     ):
         return
     # Persist incoming messages and download attachments before command or
-    # task handling so continuous task mode can use stable NAS paths and
-    # media-derived text can be included in the same LLM turn.
+    # task handling so continuous task mode can use stable NAS paths and the
+    # multimodal model can read the stored media.
     legacy_compat = getattr(self.db, "legacy_compat", True)
     file_url = None
     file_type = None
     audio_file_path = None
     stored_attachments = []
-    extracted_media = []
     if parsed.get("files"):
         for file_info in parsed["files"]:
             storage_res = None
@@ -91,44 +90,6 @@ async def persist_message(self, data):
                 file_info["stored_path"] = stored_path
                 if thumb_path:
                     file_info["thumb_path"] = thumb_path
-                media_result = None
-                try:
-                    if file_info["type"] == "image":
-                        media_result = await asyncio.to_thread(
-                            self.media_text.extract,
-                            file_info["type"],
-                            stored_path,
-                        )
-                    elif file_info["type"] in ("audio", "record"):
-                        existing_transcript = str(file_info.get("transcript") or "").strip()
-                        if existing_transcript:
-                            media_result = MediaTextResult(
-                                text=existing_transcript,
-                                status="provided",
-                                backend="onebot",
-                            )
-                        else:
-                            media_result = await asyncio.to_thread(
-                                self.media_text.extract,
-                                file_info["type"],
-                                stored_path,
-                            )
-                except Exception as exc:
-                    logger.exception("Media text extraction failed for %s", stored_path)
-                    media_result = MediaTextResult(
-                        status="unavailable",
-                        backend="error",
-                        error=str(exc),
-                    )
-                if media_result:
-                    file_info["text_extraction_status"] = media_result.status
-                    file_info["text_extraction_backend"] = media_result.backend
-                    if media_result.text and media_result.backend != "onebot":
-                        if file_info["type"] == "image":
-                            file_info["ocr_text"] = media_result.text
-                        else:
-                            file_info["transcript"] = media_result.text
-                        extracted_media.append((file_info, media_result))
                 attachment = {
                     "type": file_info["type"],
                     "original_file": file_info.get("file", ""),
@@ -136,21 +97,15 @@ async def persist_message(self, data):
                     "stored_path": stored_path,
                     "thumb_path": thumb_path,
                     "name": file_info.get("name", ""),
-                    "transcript": file_info.get("transcript", ""),
-                    "ocr_text": file_info.get("ocr_text", ""),
                 }
                 if meta.get("width"):
                     attachment["width"] = meta["width"]
                     attachment["height"] = meta.get("height")
                 if meta.get("thumb_width"):
                     attachment["thumb_width"] = meta["thumb_width"]
-                    attachment["thumb_height"] = meta.get("thumb_height")
+                    attachment["thumb_height"] = meta["thumb_height"]
                 if "is_animated" in meta:
                     attachment["is_animated"] = meta["is_animated"]
-
-                if media_result:
-                    attachment["text_extraction_status"] = media_result.status
-                    attachment["text_extraction_backend"] = media_result.backend
                 stored_attachments.append(attachment)
                 if legacy_compat and file_url is None:
                     file_url = stored_path
@@ -158,30 +113,25 @@ async def persist_message(self, data):
                 if legacy_compat and file_info["type"] in ("audio", "record") and audio_file_path is None:
                     audio_file_path = stored_path
 
-    append_media_text(parsed, extracted_media)
     # Keep the message handler usable in lightweight compensation/test
-    # contexts where only the database dependency is constructed.  The
-    # normal App initializer always provides both services; without them
-    # there is simply no nested card/forward media to hydrate.
+    # contexts where only the database dependency is constructed. The normal
+    # App initializer always provides storage; without it there is simply no
+    # nested card/forward media to hydrate.
     storage = getattr(self, "storage", None)
-    media_text = getattr(self, "media_text", None)
-    if storage is not None and media_text is not None:
+    nested_media_text = []
+    if storage is not None:
         nested_media_text = await hydrate_structure_media(
             storage,
-            media_text,
             parsed.get("message_structure", []),
             parsed["group_id"],
             parsed["msg_id"],
         )
-    else:
-        nested_media_text = []
     if nested_media_text:
         parsed["plain_text_content"] = " ".join(
             part
             for part in (parsed.get("plain_text_content", ""), *nested_media_text)
             if str(part).strip()
         ).strip()
-    content = parsed.get("message_content", "").strip()
 
     if not self.db.get_message_by_msg_id(parsed["group_id"], parsed["msg_id"]):
         self.db.insert_message(
@@ -201,7 +151,6 @@ async def persist_message(self, data):
             is_self=parsed.get("is_self", False),
             message_source=parsed.get("message_source"),
             **({"file_url": file_url, "file_type": file_type, "audio_file_path": audio_file_path} if legacy_compat else {}),
-            audio_transcript=parsed.get("audio_transcript", ""),
         )
 
     stored_message = self.db.get_message_by_msg_id(parsed["group_id"], parsed["msg_id"])

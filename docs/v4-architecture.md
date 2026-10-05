@@ -36,7 +36,7 @@ flowchart LR
 
 `group:<QQ群号>`、`private:<QQ号>` 是稳定会话 key，每个 key 对应一个持久 DSH UUID。允许列表为空时拒绝社交访问。私聊原始历史沿用 V3 的负数 group_id 约定。
 
-WebSocket 来信先落 `yunying_ingress`。机械 worker 复用 V3 下载附件、OCR/ASR、保存消息、撤回和管理控制，再提交 prepared outbox；独立 delivery worker 才联系 DSH。两阶段各自按会话 FIFO、backoff 和状态恢复。DSH 不在线不会阻塞后续 `message_logs`/附件保存。媒体提交前进程中断时复用已提交的消息行，不重复下载/转写。普通模型文本输出不转发 QQ。
+WebSocket 来信先落 `yunying_ingress`。机械 worker 复用 V3 下载附件、保存消息、撤回和管理控制，再提交 prepared outbox；独立 delivery worker 才联系 DSH。两阶段各自按会话 FIFO、backoff 和状态恢复。DSH 不在线不会阻塞后续 `message_logs`/附件保存。媒体提交前进程中断时复用已提交的消息行，不重复下载。普通模型文本输出不转发 QQ。
 
 `group_configs.is_chat_mode` 继续作为网站/QQ 的同一个开关：开启时所有来信可参与原 reserved2 行为；关闭时普通消息只观察，不 inject、不自主 wake，明确 @ 或引用云萤才建立一次调用。该轮带最近最多20条/约6000字符上下文，可继续读取新到达的观察消息和旧历史。个人私聊不受群开关影响。群配置只剩聊天模式一个开关；机械记录始终继续。
 
@@ -78,7 +78,7 @@ Memory 分两层，SQL 在匹配、计数、snippet 之前过滤。**群记忆**
 
 ## V3 保留与退出
 
-保留 OneBot/NapCat、parser/forward、DB/history/recall、storage/thumbnail/WebP/视频、OCR/ASR、网站用户组与管理员权限、MC 通知、调用记录镜像、媒体/frpc/NAS 数据路径。共享 ingress 抽出到 `igngbot_v3/message_ingest.py`，两代复用。附件名和流式体积边界做了小幅加固。
+保留 OneBot/NapCat、parser/forward、DB/history/recall、storage/thumbnail/WebP/视频、网站用户组与管理员权限、MC 通知、调用记录镜像、媒体/frpc/NAS 数据路径。共享 ingress 抽出到 `igngbot_v3/message_ingest.py`，两代复用。附件名和流式体积边界做了小幅加固。
 
 V4 不调用 ChatService、ContextManager、旧 system_prompt_store 或纯文本 LLM client；旧模块只留在显式 V3 回滚入口。源码 `main.py` 默认 V4；`IGNGBOT_RUNTIME=v3` 可回滚。NAS base Dockerfile 保持显式 V3 默认，V4 overlay 才切换现有 bot 服务；开发合并不会自动把生产切到 V4。
 

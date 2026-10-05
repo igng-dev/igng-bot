@@ -318,7 +318,7 @@ class Retirement:
         # One atomic ALTER removes all three columns; original values are retained above.
         with self.conn.cursor() as cur:
             cur.execute("ALTER TABLE message_logs DROP COLUMN file_url,DROP COLUMN file_type,DROP COLUMN audio_file_path")
-        return self.finish({"retired_columns": list(MEDIA_COLUMNS), "archived_media_rows": len(archive), "audio_transcript": "retained"})
+        return self.finish({"retired_columns": list(MEDIA_COLUMNS), "archived_media_rows": len(archive), "audio_transcript": "dropped"})
 
     def ingress(self, apply=False, days=30):
         if days < 30:

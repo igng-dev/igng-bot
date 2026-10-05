@@ -354,13 +354,16 @@ class FakeCursor:
             values = params
             group_id, sender_id = values[0], values[1]
             msg_id = values[7]
-            is_recalled = values[15]
+            # Legacy columns file_url/file_type/audio_file_path (8-10) precede the
+            # fixed tail: created_at, is_self, message_source, is_recalled, recalled_at,
+            # recall_operator_id.
+            is_recalled = values[14]
             self.connection.messages.setdefault((group_id, str(msg_id)), []).append(
                 {
                     "id": len(self.connection.messages) + 1,
                     "is_recalled": is_recalled,
-                    "recalled_at": values[16],
-                    "recall_operator_id": values[17],
+                    "recalled_at": values[15],
+                    "recall_operator_id": values[16],
                     "sender_id": sender_id,
                 }
             )

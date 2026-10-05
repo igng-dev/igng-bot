@@ -4,7 +4,7 @@
 
 ## 开发运行
 
-使用 Python 3.12（OCR/ASR 依赖）、Node >=24、pnpm 10.33。Python 虚拟环境与 Node 依赖放设备共享缓存，避免在 NAS worktree 创建依赖树。
+使用 Python 3.12、Node >=24、pnpm 10.33。Python 虚拟环境与 Node 依赖放设备共享缓存，避免在 NAS worktree 创建依赖树。
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -12,7 +12,7 @@ python -m pip install -r requirements-dev.txt
 # 把 yunying-dsh/node_modules 链接到该缓存的 node_modules，不复制源码到持久数据目录。
 ```
 
-沿用现有 `.env` 的 DB/OneBot/附件/OCR/ASR/网站配置，把 `.env.v4.example` 的参数放入本机受保护环境或 `.env`。DSH 使用启动进程的环境；官方 `plugin add` 和 Python 服务均不会自动读取任意部署 env 文件，启动前须通过服务管理器或 Docker 的 `env_file` 注入配置。示例中的群号、密码、key 均为空；不能把真实配置提交到 git。
+沿用现有 `.env` 的 DB/OneBot/附件/网站配置，把 `.env.v4.example` 的参数放入本机受保护环境或 `.env`。DSH 使用启动进程的环境；官方 `plugin add` 和 Python 服务均不会自动读取任意部署 env 文件，启动前须通过服务管理器或 Docker 的 `env_file` 注入配置。示例中的群号、密码、key 均为空；不能把真实配置提交到 git。
 
 必要配置：
 
@@ -101,7 +101,7 @@ Bing RSS 回退仍使用 donor `safeFetch`：全 DNS 公网检查、逐跳重定
 
 同时备份三层：原 `message_logs`/附件、V4 MySQL 表、完整 `dsh-runtime`。需要一致恢复点时先暂停并停止两个 V4 进程，再用既有数据库备份和 NAS 快照方式备份；运行时直接拷贝 Session 文件不承诺一致性。恢复必须配对同一时间点的映射和官方 Session。映射为 ready 而 Session 缺失会启动失败，必须恢复备份，不能创建空 Session 掩盖丢失。
 
-进程重启时，durable ingress/FIFO、原生 Inbox、发送结果、社会状态、长期记忆和版本均恢复。发送状态 `unknown` 必须人工核对，不自动重发。原始媒体失败也不伪造 OCR/转写。MySQL Memory 忘记是受控软删除，旧版本仍只对 Owner 可见；数据保留/硬删除由后续管理策略决定。
+进程重启时，durable ingress/FIFO、原生 Inbox、发送结果、社会状态、长期记忆和版本均恢复。发送状态 `unknown` 必须人工核对，不自动重发。原始媒体失败不伪造内容（不再有本地 OCR/转写）。MySQL Memory 忘记是受控软删除，旧版本仍只对 Owner 可见；数据保留/硬删除由后续管理策略决定。
 
 源码本地回滚可使用 `IGNGBOT_RUNTIME=v3 python main.py`。生产回滚脚本停 V4 两个服务、恢复原 Compose 和旧 V3 镜像，保留全部新 MySQL/DSH 数据。V3 不读取新 Memory，也不迁移 DSH summary 回 V3 context；以后再切 V4 时仍使用原 Session。不要同时运行 V3 与 V4 两个 QQ 消费者。
 
@@ -122,6 +122,6 @@ Bing RSS 回退仍使用 donor `safeFetch`：全 DNS 公网检查、逐跳重定
 
 ## 实际群聊验收
 
-自动化证据与运行命令见 [testing.md](testing.md)。上线前用专用测试群和 plus+ 账号私聊验收：普通连续聊天可沉默；直接 @/引用回应；多人快速来信无重复/并发回复；读取新消息后 wait/wake/潜水；真实搜索结果自然引用；个人跨群记忆可在别群读/更新/忘记、同一 IGNG 账号的多个 QQ 互相可见，群记忆仍只在原群可读，别群正文和来源群号不可见；非 plus 私聊与未绑定账号一律不回复；撤回、图片/OCR、语音/ASR、合并转发和旧历史；长会话自动 compaction 后继续；重启后恢复同一 Session、发送账本与 Memory。
+自动化证据与运行命令见 [testing.md](testing.md)。上线前用专用测试群和 plus+ 账号私聊验收：普通连续聊天可沉默；直接 @/引用回应；多人快速来信无重复/并发回复；读取新消息后 wait/wake/潜水；真实搜索结果自然引用；个人跨群记忆可在别群读/更新/忘记、同一 IGNG 账号的多个 QQ 互相可见，群记忆仍只在原群可读，别群正文和来源群号不可见；非 plus 私聊与未绑定账号一律不回复；撤回、图片（多模态访问）、语音附件、合并转发和旧历史；长会话自动 compaction 后继续；重启后恢复同一 Session、发送账本与 Memory。
 
-本地协议替身可以检验实际程序与协议，无法替代真实账号、模型风格、公网 DNS、OCR 模型首次下载、NAS 卷/容器重启和长期运行验收。
+本地协议替身可以检验实际程序与协议，无法替代真实账号、模型风格、公网 DNS、NAS 卷/容器重启和长期运行验收。

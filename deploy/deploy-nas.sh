@@ -38,7 +38,7 @@ require_env() {
 cmd_sync() {
   require_env
   log "Ensuring remote directory $NAS_ROOT"
-  nas "mkdir -p '$NAS_ROOT/media' '$NAS_ROOT/bot-runtime' '$NAS_ROOT/models'"
+  nas "mkdir -p '$NAS_ROOT/media' '$NAS_ROOT/bot-runtime'"
 
   log "Syncing compose project files"
   scp -q -o BatchMode=yes -o StrictHostKeyChecking=yes \

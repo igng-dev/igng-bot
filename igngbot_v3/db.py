@@ -73,13 +73,12 @@ class DBHandler:
                     group_id BIGINT NOT NULL COMMENT '群号',
                     sender_id BIGINT NOT NULL COMMENT '发送者QQ号',
                     message_content TEXT COMMENT '消息文本内容',
-                    plain_text_content TEXT COMMENT '纯文本/OCR/语音转写文本',
+                    plain_text_content TEXT COMMENT '纯文本内容',
                     message_structure MEDIUMTEXT COMMENT '结构化消息JSON',
                     attachments_json MEDIUMTEXT COMMENT '附件JSON',
                     reply_to_msg_id VARCHAR(50) COMMENT '回复的消息ID',
                     msg_id VARCHAR(50) NOT NULL COMMENT '消息ID',
                     {legacy_columns}
-                    audio_transcript TEXT COMMENT '语音转写文本',
                     is_self TINYINT(1) DEFAULT 0 COMMENT '是否是自己发送的消息',
                     message_source VARCHAR(32) NOT NULL DEFAULT 'inbound' COMMENT '消息来源',
                     is_recalled TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已撤回',
@@ -111,11 +110,10 @@ class DBHandler:
             except Exception:
                 pass
             for sql in (
-                "ALTER TABLE message_logs ADD COLUMN plain_text_content TEXT COMMENT '纯文本/OCR/语音转写文本'",
+                "ALTER TABLE message_logs ADD COLUMN plain_text_content TEXT COMMENT '纯文本内容'",
                 "ALTER TABLE message_logs ADD COLUMN message_structure MEDIUMTEXT COMMENT '结构化消息JSON'",
                 "ALTER TABLE message_logs ADD COLUMN attachments_json MEDIUMTEXT COMMENT '附件JSON'",
                 "ALTER TABLE message_logs ADD COLUMN audio_file_path VARCHAR(500) COMMENT '语音文件路径'",
-                "ALTER TABLE message_logs ADD COLUMN audio_transcript TEXT COMMENT '语音转写文本'",
                 "ALTER TABLE message_logs ADD COLUMN is_recalled TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已撤回'",
                 "ALTER TABLE message_logs ADD COLUMN recalled_at DATETIME NULL COMMENT '检测到撤回的UTC时间'",
                 "ALTER TABLE message_logs ADD COLUMN recall_operator_id BIGINT NULL COMMENT '执行撤回的QQ号'",
@@ -619,7 +617,7 @@ class DBHandler:
                        file_type=None, created_at=None, is_self=False,
                        plain_text_content=None, message_structure=None,
                        attachments_json=None, audio_file_path=None,
-                       audio_transcript=None, is_recalled=False,
+                       is_recalled=False,
                        recalled_at=None, recall_operator_id=None,
                        message_source=None):
         # message_logs.created_at is always stored as naive UTC (+00:00).
@@ -641,8 +639,8 @@ class DBHandler:
         if self.legacy_compat:
             columns += ["file_url", "file_type", "audio_file_path"]
             values += (file_url, file_type, audio_file_path)
-        columns += ["audio_transcript", "created_at", "is_self", "message_source", "is_recalled", "recalled_at", "recall_operator_id"]
-        values += (audio_transcript, stored_created_at, is_self, normalized_source,
+        columns += ["created_at", "is_self", "message_source", "is_recalled", "recalled_at", "recall_operator_id"]
+        values += (stored_created_at, is_self, normalized_source,
                    1 if is_recalled else 0, stored_recalled_at, recall_operator_id)
         sql = "INSERT INTO message_logs (" + ", ".join(columns) + ") VALUES (" + ", ".join(["%s"] * len(columns)) + ")"
         for attempt in range(2):

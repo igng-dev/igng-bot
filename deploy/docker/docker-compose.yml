@@ -28,11 +28,6 @@ services:
       LOCAL_STORAGE: /data/runtime
       PROMPT_DIR: /app/prompts
       SYSTEM_PROMPT_CACHE_DIR: /data/runtime/system_prompts
-      MEDIA_ASR_MODEL_DIR: /data/models
-      # The NAS cannot reach huggingface.co, so faster-whisper model downloads
-      # must go through the reachable mirror. Models cache to ./models and are
-      # then reused offline.
-      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
       ONEBOT_WS_URL: ws://napcat:3001
       ONEBOT_HTTP_URL: http://napcat:3000
       TZ: Asia/Shanghai
@@ -42,8 +37,6 @@ services:
       - ${BOT_STORAGE_ROOT:-/vol2/1000/Docker/igngbot/data/message_logs}:/data/message_logs
       # Mutable runtime state (logs, prompt snapshot, tmp) outside the image.
       - ./bot-runtime:/data/runtime
-      # faster-whisper model cache, downloaded once and reused across rebuilds.
-      - ./models:/data/models
     depends_on:
       napcat:
         # Wait for the OneBot WebSocket to actually be listening. Starting on

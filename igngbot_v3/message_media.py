@@ -2,8 +2,6 @@ import asyncio
 import os
 import re
 
-from .media_text import MediaTextResult
-
 
 def _safe_filename(value, fallback="media"):
     name = os.path.basename(str(value or "").strip())
@@ -11,7 +9,7 @@ def _safe_filename(value, fallback="media"):
     return name or fallback
 
 
-def _attachment_from_result(file_info, stored_path, thumb_path, meta, media_result):
+def _attachment_from_storage(file_info, stored_path, thumb_path, meta):
     attachment = {
         "type": file_info.get("type", "image"),
         "original_file": file_info.get("file", ""),
@@ -19,8 +17,6 @@ def _attachment_from_result(file_info, stored_path, thumb_path, meta, media_resu
         "stored_path": stored_path,
         "thumb_path": thumb_path,
         "name": file_info.get("name", ""),
-        "transcript": file_info.get("transcript", ""),
-        "ocr_text": file_info.get("ocr_text", ""),
     }
     role = str(file_info.get("role") or "").strip()
     if role:
@@ -30,16 +26,13 @@ def _attachment_from_result(file_info, stored_path, thumb_path, meta, media_resu
         attachment["height"] = meta.get("height")
     if meta.get("thumb_width"):
         attachment["thumb_width"] = meta["thumb_width"]
-        attachment["thumb_height"] = meta.get("thumb_height")
+        attachment["thumb_height"] = meta["thumb_height"]
     if "is_animated" in meta:
         attachment["is_animated"] = meta["is_animated"]
-    if media_result:
-        attachment["text_extraction_status"] = media_result.status
-        attachment["text_extraction_backend"] = media_result.backend
     return attachment
 
 
-async def persist_media_file(storage, media_text, file_info, group_id, file_name):
+async def persist_media_file(storage, file_info, group_id, file_name):
     if not isinstance(file_info, dict):
         return None
 
@@ -87,38 +80,13 @@ async def persist_media_file(storage, media_text, file_info, group_id, file_name
     if thumb_path:
         file_info["thumb_path"] = thumb_path
 
-    media_result = None
-    try:
-        if file_type == "image":
-            existing_ocr = str(file_info.get("ocr_text") or "").strip()
-            if existing_ocr:
-                media_result = MediaTextResult(existing_ocr, "provided", "stored")
-            else:
-                media_result = await asyncio.to_thread(media_text.extract, file_type, stored_path)
-        elif file_type in ("audio", "record"):
-            existing_transcript = str(file_info.get("transcript") or "").strip()
-            if existing_transcript:
-                media_result = MediaTextResult(existing_transcript, "provided", "onebot")
-            else:
-                media_result = await asyncio.to_thread(media_text.extract, file_type, stored_path)
-    except Exception as exc:
-        media_result = MediaTextResult(status="unavailable", backend="error", error=str(exc))
-
-    if media_result and media_result.text and media_result.backend != "onebot":
-        if file_type == "image":
-            file_info["ocr_text"] = media_result.text
-        elif file_type in ("audio", "record"):
-            file_info["transcript"] = media_result.text
-
-    attachment = _attachment_from_result(file_info, stored_path, thumb_path, meta, media_result)
     return {
-        "attachment": attachment,
+        "attachment": _attachment_from_storage(file_info, stored_path, thumb_path, meta),
         "file_info": file_info,
-        "media_result": media_result,
     }
 
 
-async def hydrate_structure_media(storage, media_text, structure, group_id, message_id):
+async def hydrate_structure_media(storage, structure, group_id, message_id):
     if not isinstance(structure, list):
         return []
 
@@ -144,7 +112,6 @@ async def hydrate_structure_media(storage, media_text, structure, group_id, mess
             }
             persisted = await persist_media_file(
                 storage,
-                media_text,
                 file_info,
                 group_id,
                 f"{message_id}_{scope}_card_{index}_{file_info.get('role', 'image')}",
@@ -155,14 +122,11 @@ async def hydrate_structure_media(storage, media_text, structure, group_id, mess
                 {
                     "stored_path": file_info.get("stored_path"),
                     "thumb_path": file_info.get("thumb_path"),
-                    "ocr_text": file_info.get("ocr_text", ""),
                 }
             )
             attachment = persisted["attachment"]
             attachment["role"] = media_item.get("role", "image")
             attachments.append(attachment)
-            if attachment.get("ocr_text"):
-                plain_parts.append(str(attachment["ocr_text"]))
         if attachments:
             part["attachments"] = attachments
 
@@ -184,7 +148,6 @@ async def hydrate_structure_media(storage, media_text, structure, group_id, mess
                         continue
                     persisted = await persist_media_file(
                         storage,
-                        media_text,
                         file_info,
                         group_id,
                         f"{message_id}_{child_scope}_{file_index}_{file_info.get('file', file_info.get('type', 'media'))}",
@@ -192,11 +155,6 @@ async def hydrate_structure_media(storage, media_text, structure, group_id, mess
                     if not persisted:
                         continue
                     child_attachments.append(persisted["attachment"])
-                    attachment = persisted["attachment"]
-                    if attachment.get("ocr_text"):
-                        plain_parts.append(str(attachment["ocr_text"]))
-                    if attachment.get("transcript"):
-                        plain_parts.append(str(attachment["transcript"]))
             if child_attachments:
                 child["attachments"] = child_attachments
 

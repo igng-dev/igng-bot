@@ -140,7 +140,7 @@ async def process_scenario():
       'DB_HOST':'127.0.0.1','DB_PORT':os.getenv('YUNYING_TEST_DB_PORT','33316'),'DB_USER':'root','DB_PASSWORD':'','DB_NAME':'yunying_v4_test',
       'ONEBOT_WS_URL':f'ws://127.0.0.1:{server_port}/ws','ONEBOT_HTTP_URL':f'http://127.0.0.1:{server_port}/onebot','BOT_USER_ID':'3001',
       'ONEBOT_ACCESS_TOKEN':'','ONEBOT_HTTP_TOKEN':'','MESSAGE_ROOT':str(data/'media'),'LOCAL_STORAGE':str(data/'infra'),
-      'STORAGE_REQUIRE_MOUNT':'0','MEDIA_OCR_ENABLED':'0','MEDIA_ASR_ENABLED':'0','MC_TICKET_NOTIFICATION_GROUP':'0','MC_TICKET_TECH_NOTIFICATION_GROUP':'0',
+      'STORAGE_REQUIRE_MOUNT':'0','MC_TICKET_NOTIFICATION_GROUP':'0','MC_TICKET_TECH_NOTIFICATION_GROUP':'0',
       'SITE_AI_RECORDS_ENABLED':'0','DEEPSEEK_API_KEY':secrets.token_hex(32),'DEEPSEEK_BASE_URL':f'http://127.0.0.1:{server_port}/anthropic',
       'YUNYING_SEARCH_PROVIDER':'deepseek','DEEPSEEK_SEARCH_BASE_URL':f'http://127.0.0.1:{server_port}/anthropic/v1','NO_PROXY':'127.0.0.1,localhost'}
     def set_pause(enabled):
