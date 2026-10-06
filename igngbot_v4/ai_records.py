@@ -16,12 +16,29 @@ from igngbot_v3 import call_log_db as legacy
 from . import newapi_billing
 
 
+_NATIVE_BREAKDOWN_KEYS = ("input", "output", "cacheRead", "cacheWrite", "reasoning", "prompt", "completion", "total", "cached")
+
+
 def tokens(record):
-    """Return the five-bucket breakdown, or None when the provider reported nothing."""
-    breakdown = record.get("token_breakdown")
-    if not isinstance(breakdown, dict):
-        breakdown = legacy._token_breakdown(record.get("token_usage"))
-    return breakdown
+    """Return the five-bucket breakdown, or None when the provider reported nothing.
+
+    The live Node accounting writes camelCase buckets; historical records carry
+    raw provider usage. Both are normalized to the same snake_case shape here.
+    """
+    native = record.get("token_breakdown")
+    if isinstance(native, dict) and all(key in native for key in _NATIVE_BREAKDOWN_KEYS):
+        return {
+            "input_tokens": int(native["input"] or 0),
+            "output_tokens": int(native["output"] or 0),
+            "cache_read_tokens": int(native["cacheRead"] or 0),
+            "cache_write_tokens": int(native["cacheWrite"] or 0),
+            "reasoning_tokens": int(native["reasoning"] or 0),
+            "prompt_tokens": int(native["prompt"] or 0),
+            "completion_tokens": int(native["completion"] or 0),
+            "total_tokens": int(native["total"] or 0),
+            "cached_tokens": int(native["cached"] or 0),
+        }
+    return legacy._token_breakdown(record.get("token_usage"))
 
 
 def timestamp(value):

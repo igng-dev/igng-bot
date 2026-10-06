@@ -102,6 +102,31 @@ class ExtractTokensTest(unittest.TestCase):
         self.assertEqual(_extract_tokens(None), (0, 0, 0, 0))
 
 
+class NativeBreakdownTest(unittest.TestCase):
+    """The live Node accounting emits camelCase buckets; Python must map them."""
+
+    NATIVE = {"input": 30, "output": 6, "cacheRead": 20, "cacheWrite": 5, "reasoning": 4,
+              "prompt": 55, "completion": 10, "total": 65, "cached": 25}
+    EXPECTED = {"input_tokens": 30, "output_tokens": 6, "cache_read_tokens": 20, "cache_write_tokens": 5,
+                "reasoning_tokens": 4, "prompt_tokens": 55, "completion_tokens": 10,
+                "total_tokens": 65, "cached_tokens": 25}
+
+    def test_native_camelcase_breakdown_is_mapped(self):
+        from igngbot_v4.ai_records import tokens
+        self.assertEqual(tokens({"token_breakdown": dict(self.NATIVE)}), self.EXPECTED)
+
+    def test_raw_usage_falls_back_to_python_normalization(self):
+        from igngbot_v4.ai_records import tokens
+        record = {"token_usage": {"inputTokens": 30, "outputTokens": 10, "cacheReadTokens": 20,
+                                  "cacheWriteTokens": 5, "reasoningTokens": 4}}
+        self.assertEqual(tokens(record), self.EXPECTED)
+
+    def test_missing_usage_is_unknown_not_zero(self):
+        from igngbot_v4.ai_records import tokens
+        self.assertIsNone(tokens({"token_usage": None}))
+        self.assertIsNone(tokens({}))
+
+
 class MirrorCallToSiteTest(unittest.TestCase):
     def setUp(self):
         # Unit fixtures explicitly enable mirroring; CI keeps real site writes disabled.
