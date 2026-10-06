@@ -23,5 +23,13 @@ test('real MySQL + native DSH: official Session mapping, Person identity and Mem
   await runtime.accept(event(randomUUID(),key,{userId:qq,replyToBot:true}));await settle(runtime,key);
   const history=await durableEvents(h.ctx,id);assert.ok(history.some(e=>e.type==='user/message'));
   const calls=await store.query('SELECT record_id FROM yunying_ai_records WHERE dsh_session_id=?',[id]);assert.ok(calls.length>=2);
+  // The MySQL projection mirrors the official log after a real restart/backfill.
+  const projected=await store.query('SELECT event_type,content FROM yunying_session_events WHERE dsh_session_id=?',[id]);
+  const ptypes=new Set(projected.map(r=>r.event_type));
+  assert.ok(ptypes.has('user/message'),'projected user/message');
+  assert.ok(ptypes.has('assistant/message'),'projected assistant/message');
+  assert.ok(ptypes.has('turn/end'),'projected turn/end');
+  const bodies=await store.query("SELECT COUNT(*) c FROM yunying_session_events WHERE dsh_session_id=? AND event_type='tool/result' AND content IS NOT NULL",[id]);
+  assert.equal(Number(bodies[0].c),0,'tool result bodies stay out of MySQL');
  }finally{await runtime.close();await h.ctx.fiber.dispose();await store.close();}
 });

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { MySQLStore } from './store.js';
 import { SocialRuntime } from './runtime.js';
 import { settings, equalSecret, PolicyError, bounded, integer } from './policy.js';
+import { reconstruct } from './transcript.js';
 export const name='yunying-social';
 export const inject=['agentLoop','agents','sessions','sessionPersistence','tools','systemPrompt','skills','attachments','web'];
 async function body(request) {
@@ -50,6 +51,21 @@ export async function route(request,runtime,config) {
       return {ok:true};
     });
   }
+  if(request.url==='/admin/session/events') {
+    const sessionId=bounded(data.sessionId,80);
+    const events=await store.sessionEvents(sessionId,data.after,integer(data.limit,1,5000,1000));
+    return {ok:true,sessionId,events};
+  }
+  if(request.url==='/admin/session/transcript') {
+    // Ordered, model-visible flow reconstructed from the MySQL projection.
+    const sessionId=bounded(data.sessionId,80);
+    const events=await store.sessionEvents(sessionId,data.after,integer(data.limit,1,5000,5000));
+    return {ok:true,sessionId,transcript:reconstruct(events)};
+  }
+  if(request.url==='/admin/session/rebuild') {
+    // Operator repair: replay the authoritative official log into the projection.
+    return runtime.rebuildTranscript(bounded(data.sessionId,80));
+  }
   throw new PolicyError('capability denied');
 }
 export async function apply(ctx) {
@@ -79,7 +95,7 @@ export async function apply(ctx) {
       void close().finally(()=>process.kill(process.pid,'SIGTERM')).catch(error=>runtime.report(error));
     }),5000);heartbeat.unref();
     let mirroring=false;
-    mirror=setInterval(()=>{if(mirroring)return;mirroring=true;void runtime.mirrorCalls().catch(error=>runtime.report(error)).finally(()=>{mirroring=false;});},5000);mirror.unref();
-    ctx.logger.info('YunYing native DSH Profile ready; official Session persistence and scoped social tools');
+    mirror=setInterval(()=>{if(mirroring)return;mirroring=true;void Promise.all([runtime.mirrorCalls(),runtime.flushTranscripts()]).catch(error=>runtime.report(error)).finally(()=>{mirroring=false;});},5000);mirror.unref();
+    ctx.logger.info('YunYing native DSH Profile ready; official Session persistence, MySQL transcript projection and scoped social tools');
   }catch(error){await close();throw error;}
 }

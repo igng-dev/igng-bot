@@ -61,10 +61,10 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 | 层 | 权威数据 | 用途 |
 | --- | --- | --- |
 | Raw QQ | 原 `message_logs`、附件树、撤回状态 | 网站历史、媒体和来源证据；不替代 Agent Session。 |
-| Runtime Session | 官方 DSH JSONL/附件持久目录 | 模型真实运行历史、原生 Inbox、工具结果、request context、compaction；不把 summary 当长期记忆。 |
+| Runtime Session | 官方 DSH JSONL/附件持久目录（权威）；MySQL `yunying_session_events` 为过滤投影 | 模型真实运行历史、原生 Inbox、工具结果、request context、compaction；不把 summary 当长期记忆。投影表供查询/还原，可从官方日志重建。 |
 | Long-term Memory | MySQL Markdown 文档/版本/来源/Identity | 稳定事实与长期约定；模型受控访问，Owner/未来网站管理。 |
 
-新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅增加结构，不删除、重写或导入 V3 context summary。003 在 ingress 增加机械阶段状态、独立重试/时间/错误与命令结果，在 sessions 增加真实呼叫的 event/到期权限；004 增加机械队列索引。既有记录回填为已完成机械阶段，已应用001/002保持原 checksum。V4 启动只初始化消息、撤回和群配置，不再初始化/seed 旧摘要和 system Prompt；V3 rollback 初始化器保留。
+新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`、`yunying_session_events`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅增加结构，不删除、重写或导入 V3 context summary。003 在 ingress 增加机械阶段状态、独立重试/时间/错误与命令结果，在 sessions 增加真实呼叫的 event/到期权限；004 增加机械队列索引；008 增加会话事件的过滤投影表。既有记录回填为已完成机械阶段，已应用001/002保持原 checksum。V4 启动只初始化消息、撤回和群配置，不再初始化/seed 旧摘要和 system Prompt；V3 rollback 初始化器保留。
 
 正式用量继续写既有 `igng_sites.ai_jobs/ai_job_attempts`：每个原生 turn 一个 `social_turn` job，续接和失败重试为 attempts；compaction 是独立 `dsh_compaction` job。任务 key 来自 Session UUID 与原生 turn/compaction ID，request_id 来自 Session UUID 与 event seq。SQL事务和任务锁去重，每次从 attempts 重算总量；provider/cache 用量来自原生事件，未知 usage 的 attempt tokens 为 NULL，job只合计已知值并记录未知次数。模型沉默仍计费。
 
@@ -74,7 +74,9 @@ Memory 分两层，SQL 在匹配、计数、snippet 之前过滤。**群记忆**
 
 更新使用 `expectedVersion` 乐观锁，版本、hash、来源和审计在同一事务提交。Forget 对模型隐藏内容，保留受控审计版本；Owner rollback 创建新版本。Owner secret 与 infrastructure secret 必须分开，默认无 owner endpoint 的 host port。以后网站可直接使用管理 API；本次不改站点仓库或清理用户历史；正式记忆未灌入伪造测试文档。
 
-未来 MySQL SessionPersistence 可作为上游同一异步 capability 的独立 provider 接入。当前 adapter 不读取或修改 JSONL 实体、不自定义 durability；`persistence_provider` 和 Agent create/resume/flush 接口是扩展边界。
+`yunying_session_events` 是官方 Session 日志的**过滤投影**，不是 durability：JSONL/附件仍是权威与恢复源，投影表可随时用官方日志重建。它保留 turn/step 边界、system/developer/user/assistant 消息、tool 调用（含原始参数）、request 路由与 compaction 摘要，并按设计丢弃可再生的杂碎——助手原始流、工具结果正文（只留 callId/isError/字节数占位）、request 工具 schema、Inbox splice。读写接口、环境开关与重建命令见 [会话投影](v4-session-transcript.md)。
+
+MySQL SessionPersistence provider 仍可作为上游同一异步 capability 的独立 provider 接入，但它会重写 durability，当前不采用。官方 JSONL 保持权威；`persistence_provider` 和 Agent create/resume/flush 接口是扩展边界，投影采集只挂 `session/event` 与恢复回放。
 
 ## V3 保留与退出
 
