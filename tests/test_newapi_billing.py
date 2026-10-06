@@ -41,6 +41,10 @@ class ComputeQuotaTest(unittest.TestCase):
     def test_unpriced_model_is_unknown_not_zero(self):
         self.assertIsNone(newapi_billing.compute_quota(BREAKDOWN, "missing"))
 
+    def test_requested_model_is_tried_when_the_served_name_is_unpriced(self):
+        self.assertEqual(newapi_billing.compute_quota(BREAKDOWN, "served-name", "m")["quota"], 109)
+        self.assertEqual(newapi_billing.compute_quota(BREAKDOWN, "served-name", "m")["pricing_model"], "m")
+
     def test_zero_usage_is_zero_quota(self):
         zero = dict(BREAKDOWN, input_tokens=0, output_tokens=0, cache_read_tokens=0,
                     cache_write_tokens=0, reasoning_tokens=0, prompt_tokens=0,
@@ -80,14 +84,20 @@ class LogTest(unittest.TestCase):
             {"id": 2, "model": "m", "prompt_tokens": 160, "completion_tokens": 25, "created_at": 1700000050, "quota": 200},
             {"id": 3, "model": "m", "prompt_tokens": 1, "completion_tokens": 1, "created_at": 1700000050, "quota": 999},
         ]
-        matched = newapi_billing._match_log(BREAKDOWN, "m", 1700000051 * 1000)
+        matched = newapi_billing._match_log(BREAKDOWN, ("m", None), 1700000051 * 1000)
         self.assertEqual(matched["id"], 2)
+
+    def test_log_match_accepts_the_requested_alias(self):
+        newapi_billing._logs["items"] = [
+            {"id": 4, "model": "billing-name", "prompt_tokens": 160, "completion_tokens": 25, "created_at": 1700000000, "quota": 777},
+        ]
+        self.assertEqual(newapi_billing._match_log(BREAKDOWN, ("served-name", "billing-name"), 1700000000 * 1000)["id"], 4)
 
     def test_log_match_ignores_logs_outside_the_window(self):
         newapi_billing._logs["items"] = [
             {"id": 1, "model": "m", "prompt_tokens": 160, "completion_tokens": 25, "created_at": 1700000000, "quota": 100},
         ]
-        self.assertIsNone(newapi_billing._match_log(BREAKDOWN, "m", 1700009999 * 1000))
+        self.assertIsNone(newapi_billing._match_log(BREAKDOWN, ("m", None), 1700009999 * 1000))
 
 
 class CostForTest(unittest.IsolatedAsyncioTestCase):
@@ -118,6 +128,18 @@ class CostForTest(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_adapter_is_unknown(self):
         with patch.object(Config, "NEWAPI_BASE_URL", ""):
             self.assertIsNone(await newapi_billing.cost_for(BREAKDOWN, "m"))
+
+    async def test_real_log_quota_matches_the_requested_alias(self):
+        newapi_billing._logs["items"] = [
+            {"id": 11, "model": "billing-name", "prompt_tokens": 160, "completion_tokens": 25, "created_at": 1700000000, "quota": 555},
+        ]
+        with patch.object(Config, "NEWAPI_BASE_URL", "https://newapi.invalid"), \
+             patch.object(newapi_billing, "refresh_catalog", new=_noop), \
+             patch.object(newapi_billing, "refresh_logs", new=_noop):
+            cost = await newapi_billing.cost_for(BREAKDOWN, "served-name", 1700000000 * 1000, "billing-name")
+        self.assertEqual(cost["source"], "newapi-log")
+        self.assertEqual(cost["quota"], 555)
+        self.assertEqual(cost["pricing_model"], "billing-name")
 
 
 async def _noop(*args, **kwargs):

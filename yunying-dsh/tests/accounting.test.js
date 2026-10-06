@@ -58,6 +58,7 @@ test('the served response model wins over the configured alias',()=>{
   const acct=accounting();
   const record=acct.apply(message(1,{usage:{inputTokens:1,outputTokens:1},source:{kind:'model',provider:'newapi',model:'cc/alias',replayState:{response:{responseModel:'served-identity'}}}}));
   assert.equal(record.model,'served-identity');
+  assert.equal(record.request_model,'cc/alias');
   assert.equal(record.provider,'newapi');
 });
 

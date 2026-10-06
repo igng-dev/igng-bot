@@ -59,7 +59,7 @@ async def mirror_native_record(record_id, record):
     # the new-api lookup is cached but may still be network I/O, and the job row
     # must not stay locked across it.
     breakdown = tokens(record) if record["record_kind"] == "attempt" else None
-    cost = await newapi_billing.cost_for(breakdown, record.get("model"), record.get("ended_at")) if breakdown else None
+    cost = await newapi_billing.cost_for(breakdown, record.get("model"), record.get("ended_at"), record.get("request_model")) if breakdown else None
     task_key = record["task_key"]
     lock = "yunying-ai:" + hashlib.sha256(task_key.encode()).hexdigest()[:48]
     pool = await legacy._get_site_pool()

@@ -78,6 +78,9 @@ export class NativeAccounting {
       group_id:(this.key.startsWith('private:')?'-':'')+this.key.split(':')[1],sender_id:source.userId||'',sender_name:source.sender||'',message_text:source.text||'',
       call_type:compact?(success?'compaction':'compaction_error'):success?'agent':'agent_error',
       model:served||message.source?.model||data.model||this.route.model||this.config.model,provider:message.source?.provider||data.provider||this.route.provider||this.config.provider,
+      // The gateway bills the requested model name; the served identity can be
+      // an alias, so keep both for log matching and pricing attribution.
+      request_model:message.source?.model||data.model||this.route.model||this.config.model,
       system_prompt:'[DSH native Session owns system prompt and compaction history]',user_prompt:source.plain||source.text||'',
       response_content:content.filter(c=>c.type==='text').map(c=>c.text).join('\n'),
       tool_calls:content.filter(c=>c.type==='tool-call').map(c=>({name:c.name,id:c.id})),token_usage:usage??null,token_breakdown:tokenBreakdown(usage),
