@@ -152,23 +152,58 @@ async def insert_call_log(
             return cur.lastrowid
 
 
-def _extract_tokens(token_usage: dict | None) -> tuple[int, int, int, int]:
-    """从 OpenAI 风格 usage 中解析 (prompt, completion, total, cached) token。"""
+def _token_breakdown(token_usage: dict | None) -> dict | None:
+    """归一化 provider usage 为 tokscale 兼容的五桶 + 网站既有四列。
+
+    DSH 原生 usage 的输入侧是互斥的：inputTokens 仅未命中缓存的输入，
+    cacheRead/cacheWrite 分开；reasoningTokens 是 outputTokens 的子集，拆出来
+    保证五桶可加。OpenAI 风格 usage 折叠到同一形状。provider 没报用量时返回
+    None（未知，不伪造为零账单）。
+    """
     usage = token_usage if isinstance(token_usage, dict) else {}
-    if "inputTokens" in usage:
-        cached = int(usage.get("cacheReadTokens") or 0) + int(usage.get("cacheWriteTokens") or 0)
-        prompt = int(usage.get("inputTokens") or 0) + cached
-        completion = int(usage.get("outputTokens") or 0)
-        return prompt, completion, int(usage.get("totalTokens") or prompt + completion), cached
-    prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-    completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
-    total = int(usage.get("total_tokens") or (prompt + completion))
-    cached = 0
-    cache_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
-    if isinstance(cache_details, dict):
-        cached += int(cache_details.get("cached_tokens") or 0)
-    cached += int(usage.get("prompt_cache_hit_tokens") or 0)
-    return prompt, completion, total, cached
+    if "inputTokens" in usage or "outputTokens" in usage:
+        input_tokens = int(usage.get("inputTokens") or 0)
+        output_raw = int(usage.get("outputTokens") or 0)
+        reasoning = int(usage.get("reasoningTokens") or 0)
+        cache_read = int(usage.get("cacheReadTokens") or 0)
+        cache_write = int(usage.get("cacheWriteTokens") or 0)
+    elif any(k in usage for k in ("prompt_tokens", "input_tokens", "completion_tokens", "output_tokens")):
+        prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        output_raw = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+        cache_read = int(usage.get("prompt_cache_hit_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+        if isinstance(details, dict):
+            cache_read += int(details.get("cached_tokens") or 0)
+            cache_write += int(details.get("cache_creation_tokens") or 0)
+        output_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details")
+        reasoning = int(output_details.get("reasoning_tokens") or 0) if isinstance(output_details, dict) else 0
+        if not reasoning:
+            reasoning = int(usage.get("reasoning_tokens") or 0)
+        input_tokens = max(0, prompt - cache_read - cache_write)
+    else:
+        return None
+    output = max(0, output_raw - reasoning)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "reasoning_tokens": reasoning,
+        "prompt_tokens": input_tokens + cache_read + cache_write,
+        "completion_tokens": output + reasoning,
+        "total_tokens": input_tokens + cache_read + cache_write + output + reasoning,
+        "cached_tokens": cache_read + cache_write,
+    }
+
+
+def _extract_tokens(token_usage: dict | None) -> tuple[int, int, int, int]:
+    """从 OpenAI/DSH 风格 usage 中解析 (prompt, completion, total, cached) token。"""
+    breakdown = _token_breakdown(token_usage)
+    if breakdown is None:
+        return 0, 0, 0, 0
+    return (breakdown["prompt_tokens"], breakdown["completion_tokens"],
+            breakdown["total_tokens"], breakdown["cached_tokens"])
 
 
 async def _get_site_pool():
@@ -214,7 +249,15 @@ async def mirror_call_to_site(
     if call_log_id is None:
         return False
     try:
+        breakdown = _token_breakdown(token_usage)
         prompt_tokens, completion_tokens, total_tokens, cached_tokens = _extract_tokens(token_usage)
+        # V3 is the rollback adapter: it fills the same five buckets so the
+        # website columns stay uniform, but it does not claim a new-api cost.
+        input_tokens = breakdown["input_tokens"] if breakdown else None
+        output_tokens = breakdown["output_tokens"] if breakdown else None
+        cache_read_tokens = breakdown["cache_read_tokens"] if breakdown else None
+        cache_write_tokens = breakdown["cache_write_tokens"] if breakdown else None
+        reasoning_tokens = breakdown["reasoning_tokens"] if breakdown else None
         ended_at = datetime.now()
         started_at = ended_at - timedelta(milliseconds=max(0, int(duration_ms or 0)))
         strategy = json.dumps({"bot_call_log_id": call_log_id, "group_id": str(group_id or ""),
@@ -239,8 +282,9 @@ async def mirror_call_to_site(
                                (service, task_type, task_key, operator_type, operator_id,
                                 strategy, system_prompt, user_prompt, status, attempt_count,
                                 prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                                round, last_error, final_result)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                                reasoning_tokens, round, last_error, final_result)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                             (
                                 SITE_AI_SERVICE,
                                 call_type,
@@ -256,6 +300,11 @@ async def mirror_call_to_site(
                                 completion_tokens,
                                 total_tokens,
                                 cached_tokens,
+                                input_tokens,
+                                output_tokens,
+                                cache_read_tokens,
+                                cache_write_tokens,
+                                reasoning_tokens,
                                 0,
                                 error_message[:2000] if error_message else None,
                                 response_content or None,
@@ -268,9 +317,10 @@ async def mirror_call_to_site(
                             """INSERT INTO ai_job_attempts
                                (job_id, provider, model, attempt_no, round, is_fallback,
                                 started_at, ended_at, ok, prompt_tokens, completion_tokens,
-                                total_tokens, cached_tokens, error_message, raw_response,
-                                selected)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                total_tokens, cached_tokens, input_tokens, output_tokens,
+                                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                                error_message, raw_response, selected)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                             (
                                 job_id,
                                 provider or "unknown",
@@ -285,6 +335,11 @@ async def mirror_call_to_site(
                                 completion_tokens,
                                 total_tokens,
                                 cached_tokens,
+                                input_tokens,
+                                output_tokens,
+                                cache_read_tokens,
+                                cache_write_tokens,
+                                reasoning_tokens,
                                 error_message[:2000] if error_message else None,
                                 response_content or None,
                                 1,

@@ -165,7 +165,7 @@ class MirrorCallToSiteTest(unittest.TestCase):
         self.assertEqual(attempt_params[0], 987)
         self.assertEqual(attempt_params[2], "Qwen3-4B")
         self.assertEqual(attempt_params[8], 1)
-        self.assertEqual(attempt_params[14], '{"should_reply": true}')
+        self.assertEqual(attempt_params[19], '{"should_reply": true}')
 
     def test_failure_recorded_not_raised(self):
         class BoomPool:

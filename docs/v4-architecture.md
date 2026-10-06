@@ -68,6 +68,8 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 
 正式用量继续写既有 `igng_sites.ai_jobs/ai_job_attempts`：每个原生 turn 一个 `social_turn` job，续接和失败重试为 attempts；compaction 是独立 `dsh_compaction` job。任务 key 来自 Session UUID 与原生 turn/compaction ID，request_id 来自 Session UUID 与 event seq。SQL事务和任务锁去重，每次从 attempts 重算总量；provider/cache 用量来自原生事件，未知 usage 的 attempt tokens 为 NULL，job只合计已知值并记录未知次数。模型沉默仍计费。
 
+Token 记账对齐 tokscale 的 DSH 解析：五桶（未命中缓存的 input、扣除 reasoning 的 output、cache read/write、reasoning）与网站既有 prompt/completion/total/cached 四列并存；`source.replayState.response.responseModel` 优先于配置别名；同一 (turn, step) 的后续结算替换前一次（`llm/retry-started` 关闭该槽位），fork 的 `seedLength` 前缀不重复计。真实费用来自 new-api：优先采用其日志里同一请求的 quota，否则用 new-api v1.0.0-rc.31 的结算公式按日志校准过的倍率计算；无凭据/未定价时 cost 为 NULL 并记 `pricing_source`。`scripts/accounting-reconcile.py` 用 tokscale、bot 记账与 new-api 日志三方对账。
+
 `yunying_ai_records` 保存按原生 seq 排序的尝试/任务结束 outbox，网站故障时重试；官方 Session 回放可重建相同键。导出首先按原生 task key 写通用表，独立于 call_log_id；随后兼容写 `call_logs`，供尚未迁移的网站旧调用页读取。历史日志与既有旧镜像 job 保留，不重算过去的0用量。
 
 Memory 分两层，SQL 在匹配、计数、snippet 之前过滤。**群记忆**按会话（`scope_key`）保存，只在本群/本私聊可读；**个人记忆**以 QQ 号（`memory_documents.person_qq`）为基准保存，天然跨群。读取时把最近发言的 QQ 解析到其 IGNG 账号（`igng_sites.user_qqs`，经 Python `/identity` capability），聚合该账号名下全部 QQ 的个人记忆，再叠加当前会话的群记忆；QQ 没有 IGNG 归属时只返回它自己的个人记忆，解析失败按"只看自己"失败关闭。个人记忆来源必须是本人已查看、未撤回的真实消息，正文由服务端引用本人原话生成，禁止模型把别群私有 prose 粘入；来源链与访问审计保留在 `memory_sources`/`memory_audit`，跨群结果不返回来源群号。身份按 provider+external_id 唯一绑定；跨平台绑定只可经独立 Owner API，模型不能绑定身份。

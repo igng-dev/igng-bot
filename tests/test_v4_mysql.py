@@ -75,14 +75,22 @@ def test_real_mysql_unlinked_baseline_export_without_call_logs_is_idempotent(mon
         cur.execute('''CREATE TABLE IF NOT EXISTS ai_jobs (
           id BIGINT AUTO_INCREMENT PRIMARY KEY,service VARCHAR(50),task_type VARCHAR(50),task_key VARCHAR(191),operator_type VARCHAR(20),operator_id BIGINT NULL,
           strategy JSON,system_prompt TEXT,user_prompt TEXT,status VARCHAR(20),attempt_count INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,
+          input_tokens BIGINT,output_tokens BIGINT,cache_read_tokens BIGINT,cache_write_tokens BIGINT,reasoning_tokens BIGINT,cost_quota BIGINT,cost_usd DECIMAL(18,8),
           round INT,last_provider VARCHAR(100),last_error TEXT,final_result TEXT,created_at DATETIME,updated_at DATETIME) ENGINE=InnoDB''')
         cur.execute('''CREATE TABLE IF NOT EXISTS ai_job_attempts (
           id BIGINT AUTO_INCREMENT PRIMARY KEY,job_id BIGINT,provider VARCHAR(50),model VARCHAR(80),attempt_no INT,round INT,is_fallback INT,
-          started_at DATETIME,ended_at DATETIME,ok INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,error_kind VARCHAR(50),error_message TEXT,raw_response TEXT,request_id VARCHAR(191),selected INT) ENGINE=InnoDB''')
+          started_at DATETIME,ended_at DATETIME,ok INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,
+          input_tokens BIGINT,output_tokens BIGINT,cache_read_tokens BIGINT,cache_write_tokens BIGINT,reasoning_tokens BIGINT,cost_quota BIGINT,cost_usd DECIMAL(18,8),pricing_source VARCHAR(64),pricing_model VARCHAR(191),
+          error_kind VARCHAR(50),error_message TEXT,raw_response TEXT,request_id VARCHAR(191),selected INT) ENGINE=InnoDB''')
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE ai_jobs MODIFY task_key VARCHAR(191)")
         for table,column,kind in [('ai_jobs','last_provider','VARCHAR(100)'),('ai_jobs','created_at','DATETIME'),('ai_jobs','updated_at','DATETIME'),
-                                  ('ai_job_attempts','request_id','VARCHAR(191)'),('ai_job_attempts','error_kind','VARCHAR(50)')]:
+                                  ('ai_jobs','input_tokens','BIGINT'),('ai_jobs','output_tokens','BIGINT'),('ai_jobs','cache_read_tokens','BIGINT'),
+                                  ('ai_jobs','cache_write_tokens','BIGINT'),('ai_jobs','reasoning_tokens','BIGINT'),('ai_jobs','cost_quota','BIGINT'),('ai_jobs','cost_usd','DECIMAL(18,8)'),
+                                  ('ai_job_attempts','request_id','VARCHAR(191)'),('ai_job_attempts','error_kind','VARCHAR(50)'),
+                                  ('ai_job_attempts','input_tokens','BIGINT'),('ai_job_attempts','output_tokens','BIGINT'),('ai_job_attempts','cache_read_tokens','BIGINT'),
+                                  ('ai_job_attempts','cache_write_tokens','BIGINT'),('ai_job_attempts','reasoning_tokens','BIGINT'),('ai_job_attempts','cost_quota','BIGINT'),
+                                  ('ai_job_attempts','cost_usd','DECIMAL(18,8)'),('ai_job_attempts','pricing_source','VARCHAR(64)'),('ai_job_attempts','pricing_model','VARCHAR(191)')]:
             cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s", (table,column))
             if not cur.fetchone()['n']:cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     config = dict(host='127.0.0.1',port=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),user='root',password='',db='yunying_v4_test',charset='utf8mb4')
@@ -243,6 +251,42 @@ def test_native_job_attempt_aggregation_unknown_usage_compaction_and_replay(monk
                 assert [r['selected'] for r in attempts]==[0,0,1]
                 assert len({r['request_id'] for r in attempts})==3
                 cur.execute('SELECT COUNT(*) n FROM ai_jobs WHERE task_key LIKE %s',('dsh:'+sid+':%',));assert cur.fetchone()['n']==2
+        finally:await call_log_db.close_call_log_pool()
+    try:asyncio.run(scenario())
+    finally:conn.close()
+
+
+def test_native_settlement_replacement_deletes_the_superseded_attempt(monkeypatch):
+    conn=connection()
+    config=dict(host='127.0.0.1',port=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),user='root',password='',db='yunying_v4_test',charset='utf8mb4')
+    monkeypatch.setattr(call_log_db,'SITE_AI_DB_CONFIG',config)
+    monkeypatch.setattr(call_log_db.Config,'SITE_AI_RECORDS_ENABLED',True)
+    monkeypatch.setattr(call_log_db.Config,'NEWAPI_BASE_URL','')
+    app=Infrastructure.__new__(Infrastructure);app.conn=conn
+    sid=str(uuid4());key='dsh:'+sid+':turn:7'
+    base={'task_key':key,'task_type':'social_turn','record_kind':'attempt','group_id':'1001','sender_id':'2001','sender_name':'fixture',
+          'message_text':'替换结算','call_type':'agent','model':'cc/deepseek/deepseek-v4.1-flash','provider':'newapi','system_prompt':'official Session',
+          'user_prompt':'替换结算','response_content':'','tool_calls':[],'duration_ms':20,'success':True,'error_message':'',
+          'started_at':1700000000000,'ended_at':1700000000020,'native_turn':7,'native_step':1}
+    def breakdown(input_tokens,output_tokens):
+        return {'input_tokens':input_tokens,'output_tokens':output_tokens,'cache_read_tokens':0,'cache_write_tokens':0,
+                'reasoning_tokens':0,'prompt_tokens':input_tokens,'completion_tokens':output_tokens,
+                'total_tokens':input_tokens+output_tokens,'cached_tokens':0}
+    first={**base,'attempt_no':1,'token_usage':{'inputTokens':10,'outputTokens':5},'token_breakdown':breakdown(10,5)}
+    second={**base,'attempt_no':2,'token_usage':{'inputTokens':12,'outputTokens':6},'token_breakdown':breakdown(12,6),
+            'supersedes_seq':1,'supersedes_record_id':f'{sid}:1'}
+    async def scenario():
+        try:
+            for seq,record in [(1,first),(2,second)]:
+                rid=f'{sid}:{seq}'
+                with conn.cursor() as cur:cur.execute('INSERT INTO yunying_ai_records (record_id,dsh_session_id,request_seq,payload) VALUES (%s,%s,%s,%s)',(rid,sid,seq,encode(record)))
+                assert (await app.ai_record({'recordId':rid}))['ok']
+            with conn.cursor() as cur:
+                cur.execute('SELECT * FROM ai_jobs WHERE service=%s AND task_key=%s',('igng-bot',key));job=cur.fetchone()
+                assert job['attempt_count']==1 and job['prompt_tokens']==12 and job['completion_tokens']==6
+                assert job['input_tokens']==12 and job['output_tokens']==6
+                cur.execute('SELECT request_id FROM ai_job_attempts WHERE job_id=%s',(job['id'],));rows=cur.fetchall()
+                assert [r['request_id'] for r in rows]==[f'{sid}:2']
         finally:await call_log_db.close_call_log_pool()
     try:asyncio.run(scenario())
     finally:conn.close()

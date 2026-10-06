@@ -122,6 +122,19 @@ class Config:
     SITE_AI_DB_PASSWORD = os.getenv("SITE_AI_DB_PASSWORD", DB_PASSWORD)
     SITE_AI_DB_NAME = os.getenv("SITE_AI_DB_NAME", "igng_sites")
 
+    # new-api real-bill authority. The bot's DSH profile calls this gateway, so
+    # its per-request `quota` is the actual bill. Empty base URL disables the
+    # adapter: cost stays NULL (unknown) instead of being fabricated from a
+    # third-party price list. The sk- key reads /api/log/token; an access token
+    # (with New-Api-User id) reads /api/log/self and the authenticated pricing.
+    NEWAPI_BASE_URL = os.getenv("NEWAPI_BASE_URL", "").rstrip("/")
+    NEWAPI_API_KEY = os.getenv("NEWAPI_API_KEY", "")
+    NEWAPI_ACCESS_TOKEN = os.getenv("NEWAPI_ACCESS_TOKEN", "")
+    NEWAPI_USER_ID = os.getenv("NEWAPI_USER_ID", "")
+    NEWAPI_GROUP = os.getenv("NEWAPI_GROUP", "")
+    NEWAPI_QUOTA_PER_UNIT = int(os.getenv("NEWAPI_QUOTA_PER_UNIT", "500000") or "500000")
+    NEWAPI_TIMEOUT_SECONDS = float(os.getenv("NEWAPI_TIMEOUT_SECONDS", "4"))
+
     # Shared MC database. The bot application database above remains separate.
     MC_DB_HOST = os.getenv("MC_DB_HOST", DB_HOST)
     MC_DB_PORT = int(os.getenv("MC_DB_PORT", "3306"))
