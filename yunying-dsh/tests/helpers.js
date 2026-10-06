@@ -69,7 +69,6 @@ export class FixtureStore {
  async events(key){return [...this.rows.values()].filter(e=>e.conversation_key===key).map(v=>structuredClone(v));}
  async bindMessage(id,message){this.rows.get(id).dsh_message=message;}
  async delivered(id){if(this.failDeliveryOnce){this.failDeliveryOnce=false;throw new Error('simulated SQL acknowledgement failure');}this.rows.get(id).delivered=1;}
- async identity(qq){return {external_id:qq,identity_id:qq};}
  async recordCall(...args){this.calls.push(args);}
  async recordSessionEvents(rows){for(const row of rows)this.transcripts.push(structuredClone(row));}
  async sessionEventFloor(id){return this.transcripts.filter(row=>row.dsh_session_id===id).reduce((floor,row)=>Math.max(floor,row.event_seq),-1);}

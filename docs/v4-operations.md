@@ -112,7 +112,7 @@ Bing RSS 回退仍使用 donor `safeFetch`：全 DNS 公网检查、逐跳重定
 
 ## Owner 管理接口
 
-独立凭据认证的 POST 路由：`/admin/memory/search`、`read`、`versions`、`update`、`rollback`、`forget`；以及 `/admin/identity/bind`。均在 Profile 内网端口；只可供受控网站后端/Owner 使用。未来网站前端不能持有此 secret。
+独立凭据认证的 POST 路由：`/admin/memory/search`、`read`、`versions`、`update`、`rollback`、`forget`。均在 Profile 内网端口；只可供受控网站后端/Owner 使用。未来网站前端不能持有此 secret。
 
 | 路由 | JSON 参数 |
 | --- | --- |
@@ -121,9 +121,8 @@ Bing RSS 回退仍使用 donor `safeFetch`：全 DNS 公网检查、逐跳重定
 | update | `id, expectedVersion, markdown, reason`，可选 `title` |
 | rollback | `id, version, expectedVersion, reason`；创建新版本 |
 | forget | `id, expectedVersion, reason` |
-| identity/bind | `provider, externalId, identityId, reason`；不能覆盖已有不同身份绑定 |
 
-管理修改不改变文档原 scope/visibility/identity。网站还需要自身用户认证、权限与 CSRF/来源验证，本任务只提供管理后端边界，没有改站点仓库或上线网站页面。
+管理修改不改变文档原 scope/visibility。网站还需要自身用户认证、权限与 CSRF/来源验证，本任务只提供管理后端边界，没有改站点仓库或上线网站页面。
 
 ## 实际群聊验收
 

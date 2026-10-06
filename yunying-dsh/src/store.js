@@ -13,11 +13,6 @@ export function dbSslOptions(env = process.env) {
 }
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const hash = value => createHash('sha256').update(value).digest('hex');
-const identityId = qq => {
-  const bytes=createHash('sha1').update(Buffer.from('6ba7b8119dad11d180b400c04fd430c8','hex')).update(`identity:qq:${qq}`).digest().subarray(0,16);
-  bytes[6]=(bytes[6]&15)|80;bytes[8]=(bytes[8]&63)|128;
-  const hex=bytes.toString('hex');return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
-};
 const visible = (actor,doc) => {
   // Person memory is cross-group; never leak the conversation that sourced it.
   if(actor.admin||doc.document_type!=='person')return doc;
@@ -105,17 +100,6 @@ export class MySQLStore {
   }
   async bindMessage(eventId, message) { await this.query('UPDATE yunying_events SET dsh_message=? WHERE event_id=? AND dsh_message IS NULL', [JSON.stringify(message), eventId]); }
   async delivered(eventId) { await this.query('UPDATE yunying_events SET delivered=1 WHERE event_id=?', [eventId]); }
-  async identity(qq, displayName = '') {
-    if (!/^[1-9][0-9]{0,19}$/.test(String(qq))) throw new PolicyError('身份格式无效');
-    return this.transaction(async conn => {
-      const id = identityId(String(qq));
-      await conn.execute('INSERT IGNORE INTO memory_identities (id,display_name) VALUES (?,?)', [id, displayName.slice(0,160)]);
-      const [created]=await conn.execute("INSERT IGNORE INTO memory_identity_bindings (provider,external_id,identity_id,verified_by) VALUES ('qq',?,?,'onebot')",[String(qq),id]);
-      const [bindings]=await conn.execute("SELECT * FROM memory_identity_bindings WHERE provider='qq' AND external_id=?",[String(qq)]);
-      if(created.affectedRows)await conn.execute("INSERT INTO memory_identity_audit (provider,external_id,identity_id,operation,actor,detail) VALUES ('qq',?,?,'bind','onebot','{}')",[String(qq),bindings[0].identity_id]);
-      return bindings[0];
-    });
-  }
   async access(actor, prefix = 'd') {
     // Visibility is enforced by SQL before matching, counting or producing snippets.
     // Group documents stay scoped to their conversation; person documents are keyed by
@@ -136,23 +120,18 @@ export class MySQLStore {
     const placeholders = qqs.map(() => '?').join(',');
     return { sql: `(${group} OR ${prefix}.person_qq IN (${placeholders}))`, values: [actor.key, ...qqs] };
   }
-  async audit(actor, operation, doc, permitted, detail = {}) {
-    await this.query('INSERT INTO memory_audit (document_id,version,operation,actor,scope_key,allowed,detail) VALUES (?,?,?,?,?,?,?)', [doc?.id || null, doc?.current_version || null, operation, actor.admin ? 'owner-api' : actor.sessionId, actor.key || 'owner', Number(permitted), JSON.stringify(detail)]);
-  }
   async memorySearch(actor, args) {
     const query = bounded(args.query, 200, false); const limit = integer(args.limit, 1, 30, 10);
     const filter = await this.access(actor); const match = '%' + query.replace(/[\\%_]/g, s => '\\' + s) + '%';
-    const rows = await this.query(`SELECT d.id,d.title,d.document_type,d.scope_key,d.visibility,d.identity_id,d.current_version,
+    const rows = await this.query(`SELECT d.id,d.title,d.document_type,d.scope_key,d.visibility,d.current_version,
       LEFT(d.markdown,800) snippet FROM memory_documents d WHERE ${filter.sql} AND d.status='active'
       AND (d.title LIKE ? OR d.markdown LIKE ?) ORDER BY d.updated_at DESC LIMIT ?`, [...filter.values, match, match, limit]);
-    await this.audit(actor, 'search', null, true, { count: rows.length });
     return { ok: true, documents: rows.map(doc=>visible(actor,doc)) };
   }
   async memoryRead(actor, id, includeForgotten = false) {
     bounded(id, 36); const filter = await this.access(actor);
     const rows = await this.query(`SELECT d.* FROM memory_documents d WHERE d.id=? AND ${filter.sql} ${includeForgotten && actor.admin ? '' : "AND d.status='active'"}`, [id, ...filter.values]);
-    if (!rows.length) { await this.audit(actor, 'read', null, false); throw new PolicyError('记忆不可用'); }
-    await this.audit(actor, 'read', rows[0], true);
+    if (!rows.length) throw new PolicyError('记忆不可用');
     // Person memory sources stay the person's own statements; the source conversation is never returned.
     return { ok: true, document: visible(actor,rows[0]) };
   }
@@ -171,15 +150,20 @@ export class MySQLStore {
     return rows;
   }
   async revision(conn, actor, doc, sources, operation, reason) {
-    await conn.execute('INSERT INTO memory_versions (document_id,version,title,markdown,status,content_hash,operation,reason,actor,dsh_session_id) VALUES (?,?,?,?,?,?,?,?,?,?)', [doc.id, doc.current_version, doc.title, doc.markdown, doc.status, hash(doc.markdown), operation, reason, actor.admin ? 'owner-api' : actor.sessionId, actor.sessionId || null]);
-    for (const source of sources) await conn.execute('INSERT INTO memory_sources (document_id,version,event_id,conversation_key,message_id,identity_id) VALUES (?,?,?,?,?,?)', [doc.id, doc.current_version, source.event_id, source.conversation_key, source.message_id, doc.identity_id]);
-    await conn.execute('INSERT INTO memory_audit (document_id,version,operation,actor,scope_key,allowed,detail) VALUES (?,?,?,?,?,1,?)', [doc.id, doc.current_version, operation, actor.admin ? 'owner-api' : actor.sessionId, actor.key || 'owner', JSON.stringify({ reason })]);
+    // Sources live next to the version they belong to; each is the person's own
+    // current-conversation statement, never another group's private prose.
+    const refs = (Array.isArray(sources) ? sources : []).map(source => ({ event_id: source.event_id, conversation_key: source.conversation_key, message_id: source.message_id ?? null }));
+    await conn.execute('INSERT INTO memory_versions (document_id,version,title,markdown,status,content_hash,operation,reason,actor,dsh_session_id,sources) VALUES (?,?,?,?,?,?,?,?,?,?,?)', [doc.id, doc.current_version, doc.title, doc.markdown, doc.status, hash(doc.markdown), operation, reason, actor.admin ? 'owner-api' : actor.sessionId, actor.sessionId || null, JSON.stringify(refs)]);
   }
   async memoryWrite(actor, args) {
     // Person memory is keyed by the subject QQ and readable across groups by the whole
     // IGNG account; group memory is model-written and stays scoped to this conversation.
     let title = bounded(args.title, 240), markdown = bounded(args.markdown, 24000), person = null;
-    if (args.personQQ) person = await this.identity(String(args.personQQ));
+    if (args.personQQ) {
+      const qq = String(args.personQQ);
+      if (!/^[1-9][0-9]{0,19}$/.test(qq)) throw new PolicyError('身份格式无效');
+      person = { external_id: qq };
+    }
     const sources = await this.sourceRows(actor, args.sources, person);
     if (person && !sources.some(s => s.payload.userId === person.external_id)) throw new PolicyError('个人记忆必须有本人来源');
     if (person) {
@@ -189,11 +173,11 @@ export class MySQLStore {
       markdown = sources.map(s => `> ${String(s.payload.plain || s.payload.text).replace(/\n/g, '\n> ')}`).join('\n\n');
     }
     const doc = { id: randomUUID(), title, markdown, document_type: person ? 'person' : 'group', scope_key: actor.key,
-      visibility: person ? 'shared_person' : 'scope_private', identity_id: person?.identity_id || null, person_qq: person?.external_id || null,
+      visibility: person ? 'shared_person' : 'scope_private', person_qq: person?.external_id || null,
       current_version: 1, status: 'active' };
     await this.transaction(async conn => {
-      await conn.execute('INSERT INTO memory_documents (id,title,markdown,document_type,scope_key,visibility,identity_id,person_qq,current_version,status) VALUES (?,?,?,?,?,?,?,?,?,?)',
-        [doc.id, doc.title, doc.markdown, doc.document_type, doc.scope_key, doc.visibility, doc.identity_id, doc.person_qq, doc.current_version, doc.status]);
+      await conn.execute('INSERT INTO memory_documents (id,title,markdown,document_type,scope_key,visibility,person_qq,current_version,status) VALUES (?,?,?,?,?,?,?,?,?)',
+        [doc.id, doc.title, doc.markdown, doc.document_type, doc.scope_key, doc.visibility, doc.person_qq, doc.current_version, doc.status]);
       await this.revision(conn, actor, doc, sources, 'write', bounded(args.reason || 'explicit memory', 500));
     });
     return { ok: true, document: visible(actor,doc) };
@@ -205,12 +189,8 @@ export class MySQLStore {
     if (!forget) {
       let person = null;
       if (old.document_type === 'person') {
-        if (old.person_qq) person = { external_id: String(old.person_qq), identity_id: old.identity_id };
-        else {
-          const [binding] = await this.query("SELECT external_id,identity_id FROM memory_identity_bindings WHERE identity_id=? AND provider='qq' LIMIT 1", [old.identity_id]);
-          if (binding) person = binding;
-        }
-        if (!person) throw new PolicyError('个人记忆缺少身份绑定');
+        if (!old.person_qq) throw new PolicyError('个人记忆缺少身份标识');
+        person = { external_id: String(old.person_qq) };
       }
       sources = await this.sourceRows(actor, args.sources, person);
       if (person) {
@@ -220,8 +200,7 @@ export class MySQLStore {
       sources = await this.sourceRows(actor, args.sources);
       // Forgetting cross-group person memory requires a request by that same person.
       if (old.document_type === 'person') {
-        const bindings = await this.query("SELECT external_id FROM memory_identity_bindings WHERE identity_id=? AND provider='qq'", [old.identity_id]);
-        const owners = new Set([...bindings.map(b => String(b.external_id)), ...(old.person_qq ? [String(old.person_qq)] : [])]);
+        const owners = new Set(old.person_qq ? [String(old.person_qq)] : []);
         if (!sources.some(s => owners.has(String(s.payload.userId)))) throw new PolicyError('删除个人记忆需要本人来源');
       }
     }
@@ -237,7 +216,10 @@ export class MySQLStore {
       return { ok: true, document: visible(actor,doc) };
     });
   }
-  async adminVersions(id) { return this.query('SELECT * FROM memory_versions WHERE document_id=? ORDER BY version DESC', [bounded(id, 36)]); }
+  async adminVersions(id) {
+    const rows = await this.query('SELECT * FROM memory_versions WHERE document_id=? ORDER BY version DESC', [bounded(id, 36)]);
+    return rows.map(row => ({ ...row, sources: json(row.sources) ?? [] }));
+  }
   async adminRollback(id, version, expected, reason) {
     bounded(reason, 500);
     return this.transaction(async conn => {

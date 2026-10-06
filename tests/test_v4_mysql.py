@@ -60,6 +60,8 @@ def test_real_mysql_migration_fifo_retry_restart_and_memory_qq_schema():
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_documents' AND COLUMN_NAME='person_qq'")
             assert cur.fetchone()['total'] == 1
+            cur.execute("SELECT COUNT(*) total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_versions' AND COLUMN_NAME='sources'")
+            assert cur.fetchone()['total'] == 1
     finally:
         if not conn.open:
             conn = connection()
