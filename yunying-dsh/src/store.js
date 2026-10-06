@@ -255,4 +255,29 @@ export class MySQLStore {
     if(payload?.supersedes_record_id) await this.query('DELETE FROM yunying_ai_records WHERE record_id=?', [payload.supersedes_record_id]);
     await this.query('INSERT IGNORE INTO yunying_ai_records (record_id,dsh_session_id,request_seq,payload) VALUES (?,?,?,?)', [recordId, sessionId, seq, JSON.stringify(payload)]);
   }
+  async recordSessionEvents(rows) {
+    // INSERT IGNORE on (dsh_session_id,event_seq) makes live capture and log replay
+    // idempotent. Chunked so one long session cannot exceed max_allowed_packet.
+    const batch = Array.isArray(rows) ? rows.filter(Boolean) : [];
+    for (let start = 0; start < batch.length; start += 100) {
+      const chunk = batch.slice(start, start + 100);
+      await this.query('INSERT IGNORE INTO yunying_session_events (dsh_session_id,event_seq,event_type,turn,step,role,' +
+        'content,data,content_sha256,truncated,event_time) VALUES ' +
+        chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?)').join(','),
+        chunk.flatMap(row => [row.dsh_session_id, row.event_seq, row.event_type, row.turn, row.step, row.role,
+          row.content, row.data === null || row.data === undefined ? null : JSON.stringify(row.data),
+          row.content_sha256, row.truncated ? 1 : 0, row.event_time]));
+    }
+  }
+  async sessionEventFloor(sessionId) {
+    bounded(sessionId, 80);
+    const rows = await this.query('SELECT COALESCE(MAX(event_seq),-1) AS floor FROM yunying_session_events WHERE dsh_session_id=?', [sessionId]);
+    return Number(rows[0]?.floor ?? -1);
+  }
+  async sessionEvents(sessionId, after = 0, limit = 2000) {
+    bounded(sessionId, 80);
+    const rows = await this.query('SELECT * FROM yunying_session_events WHERE dsh_session_id=? AND event_seq>? ORDER BY event_seq LIMIT ?',
+      [sessionId, integer(after, 0, Number.MAX_SAFE_INTEGER), integer(limit, 1, 5000)]);
+    return rows.map(row => ({ ...row, event_seq: Number(row.event_seq), data: json(row.data), truncated: !!row.truncated }));
+  }
 }

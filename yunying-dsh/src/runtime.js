@@ -7,7 +7,8 @@ import { SocialState, defaultWakeConfig } from './social.js';
 import { registerTools } from './tools.js';
 import { bindWakePrompts } from '../donor/qq-bridge/wake-prompts.js';
 import { serializeModelData } from '../donor/qq-bridge/qq-model-view.js';
-import { allowed, canonicalKey, PolicyError } from './policy.js';
+import { allowed, bounded, canonicalKey, PolicyError } from './policy.js';
+import { projectEvent, toolResultMode } from './transcript.js';
 const donorPreset = yaml.load(readFileSync(new URL('../donor/qq-bridge/agent.cordis.yml',import.meta.url),'utf8'));
 // The YAML's >- folding is significant: preserve the evaluated original prefix, not a hand-reflowed version.
 export const RESERVED2_PROMPT = donorPreset.find(row=>row.name==='@dsh-persona' || row.name==='@deepseek-ai/dsh-persona')?.config.prefix
@@ -83,6 +84,7 @@ export class SocialRuntime {
     const policy=await this.store.policy(key);state.chatMode=policy.chatMode;
     const runtime={state,store:this.store,config:this.config,infra:this.infra,messageReceipts:new Map(),
       accounting:new NativeAccounting(mapping.dsh_session_id,key,this.config),accountingWrite:Promise.resolve(),pendingRecords:new Map(),directCandidates:new Map(),directEventId:null,directUntil:0,
+      transcriptMode:toolResultMode(),pendingTranscript:new Map(),transcriptWrite:Promise.resolve(),transcriptScheduled:false,
       handle:null,timers:new Map(),wakePending:false,wakeMiss:0,recordTasks:new Set(),committedMessageIds:new Set(),pendingReason:null,closedThrough:state.lastReadThroughSeq,
       refreshPolicy:()=>this.refreshPolicy(runtime),permitted:()=>this.permitted(runtime),
       schedule:()=>this.schedule(runtime),cancelReplyCheck:()=>this.clearTimer(runtime,'reply'),
@@ -112,6 +114,7 @@ export class SocialRuntime {
       });
       scoped.on('session/event',(session,event)=>{
         if(session.id!==agent.id)return;
+        this.transcript(runtime,session,event);
         if(event.type==='user/message') {
           runtime.directCandidates.delete(event.data.id);
           const receipts=runtime.messageReceipts.get(event.data.id);if(receipts){state.note(receipts);runtime.messageReceipts.delete(event.data.id);}
@@ -174,6 +177,10 @@ export class SocialRuntime {
       }
       for(const event of historicalCalls)this.account(runtime,handle.agent.session,event);
       runtime.accounting.finishReplay(historicalCalls.at(-1)?.seq);
+      // Backfill the transcript projection from the authoritative log. INSERT IGNORE
+      // makes replay idempotent, so only events above the stored floor are re-read.
+      const transcriptFloor=await this.store.sessionEventFloor(handle.agent.session.id).catch(()=>-1);
+      for(const event of historicalCalls)if(Number(event.seq)>transcriptFloor)this.transcript(runtime,handle.agent.session,event);
       await Promise.all([...runtime.recordTasks]);
       this.conversations.set(key,runtime);this.schedule(runtime);
       // Pending official inbox work survives cancellation/crash. One bootstrap wake joins it, using the current token.
@@ -339,6 +346,56 @@ export class SocialRuntime {
       const result=await this.infra('/ai-records',{recordId:row.record_id,record:typeof row.payload==='string'?JSON.parse(row.payload):row.payload});
       if(result.ok)await this.store.query("UPDATE yunying_ai_records SET mirror_status='mirrored' WHERE record_id=?",[row.record_id]);
     }
+  }
+  transcript(runtime,session,event) {
+    // The official JSONL stays authoritative: this only mirrors the model-visible
+    // flow into MySQL. A failed write stays queued and is retried by the next
+    // event, the periodic flush, or the restart backfill; the Agent never blocks.
+    const row=projectEvent(session.id,event,runtime.transcriptMode);
+    if(!row)return;
+    runtime.pendingTranscript.set(row.event_seq,row);
+    if(!runtime.transcriptScheduled)this.drainTranscript(runtime);
+  }
+  drainTranscript(runtime) {
+    runtime.transcriptScheduled=true;
+    const work=runtime.transcriptWrite.catch(()=>{}).then(async()=>{
+      const rows=[...runtime.pendingTranscript.values()].sort((left,right)=>left.event_seq-right.event_seq);
+      if(!rows.length)return;
+      await this.store.recordSessionEvents(rows);
+      for(const row of rows)runtime.pendingTranscript.delete(row.event_seq);
+    }).catch(error=>this.report(error));
+    runtime.transcriptWrite=work;
+    this.track(runtime,work);
+    // Re-drain when events arrived while this batch was in flight; the guard
+    // keeps one long backfill from chaining a promise per event.
+    void work.finally(()=>{
+      runtime.transcriptScheduled=false;
+      if(runtime.pendingTranscript.size)this.drainTranscript(runtime);
+    });
+  }
+  async flushTranscripts() {
+    for(const runtime of this.conversations.values())if(runtime.pendingTranscript.size)this.drainTranscript(runtime);
+    await Promise.allSettled([...this.conversations.values()].map(runtime=>runtime.transcriptWrite));
+  }
+  async rebuildTranscript(sessionId) {
+    // Operator-only repair path: replay the official log into the projection.
+    const id=bounded(sessionId,80);
+    if(!await this.ctx.sessionPersistence.stat(id))throw new PolicyError('DSH 会话不存在');
+    const floor=await this.store.sessionEventFloor(id),mode=toolResultMode();
+    const reader=await this.ctx.sessionPersistence.open(id,'read');
+    let inserted=0;
+    try {
+      for(let offset=0;;offset+=500) {
+        const {events}=await reader.read(offset,500);
+        if(!events.length)break;
+        const rows=[];
+        for(const event of events)if(Number(event.seq)>floor) {
+          const row=projectEvent(id,event,mode);if(row)rows.push(row);
+        }
+        if(rows.length){await this.store.recordSessionEvents(rows);inserted+=rows.length;}
+      }
+    } finally { await reader.close(); }
+    return {ok:true,sessionId:id,inserted};
   }
   report(error) { this.ctx.logger?.warn(`YunYing runtime deferred operation: ${error.name||'Error'}`); }
   async restore() {
