@@ -217,17 +217,22 @@ def _round_half_away(value: float) -> int:
     return min(rounded, INT32_MAX)
 
 
-def compute_quota(breakdown: dict | None, model: str) -> dict | None:
+def compute_quota(breakdown: dict | None, model: str, request_model: str | None = None) -> dict | None:
     """Reproduce new-api rc.31 settlement for one attempt, or None when unpriced.
 
     `breakdown` carries tokscale-style additive buckets; new-api bills
     `input + cache_read*cache_ratio + cache_write*create_ratio` at the model
-    ratio and `completion` (output + reasoning) at completion_ratio.
+    ratio and `completion` (output + reasoning) at completion_ratio. The
+    requested model name is what the gateway bills, so it is tried alongside
+    the served identity.
     """
     if not breakdown or not model:
         return None
-    observed = _observed.get(model) or {}
-    entry = (_catalog.get("models") or {}).get(model) or {}
+    candidates = [name for name in (model, request_model) if name]
+    models = _catalog.get("models") or {}
+    observed = next((_observed[name] for name in candidates if _observed.get(name)), {})
+    entry = next((models[name] for name in candidates if models.get(name)), {})
+    pricing_model = next((name for name in candidates if _observed.get(name) or models.get(name)), model)
     group_ratio = observed.get("group_ratio")
     if group_ratio is None:
         ratios = _catalog.get("group_ratio") or {}
@@ -239,7 +244,7 @@ def compute_quota(breakdown: dict | None, model: str) -> dict | None:
     quota_per_unit = int(_catalog.get("quota_per_unit") or Config.NEWAPI_QUOTA_PER_UNIT)
     total_tokens = int(breakdown.get("total_tokens") or 0)
     if total_tokens <= 0:
-        return {"quota": 0, "pricing_model": model, "source": "newapi-pricing",
+        return {"quota": 0, "pricing_model": pricing_model, "source": "newapi-pricing",
                 "model_ratio": observed.get("model_ratio") or entry.get("model_ratio"),
                 "completion_ratio": observed.get("completion_ratio") or entry.get("completion_ratio"),
                 "cache_ratio": observed.get("cache_ratio") or entry.get("cache_ratio"),
@@ -247,7 +252,7 @@ def compute_quota(breakdown: dict | None, model: str) -> dict | None:
     model_price = entry.get("model_price")
     if entry.get("quota_type") == 1 and model_price:
         quota = _round_half_away(model_price * quota_per_unit * group_ratio)
-        return {"quota": quota, "pricing_model": model, "source": "newapi-pricing",
+        return {"quota": quota, "pricing_model": pricing_model, "source": "newapi-pricing",
                 "model_ratio": None, "completion_ratio": None, "cache_ratio": None,
                 "group_ratio": group_ratio, "quota_per_unit": quota_per_unit}
     model_ratio = observed.get("model_ratio")
@@ -276,21 +281,22 @@ def compute_quota(breakdown: dict | None, model: str) -> dict | None:
     quota = _round_half_away((prompt_quota + completion_quota) * ratio)
     if ratio != 0 and quota <= 0 and total_tokens > 0:
         quota = 1
-    return {"quota": quota, "pricing_model": model, "source": "newapi-pricing",
+    return {"quota": quota, "pricing_model": pricing_model, "source": "newapi-pricing",
             "model_ratio": model_ratio, "completion_ratio": completion_ratio,
             "cache_ratio": cache_ratio, "group_ratio": group_ratio, "quota_per_unit": quota_per_unit}
 
 
-def _match_log(breakdown: dict, model: str, ended_at_ms: int | None) -> dict | None:
-    """Find the real log for this attempt by model, token counts and time."""
+def _match_log(breakdown: dict, models: tuple, ended_at_ms: int | None) -> dict | None:
+    """Find the real log for this attempt by model name, token counts and time."""
     items = _logs.get("items") or []
+    names = {name for name in models if name}
     prompt_tokens = int(breakdown.get("prompt_tokens") or 0)
     completion_tokens = int(breakdown.get("completion_tokens") or 0)
     ended_seconds = (ended_at_ms or 0) / 1000
     best = None
     best_delta = None
     for item in items:
-        if item["model"] != model or item["prompt_tokens"] != prompt_tokens or item["completion_tokens"] != completion_tokens:
+        if item["model"] not in names or item["prompt_tokens"] != prompt_tokens or item["completion_tokens"] != completion_tokens:
             continue
         delta = abs(item["created_at"] - ended_seconds) if ended_seconds else 0
         if ended_seconds and delta > _LOG_MATCH_WINDOW_SECONDS:
@@ -300,19 +306,20 @@ def _match_log(breakdown: dict, model: str, ended_at_ms: int | None) -> dict | N
     return best
 
 
-async def cost_for(breakdown: dict | None, model: str, ended_at_ms: int | None = None) -> dict | None:
+async def cost_for(breakdown: dict | None, model: str, ended_at_ms: int | None = None,
+                   request_model: str | None = None) -> dict | None:
     """Return {quota, usd, source, pricing_model} or None when the bill is unknown."""
     if not _enabled() or not breakdown or not model:
         return None
     await refresh_catalog()
     await refresh_logs()
     quota_per_unit = int(_catalog.get("quota_per_unit") or Config.NEWAPI_QUOTA_PER_UNIT)
-    matched = _match_log(breakdown, model, ended_at_ms)
+    matched = _match_log(breakdown, (model, request_model), ended_at_ms)
     if matched is not None:
         quota = matched["quota"]
         return {"quota": quota, "usd": float(Decimal(quota) / Decimal(quota_per_unit or 1)),
                 "source": "newapi-log", "pricing_model": matched["model"]}
-    computed = compute_quota(breakdown, model)
+    computed = compute_quota(breakdown, model, request_model)
     if computed is None:
         return None
     computed["usd"] = float(Decimal(computed["quota"]) / Decimal(quota_per_unit or 1))
