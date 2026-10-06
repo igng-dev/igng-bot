@@ -312,6 +312,13 @@ export class SocialRuntime {
   account(runtime,session,event) {
     const record=runtime.accounting.apply(event,runtime.state.lastIncoming());
     if(record) {
+      // A later settlement for the same (turn, step) supersedes the earlier one:
+      // drop the pending row and let the exporter replace the already-mirrored
+      // attempt, so the same model call is never billed twice.
+      if(record.supersedes_seq!=null) {
+        record.supersedes_record_id=`${session.id}:${record.supersedes_seq}`;
+        runtime.pendingRecords.delete(record.supersedes_seq);
+      }
       const row=[`${session.id}:${event.seq}`,session.id,event.seq,record];
       runtime.pendingRecords.set(event.seq,row);
       runtime.accountingWrite=runtime.accountingWrite.catch(()=>{}).then(async()=>{

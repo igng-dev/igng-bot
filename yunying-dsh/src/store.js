@@ -252,6 +252,7 @@ export class MySQLStore {
     });
   }
   async recordCall(recordId, sessionId, seq, payload) {
+    if(payload?.supersedes_record_id) await this.query('DELETE FROM yunying_ai_records WHERE record_id=?', [payload.supersedes_record_id]);
     await this.query('INSERT IGNORE INTO yunying_ai_records (record_id,dsh_session_id,request_seq,payload) VALUES (?,?,?,?)', [recordId, sessionId, seq, JSON.stringify(payload)]);
   }
 }
