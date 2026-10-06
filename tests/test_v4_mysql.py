@@ -269,9 +269,10 @@ def test_native_settlement_replacement_deletes_the_superseded_attempt(monkeypatc
           'user_prompt':'替换结算','response_content':'','tool_calls':[],'duration_ms':20,'success':True,'error_message':'',
           'started_at':1700000000000,'ended_at':1700000000020,'native_turn':7,'native_step':1}
     def breakdown(input_tokens,output_tokens):
-        return {'input_tokens':input_tokens,'output_tokens':output_tokens,'cache_read_tokens':0,'cache_write_tokens':0,
-                'reasoning_tokens':0,'prompt_tokens':input_tokens,'completion_tokens':output_tokens,
-                'total_tokens':input_tokens+output_tokens,'cached_tokens':0}
+        # Same camelCase shape the live Node accounting writes.
+        return {'input':input_tokens,'output':output_tokens,'cacheRead':0,'cacheWrite':0,
+                'reasoning':0,'prompt':input_tokens,'completion':output_tokens,
+                'total':input_tokens+output_tokens,'cached':0}
     first={**base,'attempt_no':1,'token_usage':{'inputTokens':10,'outputTokens':5},'token_breakdown':breakdown(10,5)}
     second={**base,'attempt_no':2,'token_usage':{'inputTokens':12,'outputTokens':6},'token_breakdown':breakdown(12,6),
             'supersedes_seq':1,'supersedes_record_id':f'{sid}:1'}
