@@ -139,3 +139,17 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 | `npm --prefix yunying-dsh run check`、`bash scripts/privacy-scan.sh`、`git diff --check`、部署脚本与 Profile shell 语法 | 通过。 |
 
 覆盖：逐事件取舍（`tool/result` 正文只留 callId/isError/字节数；助手原始流、request 工具 schema、Inbox splice 不落库）、`YUNYING_SESSION_TOOL_RESULTS` 默认 `none`、实时投影顺序、重启后按官方日志幂等回填无重复、真实库中 `tool/result.content` 全为 NULL。未做：生产库迁移、NAS 部署、真实 QQ/模型验收。本轮本机 Node 为 v22.22.1，与 `package.json` 的 `engines>=24` 不同；部署镜像（Node24）需复核，CI 仍用 Node24。
+
+## 过程报告与心跳回退
+
+新增 Profile 进度报告：带工具调用的中间步骤文本按模型配置转发到 QQ；配置为无过程输出的模型由 30 秒心跳回退（命令/搜索/思考计数）；收尾答复仍只经 `qq_send_message`。验证使用独立 loopback MariaDB 11.8.6（`127.0.0.1:33316`，仅 `yunying_v4_test`）与设备共享 Node 缓存，未连接生产数据库、真实 QQ 或付费模型。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q`（共享 venv CPython3.12.13，PATH 含 pnpm） | **132 passed, 0 skipped**；含真实官方 DSH CLI 双进程 smoke。 |
+| `YUNYING_TEST_DB=yunying_v4_test npm --prefix yunying-dsh test`（本机 Node v22.22.1） | **53 passed, 0 skipped**；真实 SQL + 官方 DSH。 |
+| `npm --prefix yunying-dsh test`（离线） | **50 passed, 3 skipped**（3 条为真实数据库 opt-in）。 |
+| `python -m pytest tests -q`（离线） | **118 passed, 14 skipped**（opt-in）。 |
+| `npm --prefix yunying-dsh run check`、`bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh`、`bash scripts/privacy-scan.sh`、`git diff --check` | 通过。 |
+
+新增 Node 回归：`progress.test.js` 覆盖模式选择/文本截断/心跳文案、转发只发中间步骤且不发收尾文本、每轮上限、心跳计数与轮末停止、`off` 全关。本机 Node 为 v22.22.1（`engines>=24`，部署镜像与 CI 为 Node24）；真实模型风格、真实 QQ 心跳送达与 NAS 长时运行仍未验收。

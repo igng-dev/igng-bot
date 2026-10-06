@@ -9,6 +9,7 @@ import { bindWakePrompts } from '../donor/qq-bridge/wake-prompts.js';
 import { serializeModelData } from '../donor/qq-bridge/qq-model-view.js';
 import { allowed, bounded, canonicalKey, PolicyError } from './policy.js';
 import { projectEvent, toolResultMode } from './transcript.js';
+import { countToolCall, emptyProgress, forwardableText, heartbeatText, progressMode } from './progress.js';
 const donorPreset = yaml.load(readFileSync(new URL('../donor/qq-bridge/agent.cordis.yml',import.meta.url),'utf8'));
 // The YAML's >- folding is significant: preserve the evaluated original prefix, not a hand-reflowed version.
 export const RESERVED2_PROMPT = donorPreset.find(row=>row.name==='@dsh-persona' || row.name==='@deepseek-ai/dsh-persona')?.config.prefix
@@ -85,7 +86,7 @@ export class SocialRuntime {
     const runtime={state,store:this.store,config:this.config,infra:this.infra,messageReceipts:new Map(),
       accounting:new NativeAccounting(mapping.dsh_session_id,key,this.config),accountingWrite:Promise.resolve(),pendingRecords:new Map(),directCandidates:new Map(),directEventId:null,directUntil:0,
       transcriptMode:toolResultMode(),pendingTranscript:new Map(),transcriptWrite:Promise.resolve(),transcriptScheduled:false,
-      handle:null,timers:new Map(),wakePending:false,wakeMiss:0,recordTasks:new Set(),committedMessageIds:new Set(),pendingReason:null,closedThrough:state.lastReadThroughSeq,
+      handle:null,timers:new Map(),progress:null,progressMode:progressMode(this.config,this.config.model),wakePending:false,wakeMiss:0,recordTasks:new Set(),committedMessageIds:new Set(),pendingReason:null,closedThrough:state.lastReadThroughSeq,
       refreshPolicy:()=>this.refreshPolicy(runtime),permitted:()=>this.permitted(runtime),
       schedule:()=>this.schedule(runtime),cancelReplyCheck:()=>this.clearTimer(runtime,'reply'),
       scheduleReplyCheck:()=>this.timer(runtime,'reply',this.config.replyCheckMs,()=>this.wake(runtime,'replyCheck'))};
@@ -115,6 +116,7 @@ export class SocialRuntime {
       scoped.on('session/event',(session,event)=>{
         if(session.id!==agent.id)return;
         this.transcript(runtime,session,event);
+        this.progressEvent(runtime,event);
         if(event.type==='user/message') {
           runtime.directCandidates.delete(event.data.id);
           const receipts=runtime.messageReceipts.get(event.data.id);if(receipts){state.note(receipts);runtime.messageReceipts.delete(event.data.id);}
@@ -293,6 +295,58 @@ export class SocialRuntime {
       const hasNewPending=agent.inbox.hasPending;
       if(hasNewPending)this.timer(runtime,'pending',10,()=>this.wake(runtime,reason,true));
     }
+  }
+  progressEvent(runtime,event) {
+    const data=event.data||{};
+    if(event.type==='turn/start')this.startProgress(runtime,Number.isInteger(data.turn)?data.turn:0);
+    else if(event.type==='step/start'){if(runtime.progress)runtime.progress.steps++;}
+    else if(event.type==='tool/call'){if(runtime.progress)countToolCall(runtime.progress,String(data.name||''));}
+    else if(event.type==='assistant/message')this.forwardProgress(runtime,event);
+    else if(event.type==='turn/end')this.stopProgress(runtime);
+  }
+  startProgress(runtime,turn) {
+    this.stopProgress(runtime);
+    if(runtime.progressMode==='off'||this.stopping)return;
+    runtime.progress=emptyProgress(turn);
+    if(runtime.progressMode==='heartbeat')this.armHeartbeat(runtime);
+  }
+  stopProgress(runtime) {
+    this.clearTimer(runtime,'progress');
+    runtime.progress=null;
+  }
+  armHeartbeat(runtime) {
+    const progress=runtime.progress;
+    if(!progress)return;
+    this.timer(runtime,'progress',this.config.progressIntervalMs,async()=>{
+      if(runtime.progress!==progress)return;
+      const agent=runtime.handle?.agent;
+      if(!agent||agent.status!=='running')return;
+      await this.refreshPolicy(runtime);
+      if(runtime.progress!==progress||!this.permitted(runtime)||progress.heartbeats>=this.config.progressMaxHeartbeatPerTurn)return;
+      progress.heartbeats++;
+      await this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:hb:${progress.heartbeats}`,heartbeatText(progress));
+      if(runtime.progress===progress)this.armHeartbeat(runtime);
+    });
+  }
+  forwardProgress(runtime,event) {
+    if(runtime.progressMode!=='forward')return;
+    const progress=runtime.progress,message=event.data?.message;
+    if(!progress||!message||!this.permitted(runtime))return;
+    // Only intermediate steps carry tool calls; the closing answer stays tool-only.
+    if(!(Array.isArray(message.content)?message.content:[]).some(item=>item?.type==='tool-call'))return;
+    const now=Date.now();
+    if(progress.forwarded>=this.config.progressMaxForwardPerTurn||now-progress.lastForwardAt<this.config.progressMinGapMs)return;
+    const text=forwardableText(message.content);if(!text)return;
+    progress.lastForwardAt=now;progress.forwarded++;
+    const seq=Number.isSafeInteger(Number(event.seq))?Number(event.seq):progress.forwarded;
+    void this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:fwd:${seq}`,text).catch(error=>this.report(error));
+  }
+  async sendProgress(runtime,id,text) {
+    // Same fixed QQ capability as the model tools. Python re-checks speaking
+    // permission (chat mode or the active direct-call window) and the send
+    // ledger keeps the request idempotent; failures are deferred, never retried.
+    return this.infra('/send',{key:runtime.state.key,requestId:`progress:${id}`,message:text,
+      ...(runtime.directEventId?{triggerEventId:runtime.directEventId}:{})});
   }
   schedule(runtime) {
     if(this.stopping||!runtime.state.chatMode)return;

@@ -26,6 +26,13 @@ export const toolResponse=(id,name,args)=>[
  {type:'tool-call-delta',index:0,id,name,argumentsDelta:JSON.stringify(args)},
  {type:'block-end',index:0,block:{type:'tool-call',id,name,arguments:JSON.stringify(args)}},
  {type:'usage',usage:{inputTokens:10,outputTokens:5}},{type:'finish',reason:{kind:'tool-calls'}}];
+export const textToolResponse=(text,id,name,args)=>[
+ {type:'block-start',index:0,blockType:'text'},
+ {type:'block-end',index:0,block:{type:'text',text}},
+ {type:'block-start',index:1,blockType:'tool-call'},
+ {type:'tool-call-delta',index:1,id,name,argumentsDelta:JSON.stringify(args)},
+ {type:'block-end',index:1,block:{type:'tool-call',id,name,arguments:JSON.stringify(args)}},
+ {type:'usage',usage:{inputTokens:10,outputTokens:5}},{type:'finish',reason:{kind:'tool-calls'}}];
 export class ScriptAdapter extends LlmAdapter {
  constructor(script=[]){super();this.script=script;this.requests=[];this.active=0;this.maxActive=0;}
  async resolveModel(provider,model){return {provider,id:model,name:model,context:{contextWindow:200000},inputModalities:['text','image']};}
