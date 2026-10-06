@@ -49,7 +49,7 @@ export async function harness(adapter=new ScriptAdapter(),root) {
  return {ctx,adapter,root};
 }
 export class FixtureStore {
- constructor(){this.healthy=true;this.maps=new Map();this.rows=new Map();this.bindings=new Map();this.calls=[];this.failDeliveryOnce=false;}
+ constructor(){this.healthy=true;this.maps=new Map();this.rows=new Map();this.bindings=new Map();this.calls=[];this.transcripts=[];this.failDeliveryOnce=false;}
  async mapping(key){if(!this.maps.has(key))this.maps.set(key,{conversation_key:key,dsh_session_id:randomUUID(),provisioning_status:'provisioning',social_state:null});return structuredClone(this.maps.get(key));}
  async mappings(){return [...this.maps.values()].map(v=>structuredClone(v));}
  async policy(key){const row=this.maps.get(key);return {chatMode:row?.chatMode??true};}
@@ -64,6 +64,8 @@ export class FixtureStore {
  async delivered(id){if(this.failDeliveryOnce){this.failDeliveryOnce=false;throw new Error('simulated SQL acknowledgement failure');}this.rows.get(id).delivered=1;}
  async identity(qq){return {external_id:qq,identity_id:qq};}
  async recordCall(...args){this.calls.push(args);}
+ async recordSessionEvents(rows){for(const row of rows)this.transcripts.push(structuredClone(row));}
+ async sessionEventFloor(id){return this.transcripts.filter(row=>row.dsh_session_id===id).reduce((floor,row)=>Math.max(floor,row.event_seq),-1);}
 }
 export const event=(id,key='group:1001',extra={})=>({eventId:id,key,kind:'message',messageId:String(id),userId:'2001',sender:'群友',text:'今天风很舒服',plain:'今天风很舒服',isSelf:false,time:Date.now(),...extra});
 export async function durableEvents(ctx,id){const h=await ctx.sessionPersistence.open(id,'read');try{return(await h.read()).events;}finally{await h.close();}}

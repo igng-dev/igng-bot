@@ -127,3 +127,15 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 
 实际 MySQL 恢复证明的 schema 表示修订后，补充冗余 charset / 实际类型和排序规则 / 默认值与备注原文的差异回归；最终 Python114 / Node30（独立 MySQL8.0.36及官方双进程，无 skip）。证明对实际列定义也独立做哈希；不能以 DDL 等价归一化掩盖真实 schema 差异。
+
+## 会话投影（MySQL transcript projection）
+
+新增 `008_session_transcript.sql` 与 `yunying_session_events` 过滤投影；官方 JSONL/附件仍是权威与恢复源，投影表可重建。验证使用独立 loopback MariaDB11.8.6（`127.0.0.1:33316`，root/空密码，仅 `yunying_v4_test`），未连接生产数据库、真实 QQ 或付费模型。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `YUNYING_TEST_DB=yunying_v4_test python -m pytest tests -q`（共享 venv CPython3.12.13） | **113 passed, 1 skipped**（skip 为未开启双进程 smoke）；测试库成功应用 006/007/008，无 checksum 冲突。 |
+| `YUNYING_TEST_DB=yunying_v4_test npm --prefix yunying-dsh test`（Node v22.22.1） | **39 passed, 0 skipped**；含真实 SQL + 官方 DSH JSONL 的重启回填断言。 |
+| `npm --prefix yunying-dsh run check`、`bash scripts/privacy-scan.sh`、`git diff --check`、部署脚本与 Profile shell 语法 | 通过。 |
+
+覆盖：逐事件取舍（`tool/result` 正文只留 callId/isError/字节数；助手原始流、request 工具 schema、Inbox splice 不落库）、`YUNYING_SESSION_TOOL_RESULTS` 默认 `none`、实时投影顺序、重启后按官方日志幂等回填无重复、真实库中 `tool/result.content` 全为 NULL。未做：生产库迁移、NAS 部署、真实 QQ/模型验收。本轮本机 Node 为 v22.22.1，与 `package.json` 的 `engines>=24` 不同；部署镜像（Node24）需复核，CI 仍用 Node24。
