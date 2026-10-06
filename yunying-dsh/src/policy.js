@@ -32,6 +32,12 @@ export function settings(env = process.env) {
     maxWakeMinute: 1, maxWakeHour: 12, maxSendMinute: 8, maxSendHour: 60,
     proactiveMinMs: 1800000, proactiveMaxMs: 5400000, proactiveIdleMs: 900000,
     proactiveProbability: .3, replyCheckMs: 30000,
+    // Progress reporting: models that emit interim text get it forwarded; the
+    // configured silent-model list falls back to a bounded heartbeat instead.
+    progressReports: (()=>{const mode=(env.YUNYING_PROGRESS_REPORTS||'auto').trim().toLowerCase();if(!['auto','off'].includes(mode))throw new Error('unsupported progress reports mode');return mode;})(),
+    progressModelsWithout: new Set((env.YUNYING_MODELS_WITHOUT_PROGRESS || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean)),
+    progressIntervalMs: integer(env.YUNYING_PROGRESS_INTERVAL_MS, 5000, 300000, 30000),
+    progressMinGapMs: 8000, progressMaxForwardPerTurn: 6, progressMaxHeartbeatPerTurn: 20,
   };
 }
 export function allowed(key, config) {

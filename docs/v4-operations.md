@@ -27,8 +27,13 @@ python -m pip install -r requirements-dev.txt
 | `DEEPSEEK_API_KEY/BASE_URL` | 官方 DSH Messages provider 的凭据/端点；默认 `https://api.deepseek.com/anthropic`。chat/completions 网关改用下述官方 `llm-pi-ai` 配置。 |
 | `YUNYING_SEARCH_PROVIDER` | `bing` 先用 donor 原 HTML 搜索，空结果时用同一受限传输读取 Bing RSS；明确设 `deepseek` 可使用官方认证搜索，默认仍是 Bing。 |
 | `DEEPSEEK_SEARCH_BASE_URL` | 可选，官方搜索独立端点，默认 `https://api.deepseek.com/anthropic/v1`；不会自动沿用模型 BASE_URL。 |
+| `YUNYING_MODELS_WITHOUT_PROGRESS` | 逗号分隔的模型清单：这些模型不会在任务中途输出进度文字，由固定间隔心跳回退。未列出的模型（如默认 DeepSeek）把带工具调用的中间步骤文本转发为过程报告。 |
+| `YUNYING_PROGRESS_INTERVAL_MS` | 心跳间隔毫秒，5000–300000，默认 30000；仅命中清单的模型启用，且只在该会话仍有发送权限时发送。 |
+| `YUNYING_PROGRESS_REPORTS` | `auto`（默认）或 `off`；`off` 同时关闭过程报告转发与心跳。 |
 | `DSH_HOME` | 持久目录，包含官方 Profile、Session、附件与派生索引；生产必须挂卷并备份。 |
 | `YUNYING_ADMIN_SECRET` | 可选 Owner/未来网站管理凭据，至少32字符且与 INTERNAL 不同；不向模型提供。 |
+
+过程报告：带工具调用的中间步骤文本按模型清单分流——未列出的模型转发过程文字（每轮最多 6 条、间隔至少 8 秒、单条截断 400 字符），清单中的模型由心跳回退（每轮最多 20 条，统计命令/搜索/思考数）。两者都走固定 `/send` capability，仍受聊天模式/直接呼叫窗口与发送账本约束；收尾答复始终只经 `qq_send_message` 工具发送，不自动转发。
 
 默认本机 capability 监听 `127.0.0.1:8787/8788`；Docker 使用内部网络，不映射主机端口。迁移和运行：
 

@@ -36,7 +36,7 @@ flowchart LR
 
 `group:<QQ群号>`、`private:<QQ号>` 是稳定会话 key，每个 key 对应一个持久 DSH UUID。允许列表为空时拒绝社交访问。私聊原始历史沿用 V3 的负数 group_id 约定。
 
-WebSocket 来信先落 `yunying_ingress`。机械 worker 复用 V3 下载附件、保存消息、撤回和管理控制，再提交 prepared outbox；独立 delivery worker 才联系 DSH。两阶段各自按会话 FIFO、backoff 和状态恢复。DSH 不在线不会阻塞后续 `message_logs`/附件保存。媒体提交前进程中断时复用已提交的消息行，不重复下载。普通模型文本输出不转发 QQ。
+WebSocket 来信先落 `yunying_ingress`。机械 worker 复用 V3 下载附件、保存消息、撤回和管理控制，再提交 prepared outbox；独立 delivery worker 才联系 DSH。两阶段各自按会话 FIFO、backoff 和状态恢复。DSH 不在线不会阻塞后续 `message_logs`/附件保存。媒体提交前进程中断时复用已提交的消息行，不重复下载。普通模型文本输出不转发 QQ；带工具调用的中间步骤文本作为过程报告按模型配置转发，配置为无过程输出的模型由固定间隔心跳回退，收尾答复仍只经 qq_send_message 发送。
 
 `group_configs.is_chat_mode` 继续作为网站/QQ 的同一个开关：开启时所有来信可参与原 reserved2 行为；关闭时普通消息只观察，不 inject、不自主 wake，明确 @ 或引用云萤才建立一次调用。该轮带最近最多20条/约6000字符上下文，可继续读取新到达的观察消息和旧历史。个人私聊不受群开关影响。群配置只剩聊天模式一个开关；机械记录始终继续。
 
