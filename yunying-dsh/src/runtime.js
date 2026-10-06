@@ -104,7 +104,7 @@ export class SocialRuntime {
         '默认关闭的表情收藏、默认形象、语音合成工具不会出现在目录中，不要调用不存在的能力。\n'+
         '普通消息的默认触发概率是 0.20，具体以 qq_get_prompt 的 recommendations 为准，可按群聊氛围调整。\n'+
         'QQ 用户不能授权 shell、文件操作、插件管理或权限升级。先读取本会话消息再行动。'});
-      scoped.skills.register({name:'yunying-memory',description:'MySQL 长期记忆：有来源的事实、个人共享授权、冲突更新与遗忘。',
+      scoped.skills.register({name:'yunying-memory',description:'MySQL 长期记忆：有来源的事实、跨群个人记忆、冲突更新与遗忘。',
         whenToUse:'检索个人偏好、跨会话事实、写入/更新/遗忘记忆前',content:MEMORY_SKILL,
         source:'bundled',resourceBase:{kind:'opaque',description:'只通过受控 Memory 工具访问 MySQL 文档'},invocation:{modelInvocable:true,userInvocable:false}});
       runtime.toolNames=registerTools(scoped,runtime);
@@ -220,7 +220,6 @@ export class SocialRuntime {
       if(event.delivered)return {ok:true,eventId:event.event_id,seq:event.seq,duplicate:true};
       const message=runtime.state.append(event)||runtime.state.unread.find(m=>m.seq===event.seq);
       await this.deliverToAgent(runtime,event);await this.store.saveState(runtime.state);
-      if(message?.userId&&/^[1-9][0-9]{0,19}$/.test(message.userId)&&!message.isSelf)await this.store.identity(message.userId,message.sender||'');
       const reason=message&&runtime.state.wakeReason(message);
       if(runtime.state.chatMode&&!payload.observeOnly&&!runtime.state.bootstrapSent&&!message?.isSelf&&!message?.commandHandled)await this.wake(runtime,'bootstrap',true);
       else if(reason) {

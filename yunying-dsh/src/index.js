@@ -27,7 +27,7 @@ export async function route(request,runtime,config) {
   if(request.url==='/admin/memory/read')return store.memoryRead(actor,data.id,true);
   if(request.url==='/admin/memory/versions')return {ok:true,versions:await store.adminVersions(data.id)};
   if(request.url==='/admin/memory/update') {
-    // Website edits retain immutable scope/visibility/identity; CAS and version history are mandatory.
+    // Website edits retain immutable scope/visibility; CAS and version history are mandatory.
     const old=(await store.memoryRead(actor,data.id,true)).document;
     return store.transaction(async conn=>{
       const [rows]=await conn.execute('SELECT * FROM memory_documents WHERE id=? FOR UPDATE',[data.id]);
@@ -39,18 +39,6 @@ export async function route(request,runtime,config) {
   }
   if(request.url==='/admin/memory/rollback')return store.adminRollback(data.id,data.version,data.expectedVersion,data.reason);
   if(request.url==='/admin/memory/forget')return store.memoryUpdate(actor,data,true);
-  if(request.url==='/admin/identity/bind') {
-    const provider=bounded(data.provider,32),externalId=bounded(data.externalId,80),identityId=bounded(data.identityId,36);
-    if(!/^[a-z0-9_-]+$/.test(provider))throw new PolicyError('invalid provider');
-    return store.transaction(async conn=>{
-      const [identity]=await conn.execute('SELECT id FROM memory_identities WHERE id=?',[identityId]);if(!identity.length)throw new PolicyError('identity unavailable');
-      const [existing]=await conn.execute('SELECT identity_id FROM memory_identity_bindings WHERE provider=? AND external_id=? FOR UPDATE',[provider,externalId]);
-      if(existing.length&&existing[0].identity_id!==identityId)throw new PolicyError('existing verified binding cannot be overwritten');
-      await conn.execute("INSERT IGNORE INTO memory_identity_bindings (provider,external_id,identity_id,verified_by) VALUES (?,?,?,'owner-api')",[provider,externalId,identityId]);
-      await conn.execute('INSERT INTO memory_identity_audit (provider,external_id,identity_id,operation,actor,detail) VALUES (?,?,?,\'bind\',\'owner-api\',?)',[provider,externalId,identityId,JSON.stringify({reason:bounded(data.reason,500)})]);
-      return {ok:true};
-    });
-  }
   if(request.url==='/admin/session/events') {
     const sessionId=bounded(data.sessionId,80);
     const events=await store.sessionEvents(sessionId,data.after,integer(data.limit,1,5000,1000));

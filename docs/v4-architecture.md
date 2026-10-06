@@ -15,7 +15,7 @@ flowchart LR
   A --> S[Official Session JSONL + compaction]
   A --> T[Scoped QQ / search / Memory tools]
   T --> I
-  T --> M[(Markdown Memory + revisions + identity)]
+  T --> M[(Markdown Memory + revisions + sources)]
   DB --> W[Existing website history / AI mirrors]
   M --> O[Separate Owner API / future website management]
 ```
@@ -62,9 +62,9 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 | --- | --- | --- |
 | Raw QQ | 原 `message_logs`、附件树、撤回状态 | 网站历史、媒体和来源证据；不替代 Agent Session。 |
 | Runtime Session | 官方 DSH JSONL/附件持久目录（权威）；MySQL `yunying_session_events` 为过滤投影 | 模型真实运行历史、原生 Inbox、工具结果、request context、compaction；不把 summary 当长期记忆。投影表供查询/还原，可从官方日志重建。 |
-| Long-term Memory | MySQL Markdown 文档/版本/来源/Identity | 稳定事实与长期约定；模型受控访问，Owner/未来网站管理。 |
+| Long-term Memory | MySQL Markdown 文档/版本/来源 | 稳定事实与长期约定；模型受控访问，Owner/未来网站管理。 |
 
-新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`、`yunying_session_events`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅增加结构，不删除、重写或导入 V3 context summary。003 在 ingress 增加机械阶段状态、独立重试/时间/错误与命令结果，在 sessions 增加真实呼叫的 event/到期权限；004 增加机械队列索引；008 增加会话事件的过滤投影表。既有记录回填为已完成机械阶段，已应用001/002保持原 checksum。V4 启动只初始化消息、撤回和群配置，不再初始化/seed 旧摘要和 system Prompt；V3 rollback 初始化器保留。
+新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`、`yunying_session_events`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅增加结构，不删除、重写或导入 V3 context summary。003 在 ingress 增加机械阶段状态、独立重试/时间/错误与命令结果，在 sessions 增加真实呼叫的 event/到期权限；004 增加机械队列索引；008 增加会话事件的过滤投影表；010 把来源链并入 `memory_versions.sources`，身份/绑定/身份审计与访问审计不再被运行时代码使用（退役由受控运维阶段执行）。既有记录回填为已完成机械阶段，已应用001/002保持原 checksum。V4 启动只初始化消息、撤回和群配置，不再初始化/seed 旧摘要和 system Prompt；V3 rollback 初始化器保留。
 
 正式用量继续写既有 `igng_sites.ai_jobs/ai_job_attempts`：每个原生 turn 一个 `social_turn` job，续接和失败重试为 attempts；compaction 是独立 `dsh_compaction` job。任务 key 来自 Session UUID 与原生 turn/compaction ID，request_id 来自 Session UUID 与 event seq。SQL事务和任务锁去重，每次从 attempts 重算总量；provider/cache 用量来自原生事件，未知 usage 的 attempt tokens 为 NULL，job只合计已知值并记录未知次数。模型沉默仍计费。
 
@@ -72,9 +72,9 @@ Token 记账对齐 tokscale 的 DSH 解析：五桶（未命中缓存的 input�
 
 `yunying_ai_records` 保存按原生 seq 排序的尝试/任务结束 outbox，网站故障时重试；官方 Session 回放可重建相同键。导出首先按原生 task key 写通用表，独立于 call_log_id；随后兼容写 `call_logs`，供尚未迁移的网站旧调用页读取。历史日志与既有旧镜像 job 保留，不重算过去的0用量。
 
-Memory 分两层，SQL 在匹配、计数、snippet 之前过滤。**群记忆**按会话（`scope_key`）保存，只在本群/本私聊可读；**个人记忆**以 QQ 号（`memory_documents.person_qq`）为基准保存，天然跨群。读取时把最近发言的 QQ 解析到其 IGNG 账号（`igng_sites.user_qqs`，经 Python `/identity` capability），聚合该账号名下全部 QQ 的个人记忆，再叠加当前会话的群记忆；QQ 没有 IGNG 归属时只返回它自己的个人记忆，解析失败按"只看自己"失败关闭。个人记忆来源必须是本人已查看、未撤回的真实消息，正文由服务端引用本人原话生成，禁止模型把别群私有 prose 粘入；来源链与访问审计保留在 `memory_sources`/`memory_audit`，跨群结果不返回来源群号。身份按 provider+external_id 唯一绑定；跨平台绑定只可经独立 Owner API，模型不能绑定身份。
+Memory 分两层，SQL 在匹配、计数、snippet 之前过滤。**群记忆**按会话（`scope_key`）保存，只在本群/本私聊可读；**个人记忆**以 QQ 号（`memory_documents.person_qq`）为基准保存，天然跨群。读取时把最近发言的 QQ 解析到其 IGNG 账号（`igng_sites.user_qqs`，经 Python `/identity` capability），聚合该账号名下全部 QQ 的个人记忆，再叠加当前会话的群记忆；QQ 没有 IGNG 归属时只返回它自己的个人记忆，解析失败按"只看自己"失败关闭。个人记忆来源必须是本人已查看、未撤回的真实消息，正文由服务端引用本人原话生成，禁止模型把别群私有 prose 粘入；来源链随版本保存在 `memory_versions.sources`，跨群结果不返回来源群号。个人身份直接以 QQ 号（`person_qq`）为键，经 `igng_sites.user_qqs` 解析同一 IGNG 账号；不设本地身份表，模型不能绑定或转移身份。
 
-更新使用 `expectedVersion` 乐观锁，版本、hash、来源和审计在同一事务提交。Forget 对模型隐藏内容，保留受控审计版本；Owner rollback 创建新版本。Owner secret 与 infrastructure secret 必须分开，默认无 owner endpoint 的 host port。以后网站可直接使用管理 API；本次不改站点仓库或清理用户历史；正式记忆未灌入伪造测试文档。
+更新使用 `expectedVersion` 乐观锁，版本、hash 与来源在同一事务提交。Forget 对模型隐藏内容，保留受控版本；Owner rollback 创建新版本。Owner secret 与 infrastructure secret 必须分开，默认无 owner endpoint 的 host port。以后网站可直接使用管理 API；本次不改站点仓库或清理用户历史；正式记忆未灌入伪造测试文档。
 
 `yunying_session_events` 是官方 Session 日志的**过滤投影**，不是 durability：JSONL/附件仍是权威与恢复源，投影表可随时用官方日志重建。它保留 turn/step 边界、system/developer/user/assistant 消息、tool 调用（含原始参数）、request 路由与 compaction 摘要，并按设计丢弃可再生的杂碎——助手原始流、工具结果正文（只留 callId/isError/字节数占位）、request 工具 schema、Inbox splice。读写接口、环境开关与重建命令见 [会话投影](v4-session-transcript.md)。
 
