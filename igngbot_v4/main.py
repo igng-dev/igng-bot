@@ -9,15 +9,15 @@ import signal
 import threading
 import uuid
 from aiohttp import ClientSession, ClientTimeout, web
-from igngbot_v3.config import Config
-from igngbot_v3.db import DBHandler
-from igngbot_v3.storage import StorageHandler
-from igngbot_v3.message_ingest import persist_message
-from igngbot_v3.message_parser import parse_message
-from igngbot_v3.onebot_client import OneBotClient
-from igngbot_v3.mc_ticket_notifications import McTicketNotifier
-from igngbot_v3.timeutil import unix_to_utc_naive
-from igngbot_v3.call_log_db import mirror_call_to_site, close_call_log_pool
+from igngbot_shared.config import Config
+from igngbot_shared.db import DBHandler
+from igngbot_shared.storage import StorageHandler
+from igngbot_shared.message_ingest import persist_message
+from igngbot_shared.message_parser import parse_message
+from igngbot_shared.onebot_client import OneBotClient
+from igngbot_shared.mc_ticket_notifications import McTicketNotifier
+from igngbot_shared.timeutil import unix_to_utc_naive
+from igngbot_shared.call_log_db import mirror_call_to_site, close_call_log_pool
 from .ai_records import mirror_native_record, historical_record
 from .journal import Journal, decode, encode
 from .migrate import connect, migrate

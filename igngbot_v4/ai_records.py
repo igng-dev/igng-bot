@@ -12,7 +12,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from igngbot_v3 import call_log_db as legacy
+from igngbot_shared import call_log_db as legacy
 from . import newapi_billing
 
 

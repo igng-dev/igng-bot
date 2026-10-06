@@ -65,3 +65,18 @@ reserved2 Social Prompt、QQ工具契约、官方Loop/Compaction、Memory跨群/
 归档恢复保留清理后新增数据；遇到已存在且不同的旧表/字段值拒绝覆盖。完整SQL回灌只作灾难恢复，不能覆盖在线新消息。完整步骤与 guard 见 [操作手册](v4-retirement.md)。清理阶段提供的受控工具不向模型暴露SQL、备份或通用文件读写。
 
 代码集成：[机器人PR6](https://github.com/igng-dev/igng-bot/pull/6)、[恢复证明PR8](https://github.com/igng-dev/igng-bot/pull/8)、[网站PR42](https://github.com/igng-dev/igng-sites/pull/42)均已合并。PR7已被相同内容的线性PR8替代关闭。
+
+## 本次代码分支复核状态（2026-10-06）
+
+本节只记录当前 `agent/v3-retirement-audit` 分支的本地复核结果，不改写上文 2026-10-05 的生产执行与验收记录。当前分支没有再次执行破坏性 SQL，也没有把本地测试结果冒充线上门禁。
+
+| 复核项 | 当前结果 |
+| --- | --- |
+| Python 回归 | `/tmp/opencode/igngbot-v3-retirement-venv/bin/python -m pytest tests -q`：122 passed，14 skipped。 |
+| 编译与脚本检查 | `python -m compileall -q igngbot_shared igngbot_v3 igngbot_v4 scripts tests`、部署脚本 `bash -n`、Profile 脚本 `sh -n`、`bash scripts/privacy-scan.sh`、`git diff --check` 均通过。 |
+| 目标回归 | 迁移 runner 与 recall 相关测试共 5 passed。 |
+| 一次性 MySQL / 官方双进程 | 未执行：当前环境未设置 `YUNYING_TEST_DB`，`127.0.0.1:33316` 无监听，且 Docker 不可用。 |
+| Node | `npm --prefix yunying-dsh run check` 通过；`npm --prefix yunying-dsh test` 已尝试但因当前 Node `v22.22.1` 低于项目要求 `>=24`，且本地未安装 `mysql2`、`js-yaml` 和 DSH peer 依赖而失败，不能作为通过结果。 |
+| 线上与破坏性门禁 | 本次分支复核未重新验证 NAS、网站消费者、历史查询、对账、恢复副本或生产数据库状态；因此不据此授权或执行 live retirement。 |
+
+剩余 `scripts/accounting-reconcile.py`、`scripts/backfill_forward_messages.py`、`scripts/backfill_message_thumbnails.py` 与 `scripts/migrate_chat_system_prompt.py` 对 `igngbot_v3` 的引用属于现有兼容 facade 或显式运维入口；本次不将这些脚本误删为 V3 运行时。
