@@ -272,10 +272,13 @@ class Retirement:
 
     def media_columns(self, apply=False):
         with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='message_logs' AND COLUMN_NAME='audio_transcript'")
+            if not cur.fetchone()["n"]:
+                raise ValueError("audio_transcript must exist before media retirement")
             cur.execute("SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,COLUMN_COMMENT,COLLATION_NAME,ORDINAL_POSITION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='message_logs' AND COLUMN_NAME IN ('file_url','file_type','audio_file_path') ORDER BY ORDINAL_POSITION")
             columns = cur.fetchall()
         if not columns:
-            return {"stage": "media-columns", "already_retired": True}
+            return {"stage": "media-columns", "already_retired": True, "audio_transcript": "retained"}
         if len(columns) != 3:
             raise ValueError("unexpected partial media schema")
         with self.conn.cursor() as cur:
@@ -283,7 +286,7 @@ class Retirement:
             order = {r["ORDINAL_POSITION"]: r["COLUMN_NAME"] for r in cur.fetchall()}
             for col in columns:
                 col["after"] = order.get(col["ORDINAL_POSITION"] - 1)
-            cur.execute("SELECT id,file_url,file_type,audio_file_path,attachments_json FROM message_logs ORDER BY id")
+            cur.execute("SELECT id,file_url,file_type,audio_file_path,attachments_json,audio_transcript FROM message_logs ORDER BY id")
             rows = list(cur.fetchall())
         for row in rows:
             media = json.loads(row["attachments_json"] or "[]")
@@ -294,7 +297,7 @@ class Retirement:
             if row["file_type"] and row["file_url"] and not any(a.get("stored_path") == row["file_url"] and a.get("type") == row["file_type"] for a in media):
                 raise ValueError("attachment type differs; keep original columns")
         if not apply:
-            return {"stage": "media-columns", "covered_rows": len(rows), "columns": list(MEDIA_COLUMNS)}
+            return {"stage": "media-columns", "covered_rows": len(rows), "columns": list(MEDIA_COLUMNS), "audio_transcript": "retained"}
         self.start("media-columns")
         self.verified_snapshot("message_logs")
         archive = [{"message_log_id": r["id"], **{c: r[c] for c in MEDIA_COLUMNS}} for r in rows if any(r[c] is not None for c in MEDIA_COLUMNS)]
@@ -318,7 +321,10 @@ class Retirement:
         # One atomic ALTER removes all three columns; original values are retained above.
         with self.conn.cursor() as cur:
             cur.execute("ALTER TABLE message_logs DROP COLUMN file_url,DROP COLUMN file_type,DROP COLUMN audio_file_path")
-        return self.finish({"retired_columns": list(MEDIA_COLUMNS), "archived_media_rows": len(archive), "audio_transcript": "dropped"})
+            cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='message_logs' AND COLUMN_NAME='audio_transcript'")
+            if not cur.fetchone()["n"]:
+                raise RuntimeError("media retirement removed required audio_transcript")
+        return self.finish({"retired_columns": list(MEDIA_COLUMNS), "archived_media_rows": len(archive), "audio_transcript": "retained"})
 
     def ingress(self, apply=False, days=30):
         if days < 30:

@@ -21,7 +21,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import aiohttp
 
-from igngbot_v3.config import Config
+from igngbot_shared.config import Config
 
 logger = logging.getLogger("yunying_chat")
 

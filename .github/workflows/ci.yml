@@ -52,8 +52,8 @@ jobs:
       - name: Initialize disposable schema
         run: |
           python - <<'PY'
-          from igngbot_v3.config import Config
-          from igngbot_v3.db import DBHandler
+          from igngbot_shared.config import Config
+          from igngbot_shared.db import DBHandler
           from igngbot_v4.migrate import connect, migrate
           db = DBHandler(Config())
           db.init_message_tables()
@@ -67,7 +67,7 @@ jobs:
           PY
       - name: Syntax and credential checks
         run: |
-          python -m compileall -q igngbot_v3 igngbot_v4 scripts
+          python -m compileall -q igngbot_shared igngbot_v3 igngbot_v4 scripts
           npm --prefix yunying-dsh run check
           bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh
           sh -n scripts/run-yunying-profile.sh

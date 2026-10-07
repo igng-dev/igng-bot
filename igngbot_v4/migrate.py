@@ -1,8 +1,14 @@
-"""Additive, checksum-checked migrations; no production data is removed."""
+"""Checksum-checked startup migrations; destructive retirement is operator-only."""
 from hashlib import sha256
 from pathlib import Path
-from igngbot_v3.config import Config
+from igngbot_shared.config import Config
 import pymysql
+
+
+# Keep the historical migration identity for checksum compatibility, but never
+# execute it during ordinary V4 startup. Media retirement is separately gated
+# and archived by igngbot_v4.retire.
+DESTRUCTIVE_MIGRATIONS = frozenset({"007_drop_audio_transcript.sql"})
 
 
 def connect(config=None):
@@ -15,7 +21,7 @@ def connect(config=None):
                            init_command="SET time_zone = '+00:00'")
 
 
-def migrate(conn, directory=None):
+def migrate(conn, directory=None, include_destructive=False):
     directory = Path(directory or Path(__file__).resolve().parents[1] / "migrations/v4")
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS yunying_schema_migrations (version VARCHAR(120) PRIMARY KEY, checksum CHAR(64) NOT NULL, applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB")
@@ -31,6 +37,8 @@ def migrate(conn, directory=None):
                 if old:
                     if old["checksum"] != digest:
                         raise RuntimeError(f"migration checksum mismatch: {source.name}")
+                    continue
+                if source.name in DESTRUCTIVE_MIGRATIONS and not include_destructive:
                     continue
                 # Migration vocabulary is plain SQL, with no stored procedures/string semicolons.
                 for statement in data.split(";"):

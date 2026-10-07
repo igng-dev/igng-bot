@@ -46,6 +46,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py ./
 COPY prompts/ ./prompts/
+COPY igngbot_shared/ ./igngbot_shared/
 COPY igngbot_v3/ ./igngbot_v3/
 COPY igngbot_v4/ ./igngbot_v4/
 COPY migrations/ ./migrations/
