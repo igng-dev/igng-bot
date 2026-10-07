@@ -15,6 +15,8 @@ from pathlib import Path
 from .migrate import connect
 
 LEGACY_TABLES = ("group_personality_configs", "personality_profiles", "context_summaries", "system_prompts")
+MEMORY_TABLES = ("memory_identities", "memory_identity_bindings", "memory_identity_audit", "memory_sources", "memory_audit")
+ARCHIVE_TABLES = ("yunying_prompt_blobs", "yunying_call_history", "yunying_media_legacy", "yunying_legacy_tables", "yunying_ingress_archive", "context_summaries", "system_prompts")
 MEDIA_COLUMNS = ("file_url", "file_type", "audio_file_path")
 CALL_PROMPTS = {"system_prompt": "system_prompt_hash", "user_prompt": "user_prompt_hash", "thinking_content": "thinking_hash"}
 CALL_INDEX = ("id", "group_id", "sender_id", "task_id", "sender_name", "message_text", "call_type", "model", "duration_ms", "success", "error_message", "created_at")
@@ -358,6 +360,114 @@ class Retirement:
             raise
         return self.finish({"archived_ingress": len(rows), "days": days, "session_checkpoint_sha256": checkpoint, "events_sends_ai_memory": "unchanged"})
 
+    def memory_legacy(self, apply=False):
+        """Move revision sources next to their versions, then retire identity/audit tables.
+
+        The running image must already be the one that writes memory_versions.sources
+        (migration 010); this stage refuses to drop the legacy tables otherwise.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_versions' AND COLUMN_NAME='sources'")
+            if not cur.fetchone()["n"]:
+                raise ValueError("memory_versions.sources is missing; deploy the current image and run migrations first")
+        names = [n for n in MEMORY_TABLES if exists(self.conn, n)]
+        pending = 0
+        if exists(self.conn, "memory_sources"):
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) n FROM memory_sources s LEFT JOIN memory_versions v ON v.document_id=s.document_id AND v.version=s.version WHERE v.sources IS NULL")
+                pending = cur.fetchone()["n"]
+        if not apply:
+            return {"stage": "memory-legacy", "tables": names, "backfill_rows": pending}
+        self.start("memory-legacy")
+        for name in ("memory_versions", "memory_documents", *names):
+            if exists(self.conn, name):
+                self.verified_snapshot(name)
+        backfilled = 0
+        if exists(self.conn, "memory_sources"):
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT s.document_id,s.version,s.event_id,s.conversation_key,s.message_id FROM memory_sources s LEFT JOIN memory_versions v ON v.document_id=s.document_id AND v.version=s.version WHERE v.sources IS NULL ORDER BY s.document_id,s.version,s.event_id")
+                rows = cur.fetchall()
+            grouped = {}
+            for row in rows:
+                grouped.setdefault((row["document_id"], row["version"]), []).append({"event_id": row["event_id"], "conversation_key": row["conversation_key"], "message_id": row["message_id"]})
+            self.conn.begin()
+            try:
+                with self.conn.cursor() as cur:
+                    for (document_id, version), refs in grouped.items():
+                        cur.execute("UPDATE memory_versions SET sources=%s WHERE document_id=%s AND version=%s AND sources IS NULL", (encoded(refs), document_id, version))
+                        backfilled += cur.rowcount
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) n FROM memory_sources s LEFT JOIN memory_versions v ON v.document_id=s.document_id AND v.version=s.version WHERE v.sources IS NULL")
+                if cur.fetchone()["n"]:
+                    raise ValueError("source backfill incomplete; original tables retained")
+        for name in names:
+            snap = self.verified_snapshot(name)
+            self.archive_table(snap)
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT rows_json,content_sha256 FROM yunying_legacy_tables WHERE table_name=%s", (name,))
+                archived = cur.fetchone()
+                if digest(json.loads(archived["rows_json"])) != snap["content_sha256"]:
+                    raise ValueError("memory archive verification failed")
+                cur.execute("DROP TABLE " + identifier(name))
+        dropped_identity = False
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_documents' AND COLUMN_NAME='identity_id'")
+            if cur.fetchone()["n"]:
+                cur.execute("SELECT COUNT(*) n FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_documents' AND INDEX_NAME='memory_person'")
+                if cur.fetchone()["n"]:
+                    cur.execute("ALTER TABLE memory_documents DROP INDEX memory_person")
+                cur.execute("ALTER TABLE memory_documents DROP COLUMN identity_id")
+                dropped_identity = True
+        return self.finish({"retired_tables": names, "backfilled_versions": backfilled, "dropped_identity_column": dropped_identity})
+
+    def archive_tables(self, apply=False):
+        """Drop the recovery archives and V3 leftovers once the rollback window is closed.
+
+        Requires memory-legacy, legacy-tables and call-history to have completed: the
+        archives are the restore source for those tables. Every dropped table must
+        still match the restore proof, so the operator re-takes the proof after the
+        earlier stages changed the database.
+        """
+        for name in MEMORY_TABLES:
+            if exists(self.conn, name):
+                raise ValueError("retire memory tables first: " + name)
+        if exists(self.conn, "call_logs"):
+            raise ValueError("retire call history first")
+        for name in LEGACY_TABLES:
+            if exists(self.conn, name):
+                raise ValueError("retire legacy tables first: " + name)
+        if exists(self.conn, "yunying_ingress_archive"):
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) n FROM yunying_ingress WHERE payload_archived_at IS NOT NULL")
+                if cur.fetchone()["n"]:
+                    raise ValueError("restore archived ingress payloads before dropping the archive")
+        names = [n for n in ARCHIVE_TABLES if exists(self.conn, n)]
+        has_log = exists(self.conn, "yunying_retirement_batches")
+        if not apply:
+            return {"stage": "archive-tables", "tables": names, "retirement_log": has_log}
+        self.start("archive-tables")
+        for name in names:
+            self.verified_snapshot(name)
+        counts = {}
+        with self.conn.cursor() as cur:
+            for name in names:
+                cur.execute("SELECT COUNT(*) n FROM " + identifier(name))
+                counts[name] = cur.fetchone()["n"]
+        result = {"retired_tables": names, "row_counts": counts}
+        with self.conn.cursor() as cur:
+            for name in names:
+                cur.execute("DROP TABLE " + identifier(name))
+            if has_log:
+                # Record the completed stage, then retire the log itself.
+                cur.execute("UPDATE yunying_retirement_batches SET status='complete',detail=%s,completed_at=UTC_TIMESTAMP(6) WHERE batch_id=%s", (encoded(result), self.batch))
+                cur.execute("DROP TABLE yunying_retirement_batches")
+                return result
+        return self.finish(result)
+
     def restore(self, apply=False):
         with self.conn.cursor() as cur:
             cur.execute("SELECT * FROM yunying_legacy_tables ORDER BY table_name")
@@ -451,7 +561,7 @@ class Retirement:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("legacy-tables", "call-history", "media-columns", "ingress", "restore"))
+    parser.add_argument("stage", choices=("legacy-tables", "call-history", "media-columns", "ingress", "memory-legacy", "archive-tables", "restore"))
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--proof", type=Path)
     parser.add_argument("--days", type=int, default=30)

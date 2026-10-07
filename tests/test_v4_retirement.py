@@ -12,7 +12,7 @@ import pytest
 from igngbot_v3.db import DBHandler
 from igngbot_v4.journal import Journal, encode
 from igngbot_v4.migrate import migrate
-from igngbot_v4.retire import Retirement, LEGACY_TABLES, digest, exists, table_snapshot, server_identity, prove_restore
+from igngbot_v4.retire import Retirement, LEGACY_TABLES, MEMORY_TABLES, ARCHIVE_TABLES, digest, exists, table_snapshot, server_identity, prove_restore
 
 pytestmark = pytest.mark.skipif(os.getenv('YUNYING_TEST_DB') != 'yunying_v4_test', reason='disposable local MySQL opt-in')
 
@@ -51,6 +51,15 @@ def retired_db(tmp_path):
     with conn.cursor() as cur:
         cur.execute('UPDATE yunying_ingress SET delivered_at=%s WHERE event_id=%s', (datetime.now()-timedelta(days=31), event))
         cur.execute("INSERT INTO yunying_sessions (conversation_key,conversation_type,external_id,dsh_session_id,provisioning_status) VALUES ('group:1001','group','1001',%s,'ready')", (str(uuid4()),))
+        cur.execute("INSERT INTO memory_identities (id,display_name) VALUES ('11111111-1111-4111-8111-111111111111','fixture')")
+        cur.execute("INSERT INTO memory_identity_bindings (provider,external_id,identity_id,verified_by,shared_memory_opt_in) VALUES ('qq','2001','11111111-1111-4111-8111-111111111111','onebot',0)")
+        cur.execute("INSERT INTO memory_identity_audit (provider,external_id,identity_id,operation,actor) VALUES ('qq','2001','11111111-1111-4111-8111-111111111111','bind','onebot')")
+        cur.execute("INSERT INTO memory_documents (id,title,markdown,document_type,scope_key,visibility,identity_id,person_qq,current_version,status) VALUES ('22222222-2222-4222-8222-222222222222','旧个人记忆','> 喜欢手冲','person','group:1001','shared_person','11111111-1111-4111-8111-111111111111','2001',1,'active')")
+        cur.execute("INSERT INTO memory_versions (document_id,version,title,markdown,status,content_hash,operation,reason,actor) VALUES ('22222222-2222-4222-8222-222222222222',1,'旧个人记忆','> 喜欢手冲','active',%s,'write','fixture','fixture')", ('0'*64,))
+        cur.execute("INSERT INTO memory_sources (document_id,version,event_id,conversation_key,message_id,identity_id) VALUES ('22222222-2222-4222-8222-222222222222',1,'fixture-event','group:1001','7001','11111111-1111-4111-8111-111111111111')")
+        cur.execute("INSERT INTO memory_documents (id,title,markdown,document_type,scope_key,visibility,person_qq,current_version,status) VALUES ('33333333-3333-4333-8333-333333333333','新个人记忆','> 已带来源','person','group:1001','shared_person','2002',1,'active')")
+        cur.execute("INSERT INTO memory_versions (document_id,version,title,markdown,status,content_hash,operation,reason,actor,sources) VALUES ('33333333-3333-4333-8333-333333333333',1,'新个人记忆','> 已带来源','active',%s,'write','fixture','fixture',%s)", ('1'*64, json.dumps([{'event_id':'kept','conversation_key':'group:1001','message_id':None}])))
+        cur.execute("INSERT INTO memory_audit (document_id,version,operation,actor,scope_key,allowed) VALUES ('22222222-2222-4222-8222-222222222222',1,'read','fixture','group:1001',1)")
     archive = tmp_path/'fixture.sql.gz'; archive.write_bytes(gzip.compress(b'-- synthetic proof fixture\n'))
     import hashlib
     with conn.cursor() as cur:
@@ -195,3 +204,52 @@ def test_only_aged_completed_payloads_archive_and_control_results_survive(retire
         cur.execute('SELECT payload_archived_at,recording_status,delivery_status FROM yunying_ingress WHERE event_id=%s',(pending,))
         assert cur.fetchone()=={'payload_archived_at':None,'recording_status':'pending','delivery_status':'pending'}
         cur.execute('SELECT COUNT(*) n FROM yunying_events'); assert cur.fetchone()['n']==0
+
+
+def refresh_proof(conn, manifest):
+    """Re-snapshot every table, mirroring the operator's fresh backup after earlier stages."""
+    with conn.cursor() as cur:
+        cur.execute('SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()')
+        names = [r['TABLE_NAME'] for r in cur.fetchall()]
+    snapshots = {n: table_snapshot(conn, n) for n in names}
+    proof = json.loads(manifest.read_text())
+    proof['tables'] = {n: {k: s[k] for k in ('row_count','content_sha256','schema_sha256','columns_sha256')} for n, s in snapshots.items()}
+    manifest.write_text(json.dumps(proof))
+
+
+def test_memory_legacy_backfills_sources_and_retires_identity_tables(retired_db):
+    conn, db, cfg, retire, snaps, event, manifest = retired_db
+    assert retire.memory_legacy()['backfill_rows'] == 1
+    result = retire.memory_legacy(apply=True)
+    assert result['backfilled_versions'] == 1
+    assert result['dropped_identity_column'] is True
+    assert all(not exists(conn, n) for n in MEMORY_TABLES)
+    with conn.cursor() as cur:
+        cur.execute("SELECT sources FROM memory_versions WHERE document_id='22222222-2222-4222-8222-222222222222'")
+        assert json.loads(cur.fetchone()['sources']) == [{'event_id': 'fixture-event', 'conversation_key': 'group:1001', 'message_id': '7001'}]
+        cur.execute("SELECT sources FROM memory_versions WHERE document_id='33333333-3333-4333-8333-333333333333'")
+        assert json.loads(cur.fetchone()['sources']) == [{'event_id': 'kept', 'conversation_key': 'group:1001', 'message_id': None}]
+        cur.execute("SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_documents' AND COLUMN_NAME='identity_id'")
+        assert cur.fetchone()['n'] == 0
+        cur.execute("SELECT COUNT(*) n FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_documents' AND INDEX_NAME='memory_person'")
+        assert cur.fetchone()['n'] == 0
+        cur.execute("SELECT row_count FROM yunying_legacy_tables WHERE table_name='memory_identities'")
+        assert cur.fetchone()['row_count'] == 1
+        cur.execute("SELECT COUNT(*) n FROM memory_documents WHERE status='active'")
+        assert cur.fetchone()['n'] == 2
+
+
+def test_archive_retirement_requires_prior_stages_and_drops_the_recovery_layer(retired_db):
+    conn, db, cfg, retire, snaps, event, manifest = retired_db
+    retire.legacy_tables(apply=True)
+    retire.call_history(apply=True)
+    retire.media_columns(apply=True)
+    with pytest.raises(ValueError, match='retire memory tables first'):
+        retire.archive_tables(apply=True)
+    assert retire.memory_legacy(apply=True)['backfilled_versions'] == 1
+    refresh_proof(conn, manifest)
+    result = retire.archive_tables(apply=True)
+    assert set(result['retired_tables']) == {'yunying_prompt_blobs', 'yunying_call_history', 'yunying_media_legacy', 'yunying_legacy_tables', 'yunying_ingress_archive'}
+    assert all(not exists(conn, n) for n in ARCHIVE_TABLES)
+    assert not exists(conn, 'yunying_retirement_batches')
+    assert exists(conn, 'message_logs') and exists(conn, 'yunying_ingress') and exists(conn, 'yunying_events')
