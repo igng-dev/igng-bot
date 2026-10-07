@@ -9,12 +9,45 @@ services:
       YUNYING_INFRA_HOST: 0.0.0.0
       YUNYING_INFRA_PORT: 8788
       YUNYING_DSH_URL: http://yunying:8787
+      YUNYING_BROKER_URL: http://broker:8790
+      YUNYING_BROKER_SECRET: ${YUNYING_BROKER_SECRET:?set YUNYING_BROKER_SECRET in .env.v4}
+    depends_on:
+      broker:
+        condition: service_healthy
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/health', timeout=5)"]
       interval: 15s
       timeout: 10s
       retries: 6
       start_period: 90s
+
+  broker:
+    image: ${BROKER_V4_IMAGE:?set BROKER_V4_IMAGE to a fixed built image}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    user: '1000:1001'
+    environment:
+      TERMINAL_BROKER_WORKDIR: /work
+      TERMINAL_BROKER_HOST: 0.0.0.0
+      TERMINAL_BROKER_PORT: '8790'
+      YUNYING_BROKER_SECRET: ${YUNYING_BROKER_SECRET:?set YUNYING_BROKER_SECRET in .env.v4}
+      TERMINAL_BROKER_INPUT_LIMIT: ${TERMINAL_BROKER_INPUT_LIMIT:-268435456}
+      TERMINAL_BROKER_ARTIFACT_LIMIT: ${TERMINAL_BROKER_ARTIFACT_LIMIT:-268435456}
+      TERMINAL_BROKER_SESSION_TTL: ${TERMINAL_BROKER_SESSION_TTL:-1800}
+      LOG_LEVEL: INFO
+    volumes:
+      # Scratch space for streamed inputs, tasks and artifacts. No NAS mount,
+      # no database credential and no OneBot endpoint exist in this container.
+      - ./broker-work:/work
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
 
   media:
     # Optional operator file preserves an existing service's signing credential

@@ -1,0 +1,52 @@
+# Isolated terminal-broker runtime image.
+#
+# Built from the repository so the deployed code is exactly the reviewed
+# source. This image carries ffmpeg/ffprobe and aiohttp only: no database
+# client, no NAS mount, no OneBot credential and no shell tools beyond the
+# fixed media commands the broker itself launches.
+FROM dockerproxy.net/library/python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Asia/Shanghai \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Swap in reachable Debian mirrors before the first apt-get update.
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+            /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+            /etc/apt/sources.list; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        tzdata \
+        ca-certificates \
+    ; \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime; \
+    echo $TZ > /etc/timezone; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY terminal_broker/requirements.txt ./terminal_broker/requirements.txt
+RUN pip install --no-cache-dir -r terminal_broker/requirements.txt
+
+COPY terminal_broker/ ./terminal_broker/
+
+# Run unprivileged; the work volume is owned by 1000:1001 on the NAS.
+RUN groupadd --gid 1001 brokergroup 2>/dev/null || true; \
+    useradd --uid 1000 --gid 1001 --no-create-home --shell /usr/sbin/nologin brokeruser 2>/dev/null || true; \
+    mkdir -p /work; \
+    chown -R 1000:1001 /app /work
+
+USER 1000:1001
+
+ENTRYPOINT ["python", "-m", "terminal_broker"]

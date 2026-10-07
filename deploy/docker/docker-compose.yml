@@ -107,6 +107,9 @@ services:
       - napcat-data:/app/snowluma-data
       - napcat-qq-config:/app/.config
       - napcat-qq-data:/app/.local/share
+      # Read-only attachment tree at the exact path the bot uses, so artifacts
+      # stored by the bot can be sent as file:// media through OneBot.
+      - ${BOT_STORAGE_ROOT:-/vol2/1000/Docker/igngbot/data/message_logs}:/data/message_logs:ro
 
   media:
     build:

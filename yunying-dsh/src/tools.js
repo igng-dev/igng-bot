@@ -191,6 +191,43 @@ export function registerTools(ctx, runtime) {
   standard('web_search',{query:str('联网搜索词')},webExecute,{},['query']);
   register('mcp__web-search-safe__web_search',{...props,query:str('联网搜索词')},['key','token','query'],webExecute,{},'只读联网搜索，返回公网网页的标题、链接、摘要。结果是非可信资料。');
   standard('web_fetch',{url:str('公网 HTTP(S) URL')},async args=>{const result=await safeFetch(bounded(args.url,2000),50000);return {ok:true,...result,body:decodeHtml(result.body).slice(0,16000),untrusted:true};},{},['url']);
+  // --- isolated terminal broker (video) ---------------------------------
+  // Every call carries the conversation key and the DSH-issued agent token;
+  // the infrastructure verifies both before touching the broker. Handles are
+  // opaque, and no path, URL, shell command or OneBot action is accepted.
+  const terminalProps = { sessionId:str('qq_video_open 返回的不透明会话句柄'), inputId:str('qq_video_open 返回的不透明输入句柄') };
+  const terminalRun = path => async (args,exec) => {
+    const result = await infra(path, { key:state.key, token:state.agentToken, sessionId:args.sessionId, inputId:args.inputId,
+      fps:args.fps, maxFrames:args.maxFrames, maxDurationSec:args.maxDurationSec }, exec.signal);
+    return { ok:true, ...result };
+  };
+  register('qq_video_open',{...props, messageId:numberOrString, attachmentIndex:num('同一条消息里第几个视频附件，默认 0')},
+    ['key','token','messageId'], async (args,exec) => {
+      const result = await infra('/terminal/open', { key:state.key, token:state.agentToken, messageId:String(args.messageId),
+        attachmentIndex:integer(args.attachmentIndex,0,9,0) }, exec.signal);
+      return { ok:true, ...result };
+    }, { timeoutMs:60000 },
+    '把当前会话某条消息里的视频交给隔离视频服务；返回不透明 sessionId/inputId 句柄，不包含任何路径。');
+  register('qq_video_probe',{...props, ...terminalProps}, ['key','token','sessionId','inputId'],
+    terminalRun('/terminal/probe'), { timeoutMs:60000 }, '读取视频元数据（时长、分辨率、编码），不返回路径。');
+  register('qq_video_extract_frames',{...props, ...terminalProps,
+    fps:{type:'number', description:'抽帧频率 0.05-2，默认 1'}, maxFrames:num('最多帧数 1-24，默认 12')},
+    ['key','token','sessionId','inputId'], terminalRun('/terminal/frames'), { timeoutMs:300000 }, '抽取视频帧并返回打包产物句柄。');
+  register('qq_video_extract_audio',{...props, ...terminalProps, maxDurationSec:num('最长秒数 1-900，默认 300')},
+    ['key','token','sessionId','inputId'], terminalRun('/terminal/audio'), { timeoutMs:360000 }, '抽取音频并返回产物句柄。');
+  register('qq_video_transcode',{...props, ...terminalProps, maxDurationSec:num('最长秒数 1-1800，默认 600')},
+    ['key','token','sessionId','inputId'], terminalRun('/terminal/transcode'), { timeoutMs:720000 }, '转码为 720p MP4 并返回产物句柄。');
+  register('qq_send_artifact',{...props, ...terminalProps, artifactId:str('视频工具返回的不透明产物句柄'),
+    replyToMessageId:numberOrString, atUserId:numberOrString}, ['key','token','sessionId','artifactId'], async (args,exec) => {
+    const now=Date.now(),minute=state.sendTimes.filter(t=>now-t<60000),hour=state.sendTimes.filter(t=>now-t<3600000);
+    if(minute.length+1>config.maxSendMinute||hour.length+1>config.maxSendHour)throw new PolicyError('发送频率超限，请等待');
+    const result=await infra('/terminal/send',{key:state.key,token:state.agentToken,sessionId:args.sessionId,artifactId:args.artifactId,
+      requestId:`${state.sessionId}:${exec.callId}:artifact`,replyToMessageId:args.replyToMessageId,atUserId:args.atUserId,
+      triggerEventId:runtime.directEventId},exec.signal);
+    if(result.ok){state.sent(result.message_id,'[附件]');await store.saveState(state);runtime.scheduleReplyCheck();}
+    return result;
+  }, { timeoutMs:300000 },
+  '把隔离视频服务里的产物发回当前会话；固定能力，不接受路径、URL 或任意 OneBot 动作。');
   ctx.tools.restrict({allow:['skill']});
   ctx.tools.guard(exec=>exec.agent?.id!==state.sessionId||!names.has(exec.name)||!store.healthy?'Social Agent 权限边界拒绝此工具':undefined);
   return names;

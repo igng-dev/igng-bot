@@ -19,9 +19,11 @@ from igngbot_shared.mc_ticket_notifications import McTicketNotifier
 from igngbot_shared.timeutil import unix_to_utc_naive
 from igngbot_shared.call_log_db import mirror_call_to_site, close_call_log_pool
 from .ai_records import mirror_native_record, historical_record
+from .broker_client import BrokerClient
 from .journal import Journal, decode, encode
 from .migrate import connect, migrate
 from .settings import Settings, signed_conversation
+from .terminal import TerminalGateway
 from .views import message_view, row_images, safe_structure
 
 logger = logging.getLogger("yunying.infrastructure")
@@ -38,6 +40,8 @@ class Infrastructure:
         self.http = None
         self.loop = None
         self.client = None
+        self.broker = None
+        self.terminal = None
         self._send_lock = asyncio.Lock()
         self._stopping = False
         self._journal_signal = asyncio.Event()
@@ -250,12 +254,34 @@ class Infrastructure:
                 if not cur.fetchone():
                     raise web.HTTPForbidden(text="mention is outside conversation")
         segments = ([{"type": "reply", "data": {"id": str(reply)}}] if reply else []) + ([{"type": "at", "data": {"qq": str(at_user)}}] if at_user else []) + [{"type": "text", "data": {"text": message}}]
+        if not owner_command and not self.speaking_allowed(key, data.get("triggerEventId")):
+            return {"ok": False, "error": "当前发言权限已关闭或呼叫已结束"}
+
+        async def prepared():
+            return {"segments": segments, "text": message, "reply": reply}
+
+        return await self._deliver(key, gid, request_id, {"message": message, "reply": reply, "at": at_user}, prepared)
+
+    async def _deliver(self, key, gid, request_id, journal_payload, provider):
+        """Durable send core shared by text and artifact delivery.
+
+        ``begin_send`` runs before any bytes are fetched so a repeated call
+        returns the recorded outcome instead of sending or uploading twice.
+        """
         async with self._send_lock:
-            if not owner_command and not self.speaking_allowed(key, data.get("triggerEventId")):
-                return {"ok": False, "error": "当前发言权限已关闭或呼叫已结束"}
-            fresh, prior = self.journal.begin_send(request_id, key, {"message": message, "reply": reply, "at": at_user})
+            fresh, prior = self.journal.begin_send(request_id, key, journal_payload)
             if not fresh:
                 return prior
+            try:
+                prepared = await provider()
+            except Exception:
+                result = {"ok": False, "status": "failed", "error": "附件不可用"}
+                self.journal.finish_send(request_id, "failed", result)
+                return result
+            segments = prepared["segments"]
+            message = prepared["text"]
+            attachment = prepared.get("attachment")
+            reply = prepared.get("reply")
             try:
                 action = "send_group_msg" if gid > 0 else "send_private_msg"
                 target = {"group_id": gid} if gid > 0 else {"user_id": -gid}
@@ -276,7 +302,9 @@ class Infrastructure:
                     try:
                         self.db.insert_message(group_id=gid, sender_id=self.config.BOT_USER_ID,
                             message_content=message, plain_text_content=message,
-                            message_structure=encode(segments), attachments_json=None, reply_to_msg_id=str(reply) if reply else None,
+                            message_structure=encode(segments),
+                            attachments_json=encode([attachment]) if attachment else None,
+                            reply_to_msg_id=str(reply) if reply else None,
                             msg_id=message_id, is_self=True, message_source="yunying_dsh")
                     except Exception:
                         logger.error("Sent message history awaits OneBot echo compensation")
@@ -287,6 +315,22 @@ class Infrastructure:
                 if isinstance(error, asyncio.CancelledError):
                     raise
                 return {"ok": False, "status": "unknown", "error": "发送结果不确定；不得自动重发"}
+
+    async def terminal_send(self, data):
+        key = data["key"]
+        gid = signed_conversation(key)
+        if not self.speaking_allowed(key, data.get("triggerEventId")):
+            return {"ok": False, "error": "当前发言权限已关闭或呼叫已结束"}
+        return await self.terminal.send(data, gid=gid, deliver=self._deliver)
+
+    async def terminal_call(self, path, data):
+        if self.terminal is None:
+            raise web.HTTPServiceUnavailable(text="terminal broker is not configured")
+        if path == "/terminal/open":
+            return await self.terminal.open(data)
+        if path == "/terminal/send":
+            return await self.terminal_send(data)
+        return await self.terminal.operate(path, data)
 
     async def api(self, request):
         supplied = request.headers.get("Authorization", "")
@@ -309,6 +353,8 @@ class Infrastructure:
         if not self.authorized(key):
             raise web.HTTPForbidden()
         gid = signed_conversation(key)
+        if request.path.startswith("/terminal/"):
+            return web.json_response(await self.terminal_call(request.path, data))
         if request.path == "/send":
             return web.json_response(await self.send(data))
         if request.path == "/history":
@@ -416,6 +462,10 @@ class Infrastructure:
         self.journal = Journal(self.conn)
         self.storage.check_available()
         self.http = ClientSession()
+        if self.settings.broker_url:
+            self.broker = BrokerClient(self.settings.broker_url, self.settings.broker_secret)
+            self.terminal = TerminalGateway(self.broker, authorize=self.authorized, db=self.db,
+                                            storage=self.storage, config=self.config)
         app = web.Application(client_max_size=4 * 1024 * 1024)
         async def health(_request):
             try:
@@ -424,8 +474,9 @@ class Infrastructure:
             except Exception:
                 return web.json_response({"ok": False}, status=503)
         app.router.add_get("/health", health)
+        app.router.add_post("/terminal/{action}", self.api)
         app.router.add_post("/{capability}", self.api)
-        runner = web.AppRunner(app)
+        runner = web.AppRunner(app, handler_cancellation=True)
         await runner.setup()
         await web.TCPSite(runner, self.settings.host, self.settings.port).start()
         stop = asyncio.Event()
@@ -462,6 +513,8 @@ class Infrastructure:
             await asyncio.gather(recorder, worker, config_worker, return_exceptions=True)
             if notifier:
                 await notifier.stop()
+            if self.terminal:
+                await self.terminal.close()
             await runner.cleanup()
             await self.http.close()
             await close_call_log_pool()
