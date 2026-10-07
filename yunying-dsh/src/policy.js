@@ -28,6 +28,18 @@ export function settings(env = process.env) {
     maxTokens: integer(env.YUNYING_MAX_TOKENS, 256, 32768, 4096),
     nicknames: (env.YUNYING_NICKNAMES || '云萤,莹宝').split(',').map(s => s.trim()).filter(Boolean),
     batchWindowMs: 8000, preSleepWaitMs: 300000, minQuietMs: 10000,
+    // One tool call may finish the donor's whole pre-sleep observation window
+    // instead of returning partial credit the model has to chain. The donor
+    // prompt still receives the same result fields; only the number of model
+    // steps spent polling drops.
+    waitChainMs: integer(env.YUNYING_WAIT_CHAIN_MS, 0, 600000, 600000),
+    // Bootstrap/resume backlog enters the durable Session as at most this many
+    // newest events; older undelivered events stay readable through the scoped
+    // unread/history tools instead of being replayed into every request.
+    bootstrapInjectLimit: integer(env.YUNYING_BOOTSTRAP_INJECT_LIMIT, 0, 500, 20),
+    // Safety net for a runaway native turn: cancel after this many model steps
+    // and let the existing reminder/schedule path hand control back.
+    maxStepsPerTurn: integer(env.YUNYING_MAX_STEPS_PER_TURN, 4, 200, 30),
     sendMinMs: 1000, sendMaxMs: 3000, maxMessageChars: 500,
     maxWakeMinute: 1, maxWakeHour: 12, maxSendMinute: 8, maxSendHour: 60,
     proactiveMinMs: 1800000, proactiveMaxMs: 5400000, proactiveIdleMs: 900000,

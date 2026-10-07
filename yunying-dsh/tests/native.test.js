@@ -90,3 +90,36 @@ test('native DSH: a legacy pause payload is inert and direct calls still drive t
   assert.ok(adapter.requests[0].messages.some(m=>m.content.some(c=>c.text?.includes('queued-call'))));
  }finally{await runtime.close();await ctx.fiber.dispose();}
 });
+
+test('native DSH: durable QQ messages carry the donor model view without per-message routing fields',async()=>{
+ const {ctx}=await harness(),store=new FixtureStore(),runtime=new SocialRuntime(ctx,store,testSettings(),async()=>({ok:true}));
+ try{
+  await runtime.accept(event('slim-view'));await settle(runtime);
+  const conv=runtime.conversations.get('group:1001');
+  const logs=await durableEvents(ctx,conv.state.sessionId);
+  const durable=logs.filter(e=>e.type==='user/message').flatMap(e=>e.data.content||[])
+    .filter(c=>c.type==='text'&&c.text?.startsWith('【QQ事件')).map(c=>c.text).find(t=>t.includes('slim-view'));
+  assert.ok(durable,'the QQ event is injected as a durable message');
+  assert.ok(durable.includes('"text":"今天风很舒服"'));
+  assert.ok(!durable.includes('"key"'),'the session-constant key is not repeated in every message');
+  assert.ok(!durable.includes('"plain"'),'duplicate text/plain is collapsed like the donor model view');
+  assert.ok(!durable.includes('"isSelf"'),'false defaults are omitted like the donor model view');
+ }finally{await runtime.close();await ctx.fiber.dispose();}
+});
+
+test('native DSH: bootstrap backlog enters the Session as the newest bounded window',async()=>{
+ const store=new FixtureStore();await store.mapping('group:1001');
+ for(let n=1;n<=40;n++)await store.accept(event('backlog-'+n,'group:1001',{text:'积压消息'+n}));
+ const {ctx}=await harness(),runtime=new SocialRuntime(ctx,store,testSettings(),async()=>({ok:true}));
+ try{
+  await runtime.load('group:1001');
+  const conv=runtime.conversations.get('group:1001');
+  const logs=await durableEvents(ctx,conv.state.sessionId);
+  const injected=logs.filter(e=>e.type==='user/message').flatMap(e=>e.data.content||[])
+    .filter(c=>c.type==='text'&&c.text?.startsWith('【QQ事件')).map(c=>c.text);
+  assert.equal(injected.length,20,'only the configured newest backlog window is replayed');
+  assert.ok(injected.some(t=>t.includes('backlog-40')));
+  assert.ok(!injected.some(t=>t.includes('backlog-19')),'older backlog stays readable through scoped tools');
+  assert.ok(conv.state.unread.some(m=>m.messageId==='backlog-19'),'skipped backlog remains in social state');
+ }finally{await runtime.close();await ctx.fiber.dispose();}
+});

@@ -98,6 +98,21 @@
 - id: tools
   config:
     mode: native
+# Context budget: the routed gateway model is declared with its real capacity in
+# the operator patch, so compaction-basic must be given an explicit policy. The
+# dsh-base defaults (thresholdRatio 0.8, headroomTokens 65536) assume a large
+# window; on a smaller declared window they resolve to a negative pressure
+# budget and the plugin skips proactive compaction entirely (it only recovers
+# after a provider-confirmed overflow), which is how one Session grew past
+# 370k tokens per request. Trigger near 52k of a 262144-token window and keep
+# the most recent 16k verbatim; the donor's V2 context manager kept only
+# ~1600 tokens of message history, so this stays far more generous.
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.2
+    headroomTokens: 16384
+    retainTokens: 16384
+    maxTokens: 16384
 - insert:
     - id: yunying-social
       name: '@igng/yunying-dsh'

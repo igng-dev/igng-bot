@@ -89,7 +89,26 @@ export function registerTools(ctx, runtime) {
   },{},['config']);
   standard('qq_wait_for_messages', { purpose:{type:'string',enum:['messages','reply']}, timeoutMs:{type:'number'},
     minNewMessages:{type:'number'},quietMs:{type:'number'} }, async (args,exec)=>{
-    runtime.cancelReplyCheck();const result=await state.wait(args,exec.signal);await store.saveState(state);return result;
+    runtime.cancelReplyCheck();
+    const started=Date.now();
+    let result=await state.wait(args,exec.signal);
+    // The donor prompt tells the model to continue waiting while the pre-sleep
+    // observation still owes credit ("按剩余时间继续等待"). Each continuation
+    // would otherwise be another full model step resending the whole Session.
+    // Finish the same observation inside this one tool call. The donor only
+    // grants credit inside one continuous call, so a continuation waits a full
+    // pre-sleep window, bounded by the chain budget and the tool timeout.
+    const chainBudget=Math.max(0,Number(runtime.config.waitChainMs)||0);
+    if(args.purpose!=='reply'&&chainBudget>0){
+      const deadline=started+Math.min(chainBudget,700000);
+      const preSleepMs=Math.max(0,Number(runtime.config.preSleepWaitMs)||0);
+      while(!result.arrived&&!result.preSleepWaitSatisfied&&Date.now()<deadline){
+        const remaining=Math.max(0,Number(result.preSleepWaitRemainingMs)||0);
+        const timeoutMs=Math.min(600000,Math.max(preSleepMs,remaining),Math.max(1,deadline-Date.now()));
+        result=await state.wait({...args,timeoutMs},exec.signal);
+      }
+    }
+    await store.saveState(state);return result;
   });
   const sendProperties = { messages:{oneOf:[{type:'string'},{type:'array',items:{type:'string'},minItems:1,maxItems:8}]},
     replyToMessageId:numberOrString, atUserId:numberOrString, gapMode:{type:'string',enum:['auto','fixed','byLength']},

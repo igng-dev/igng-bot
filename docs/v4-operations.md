@@ -30,6 +30,9 @@ python -m pip install -r requirements-dev.txt
 | `YUNYING_MODELS_WITHOUT_PROGRESS` | 逗号分隔的模型清单：这些模型不会在任务中途输出进度文字，由固定间隔心跳回退。未列出的模型（如默认 DeepSeek）把带工具调用的中间步骤文本转发为过程报告。 |
 | `YUNYING_PROGRESS_INTERVAL_MS` | 心跳间隔毫秒，5000–300000，默认 30000；仅命中清单的模型启用，且只在该会话仍有发送权限时发送。 |
 | `YUNYING_PROGRESS_REPORTS` | `auto`（默认）或 `off`；`off` 同时关闭过程报告转发与心跳。 |
+| `YUNYING_WAIT_CHAIN_MS` | 0–600000，默认 600000。`purpose="messages"` 的沉睡前观察在一次工具调用内最多连续等待这么久（实际以工具 735s 超时为上限）：模型为"按剩余时间继续等待"产生的每次续等不再各占一个整段 Session 的模型步骤；`0` 关闭链式等待（回到每次只等 `timeoutMs`）。 |
+| `YUNYING_BOOTSTRAP_INJECT_LIMIT` | 0–500，默认 20。启动/恢复时最多把最近多少条未投递事件重放进原生 Session；更早的积压留在社会状态里，由未读/历史工具按需读取，不再永久抬高每次请求的上下文。显式 @/回复永远投递。 |
+| `YUNYING_MAX_STEPS_PER_TURN` | 4–200，默认 30。单轮模型步骤上限（安全网）：超过后取消该轮并保留 Inbox，由既有提醒/调度路径收尾。 |
 | `DSH_HOME` | 持久目录，包含官方 Profile、Session、附件与派生索引；生产必须挂卷并备份。 |
 | `YUNYING_ADMIN_SECRET` | 可选 Owner/未来网站管理凭据，至少32字符且与 INTERNAL 不同；不向模型提供。 |
 
@@ -60,7 +63,7 @@ DSH 官方 `llm-pi-ai` 已包含在固定 CLI 依赖中。可以在 `$DSH_HOME/p
         baseURL: https://gateway.example/v1
         models:
           - id: gemini-flash
-            contextWindow: 65536
+            contextWindow: 262144
             maxTokens: 8192
             input: [text, image]
             reasoningEfforts: false
@@ -74,7 +77,7 @@ DSH 官方 `llm-pi-ai` 已包含在固定 CLI 依赖中。可以在 `$DSH_HOME/p
           maxRetries: 2
 ```
 
-设置 `YUNYING_MODEL_PROVIDER=yunying-gateway`、`YUNYING_MODEL=gemini-flash`。示例 URL 为占位；key 仅通过已有 `.env` 注入。65536 是当前部署使用的保守上下文预算，不代表提供方公布的模型容量。官方 compaction 按此预算管理上下文。
+设置 `YUNYING_MODEL_PROVIDER=yunying-gateway`、`YUNYING_MODEL=gemini-flash`。示例 URL 为占位；key 仅通过已有 `.env` 注入。`contextWindow` 必须与该 route 实际可用的上下文容量一致：官方 `compaction-basic` 用它计算压力预算，声明过小（例如 65536）时 `contextWindow − maxTokens − headroomTokens` 为负，主动压缩会被静默跳过，只剩溢出后的强制恢复，历史因此可以涨到每次请求 37 万 token。YunYing bundle patch 同时为 `compaction-basic` 设置显式策略（`thresholdRatio: 0.2`、`headroomTokens: 16384`、`retainTokens: 16384`），在 262144 窗口下约 52k 触发、保留最近 16k；V2 donor 的 ContextManager 只保留约 1600 token 消息历史，因此这仍比二代宽松得多。
 
 聊天模式沿用 `group_configs.is_chat_mode`。`/聊天模式` 由群 owner/admin 或 bot 管理员幂等切换；也可显式 `/聊天模式 开启|关闭`。网站现有 `isChatMode` PATCH 写同一字段，无须新建配置表。关闭时普通来信仍记录、可供已呼叫的 Agent 读取，但只允许明确 @ 或回复云萤开始模型轮次；名字提问和普通拍一拍不构成关闭模式的呼叫。
 
