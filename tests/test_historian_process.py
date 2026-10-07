@@ -28,6 +28,7 @@ def test_independent_published_historian_profile_and_api():
 
 async def scenario():
     root=Path(__file__).resolve().parents[1]
+    Path('/tmp/opencode').mkdir(parents=True,exist_ok=True)
     data=Path(tempfile.mkdtemp(prefix='historian-process-',dir='/tmp/opencode'))
     api_port,model_port=port(),port()
     admin,worker=secrets.token_hex(32),secrets.token_hex(32)
