@@ -8,6 +8,8 @@ COPY yunying-dsh/package.json yunying-dsh/package-lock.json ./
 RUN npm ci --include=dev --ignore-scripts && npm install --global pnpm@10.33.0 --ignore-scripts
 COPY yunying-dsh/ ./
 COPY scripts/run-yunying-profile.sh /app/run-yunying-profile.sh
+COPY historian-dsh/ /app/historian-dsh/
+COPY scripts/run-historian-profile.sh /app/run-historian-profile.sh
 RUN mkdir -p /data/dsh && chown -R 1000:1001 /app /data
 USER 1000:1001
 ENTRYPOINT ["sh", "/app/run-yunying-profile.sh"]
