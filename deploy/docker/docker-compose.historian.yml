@@ -1,0 +1,33 @@
+# Explicit opt-in overlay; no service is deployed or enabled merely by merging code.
+services:
+  historian-api:
+    image: ${BOT_V4_IMAGE:?set a fixed bot image}
+    entrypoint: [python, -m, igngbot_v4.historian]
+    restart: unless-stopped
+    init: true
+    env_file: [.env, .env.historian]
+    environment:
+      HISTORIAN_HOST: 0.0.0.0
+    # Publish only through the operator's authenticated internal network/tunnel to the site.
+    ports: ['127.0.0.1:8791:8791']
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8791/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+  historian:
+    image: ${YUNYING_IMAGE:?set a fixed DSH image with historian bundle}
+    entrypoint: [sh, /app/run-historian-profile.sh]
+    restart: unless-stopped
+    init: true
+    user: '1000:1001'
+    env_file: [.env, .env.historian]
+    environment:
+      HISTORIAN_API_URL: http://historian-api:8791
+      DSH_HOME: /data/historian-dsh
+      DSH_TELEMETRY_DISABLED: '1'
+    volumes: ['./historian-runtime:/data/historian-dsh']
+    depends_on:
+      historian-api:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]

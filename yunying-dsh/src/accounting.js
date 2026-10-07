@@ -73,9 +73,9 @@ export class NativeAccounting {
     // served the request; a gateway alias can resolve to a different identity,
     // and that identity is what the bill is priced against.
     const served=message.source?.replayState?.response?.responseModel;
-    const record={record_kind:attempt?'attempt':'task-end',task_key:key,task_type:compact?'dsh_compaction':'social_turn',
+    const record={record_kind:attempt?'attempt':'task-end',task_key:key,task_type:compact?'dsh_compaction':this.config.taskType||'social_turn',
       native_turn:data.turn??this.turn,native_step:data.step??null,native_event_seq:event.seq,
-      group_id:(this.key.startsWith('private:')?'-':'')+this.key.split(':')[1],sender_id:source.userId||'',sender_name:source.sender||'',message_text:source.text||'',
+      group_id:this.config.taskType?'':(this.key.startsWith('private:')?'-':'')+this.key.split(':')[1],sender_id:source.userId||'',sender_name:source.sender||'',message_text:source.text||'',
       call_type:compact?(success?'compaction':'compaction_error'):success?'agent':'agent_error',
       model:served||message.source?.model||data.model||this.route.model||this.config.model,provider:message.source?.provider||data.provider||this.route.provider||this.config.provider,
       // The gateway bills the requested model name; the served identity can be

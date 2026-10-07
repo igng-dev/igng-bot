@@ -1,0 +1,61 @@
+# Independent headless Profile. No social runtime, coding tools, web or arbitrary SQL.
+- { id: plugin-manager, disabled: true }
+- { id: tool-plugin-manager, disabled: true }
+- { id: hmr, disabled: true }
+- { id: jobs, disabled: true }
+- { id: typert-gateway, disabled: true }
+- { id: user-questions, disabled: true }
+- { id: session-title-llm, disabled: true }
+- { id: session-telemetry-otel, disabled: true }
+- { id: subprocess, disabled: true }
+- { id: sandbox, disabled: true }
+- { id: sandbox-policy, disabled: true }
+- { id: bash-sandbox, disabled: true }
+- { id: pwsh-sandbox, disabled: true }
+- { id: approval, disabled: true }
+- { id: permission, disabled: true }
+- { id: shell-env, disabled: true }
+- { id: tool-bash, disabled: true }
+- { id: tool-pwsh, disabled: true }
+- { id: tool-jobs, disabled: true }
+- { id: fs-observation-policy, disabled: true }
+- { id: tool-fs, disabled: true }
+- { id: tool-fs-search, disabled: true }
+- { id: fs-sandbox, disabled: true }
+- { id: agent-instructions, disabled: true }
+- { id: skill-filesystem, disabled: true }
+- { id: commands, disabled: true }
+- { id: command-feedback, disabled: true }
+- { id: goal, disabled: true }
+- { id: goal-round-driver, disabled: true }
+- { id: command-goal, disabled: true }
+- { id: plan-mode, disabled: true }
+- { id: command-compact, disabled: true }
+- { id: subagent, disabled: true }
+- { id: subagent-spawn-in-process, disabled: true }
+- { id: subagent-fork-in-process, disabled: true }
+- { id: tool-subagent-control, disabled: true }
+- { id: tool-subagent-list-agents, disabled: true }
+- { id: tool-subagent, disabled: true }
+- { id: tool-subagent-fork, disabled: true }
+- { id: ptc-runtime, disabled: true }
+- { id: workflow-ptc, disabled: true }
+- { id: tool-workflow, disabled: true }
+- { id: tool-todo, disabled: true }
+- { id: tool-goal, disabled: true }
+- { id: tool-web, disabled: true }
+- { id: web-fetch-http, disabled: true }
+- { id: mcp-resources, disabled: true }
+- { id: llm-deepseek-account, disabled: true }
+- { id: yunying-social, disabled: true }
+- id: tools
+  config: { mode: native }
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.2
+    headroomTokens: 4096
+    retainTokens: 12000
+    maxTokens: 4096
+- insert:
+    - id: server-historian
+      name: '@igng/server-historian-dsh'

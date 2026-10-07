@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !.env.v4.example
+!.env.historian.example
 *.pem
 *.key
 *.p12
