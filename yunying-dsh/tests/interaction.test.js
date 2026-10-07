@@ -74,3 +74,40 @@ test('host failures do not expose SQL, paths or infrastructure diagnostics to th
   assert.equal(result.isError,true);assert.ok(!/SELECT|password|private|credentials/.test(JSON.stringify(result)));
  }finally{await runtime.close();await ctx.fiber.dispose();}
 });
+
+test('native wait completes the pre-sleep observation in one tool call instead of chaining model steps',async()=>{
+ const adapter=new ScriptAdapter(),{ctx}=await harness(adapter);
+ const config={...testSettings(),minQuietMs:10,waitMinMs:10,preSleepWaitMs:60,waitChainMs:2000,maxWakeMinute:100,maxWakeHour:100};
+ const runtime=new SocialRuntime(ctx,new FixtureStore(),config,async()=>({ok:true,message_id:'9004'}));
+ try{
+  await runtime.load('group:1001');const conv=runtime.conversations.get('group:1001');
+  const args={key:conv.state.key,token:conv.state.agentToken};
+  adapter.script.push(()=>toolResponse('observe-chain','qq_wait_for_messages',{...args,timeoutMs:10}),
+   ()=>toolResponse('close-chain','qq_mark_read',{...args,throughSeq:conv.state.readThrough()}));
+  await runtime.accept(event('wait-chain','group:1001',{atBot:true,text:'在吗'}));
+  await settle(runtime);
+  const logs=await durableEvents(ctx,conv.state.sessionId);
+  const result=logs.find(e=>e.type==='tool/result'&&e.data.message.toolCallId==='observe-chain');
+  const payload=JSON.parse(result.data.message.content[0].text);
+  assert.equal(payload.preSleepWaitSatisfied,true);
+  assert.equal(adapter.requests.length,2,'a chained continuation does not cost another model step');
+  assert.equal(conv.state.preSleepBlocked(),false);
+ }finally{await runtime.close();await ctx.fiber.dispose();}
+});
+
+test('native runaway turn is cancelled at the configured step budget and keeps the Inbox',async()=>{
+ const adapter=new ScriptAdapter(),{ctx}=await harness(adapter);
+ const config={...testSettings(),maxStepsPerTurn:4,maxWakeMinute:100,maxWakeHour:100};
+ const runtime=new SocialRuntime(ctx,new FixtureStore(),config,async()=>({ok:true}));
+ try{
+  await runtime.load('group:1001');const conv=runtime.conversations.get('group:1001');
+  const args={key:conv.state.key,token:conv.state.agentToken};
+  for(let n=0;n<10;n++)adapter.script.push(()=>toolResponse('step-'+n,'qq_get_unread_messages',args));
+  let cancels=0;const original=conv.handle.agent.cancel.bind(conv.handle.agent);
+  conv.handle.agent.cancel=(...call)=>{if(call[0]?.kind==='hook'&&call[0]?.reason==='step budget reached')cancels++;return original(...call);};
+  await runtime.accept(event('runaway','group:1001',{atBot:true}));
+  await settle(runtime);
+  assert.ok(cancels>=1,'the runaway turn is cancelled');
+  assert.ok(adapter.requests.length<=6,`model requests stay bounded, got ${adapter.requests.length}`);
+ }finally{await runtime.close();await ctx.fiber.dispose();}
+});

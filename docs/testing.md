@@ -153,3 +153,22 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 | `npm --prefix yunying-dsh run check`、`bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh`、`bash scripts/privacy-scan.sh`、`git diff --check` | 通过。 |
 
 新增 Node 回归：`progress.test.js` 覆盖模式选择/文本截断/心跳文案、转发只发中间步骤且不发收尾文本、每轮上限、心跳计数与轮末停止、`off` 全关。本机 Node 为 v22.22.1（`engines>=24`，部署镜像与 CI 为 Node24）；真实模型风格、真实 QQ 心跳送达与 NAS 长时运行仍未验收。
+
+## Token 消耗治理：压缩策略、等待链、注入上限与步骤预算
+
+2026-10-07 生产诊断发现单群会话累计 9744 万未缓存输入 token、单日网关账单 $69.76：`llm-pi-ai` 声明 `contextWindow: 65536` 时，官方 `compaction-basic` 默认 `headroomTokens: 65536` 使 `contextWindow − maxTokens − headroom` 为负，主动压缩被静默跳过，历史涨到每次请求 37 万 token；每个工具步骤（尤其 `qq_wait_for_messages` 的链式续等）都重发整段 Session。修复不换模型、不改 donor Prompt 字节、不调触发频率：
+
+- `yunying-dsh/cordis.patch.yml`：为 `compaction-basic` 显式设置 `thresholdRatio: 0.2`、`headroomTokens: 16384`、`retainTokens: 16384`、`maxTokens: 16384`；operator patch 的 `contextWindow` 改为 262144（见 `v4-operations.md`）。
+- `src/tools.js`：`purpose="messages"` 的沉睡前观察在一次工具调用内完成续等（`YUNYING_WAIT_CHAIN_MS`，默认 600000ms，上限受工具 735s 超时约束），donor 要求"按剩余时间继续等待"的每次续等不再各占一个模型步骤；`purpose="reply"` 语义不变。
+- `src/runtime.js`：durable QQ 消息改用 donor `compactModelMessage` 视图（去掉会话恒定 `key`、重复 text/plain、空数组与 false 默认值）；启动/恢复只重放最近 `YUNYING_BOOTSTRAP_INJECT_LIMIT`（默认 20）条未投递事件，更早积压留给未读/历史工具；单轮步骤超过 `YUNYING_MAX_STEPS_PER_TURN`（默认 30）时取消该轮并保留 Inbox。
+- `src/policy.js`：上述三个开关，范围校验；`docs/v4-operations.md` 同步记录。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `npm run check`、`bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh`、`bash scripts/privacy-scan.sh`、`git diff --check` | 通过。 |
+| `npm test`（离线，Node24.18.0，共享 node_modules） | **56 passed, 3 skipped**（opt-in 数据库 3 条）。 |
+| `YUNYING_TEST_DB=yunying_v4_test YUNYING_TEST_DB_PORT=43316 npm test`（loopback MariaDB 11.8.6 验证实例） | **59 passed, 0 skipped**。 |
+| `python -m pytest tests -q`（共享 venv，离线） | **134 passed, 16 skipped**（opt-in）。 |
+| `YUNYING_TEST_DB=yunying_v4_test YUNYING_TEST_DB_PORT=43316 YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q` | **150 passed, 0 failed**（含真实官方 DSH CLI 双进程 smoke）；首次全量出现 1 条共享测试库顺序相关的偶发失败，单跑与重跑均通过，与本轮改动无关。 |
+
+新增 Node 回归：durable 消息不再携带 `key`/重复 `plain`/false 默认值；bootstrap 只重放最近窗口且旧积压仍在社会状态；链式等待在一次工具调用内满足；单轮步骤预算取消后模型请求数有界。未做：NAS 生产部署、真实模型/QQ 验收、大历史会话首次压缩的线上耗时与费用观测。
