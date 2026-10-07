@@ -413,6 +413,26 @@ class StorageHandler:
             if local_path and os.path.exists(local_path):
                 os.unlink(local_path)
 
+    def store_bytes(self, group_id, file_name, data):
+        """Persist already-fetched bytes (a broker artifact) into the attachment tree.
+
+        The broker is the only caller; it never receives a filesystem path back.
+        Returns the stored path so the history row and media service stay in sync.
+        """
+        if not self._checked:
+            self.check_available()
+        payload = bytes(data)
+        if not payload:
+            raise ValueError("attachment is empty")
+        name = os.path.basename(str(file_name or "").replace("\\", "/"))
+        if not name or name in {".", ".."} or "\0" in name:
+            raise ValueError("invalid attachment filename")
+        out_path = self._storage_path(group_id, name)
+        with open(out_path, "wb") as handle:
+            handle.write(payload)
+        logger.info("Stored artifact bytes: %s bytes", len(payload))
+        return {"stored_path": out_path, "size": len(payload)}
+
     def store_face_if_missing(self, face_id: str | int, direct_url: str = "") -> dict | None:
         """Fetch and cache a standard QQ face into the shared assets library if not already cached."""
         face_id_str = str(face_id or "").strip()

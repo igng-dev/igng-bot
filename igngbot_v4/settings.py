@@ -32,6 +32,8 @@ class Settings:
     port: int = 8788
     groups: frozenset = frozenset()
     private: frozenset = frozenset()
+    broker_url: str = ""
+    broker_secret: str = ""
 
     @classmethod
     def from_env(cls):
@@ -42,9 +44,18 @@ class Settings:
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
             raise ValueError("invalid YUNYING_DSH_URL")
+        broker_url = os.getenv("YUNYING_BROKER_URL", "").rstrip("/")
+        broker_secret = os.getenv("YUNYING_BROKER_SECRET", "")
+        if broker_url:
+            broker = urlsplit(broker_url)
+            if broker.scheme not in {"http", "https"} or not broker.hostname or broker.username:
+                raise ValueError("invalid YUNYING_BROKER_URL")
+            if len(broker_secret) < 32:
+                raise ValueError("YUNYING_BROKER_SECRET must contain at least 32 characters")
         return cls(secret, url, os.getenv("YUNYING_INFRA_HOST", "127.0.0.1"),
                    int(os.getenv("YUNYING_INFRA_PORT", "8788")),
-                   _ids(os.getenv("YUNYING_ALLOW_GROUPS", "")), _ids(os.getenv("YUNYING_ALLOW_PRIVATE", "")))
+                   _ids(os.getenv("YUNYING_ALLOW_GROUPS", "")), _ids(os.getenv("YUNYING_ALLOW_PRIVATE", "")),
+                   broker_url, broker_secret)
 
     def allowed(self, key):
         kind, value = key.split(":", 1)
