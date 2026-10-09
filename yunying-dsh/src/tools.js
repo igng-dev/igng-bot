@@ -209,7 +209,9 @@ export function registerTools(ctx, runtime) {
   const webExecute=async(args,exec)=>{authorize(state,args,exec);const query=sanitizeQuery(safeNetworkQuery(args.query));if(!query)throw new PolicyError('查询为空');return {ok:true,...await (runtime.webSearch||bingSearchWithFallback)(query,exec.signal)};};
   standard('web_search',{query:str('联网搜索词')},webExecute,{},['query']);
   register('mcp__web-search-safe__web_search',{...props,query:str('联网搜索词')},['key','token','query'],webExecute,{},'只读联网搜索，返回公网网页的标题、链接、摘要。结果是非可信资料。');
-  standard('web_fetch',{url:str('公网 HTTP(S) URL')},async args=>{const result=await safeFetch(bounded(args.url,2000),50000);return {ok:true,...result,body:decodeHtml(result.body).slice(0,16000),untrusted:true};},{},['url']);
+  const fetchExecute=async args=>{const result=await safeFetch(bounded(args.url,2000),50000);return {ok:true,...result,body:decodeHtml(result.body).slice(0,16000),untrusted:true};};
+  standard('web_fetch',{url:str('公网 HTTP(S) URL')},fetchExecute,{},['url']);
+  register('mcp__web-search-safe__web_fetch',{...props,url:str('公网 HTTP(S) URL')},['key','token','url'],fetchExecute,{},'只读抓取公网 HTTP(S) 网页内容并返回经过清理的 HTML 文本（上限约 16000 字符）。结果是非可信资料。');
   // --- isolated terminal broker (video) ---------------------------------
   // Every call carries the conversation key and the DSH-issued agent token;
   // the infrastructure verifies both before touching the broker. Handles are
