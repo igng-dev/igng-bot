@@ -6,10 +6,14 @@ from .events import instant
 
 
 def compute(events, history, start, end, zone):
-    players = defaultdict(lambda: {'joins': 0, 'chat': 0, 'deaths': 0, 'kills': 0, 'online_seconds': 0})
+    players = defaultdict(lambda: {'joins': 0, 'chat': 0, 'deaths': 0, 'kills': 0, 'commands': 0, 'online_seconds': 0})
     first, active, intervals, presence_seen = {}, {}, [], {}
     seen_players = set()
     warnings, interactions = set(), Counter()
+    session_durations = Counter()
+    death_causes = Counter()
+    commands_counter = Counter()
+    first_death_delays = []
     for event in history:
         uid = event.get('player_uuid')
         at = instant(event['occurred_at'])
@@ -63,7 +67,19 @@ def compute(events, history, start, end, zone):
     for uid, entered, exited in intervals:
         if exited <= entered:
             continue
-        players[uid]['online_seconds'] += (exited - entered).total_seconds()
+        duration = (exited - entered).total_seconds()
+        players[uid]['online_seconds'] += duration
+        if entered >= start:
+            if duration < 300:
+                session_durations['<5m'] += 1
+            elif duration < 900:
+                session_durations['5-15m'] += 1
+            elif duration < 3600:
+                session_durations['15-60m'] += 1
+            elif duration < 10800:
+                session_durations['1-3h'] += 1
+            else:
+                session_durations['>3h'] += 1
         ticks.extend([(entered, 1), (exited, -1)])
         cursor = entered
         while cursor < exited:
@@ -102,8 +118,21 @@ def compute(events, history, start, end, zone):
             sources[facts.get('source', 'unknown')] += 1
             hour = instant(event['occurred_at']).replace(tzinfo=timezone.utc).astimezone(ZoneInfo(zone)).isoformat(timespec='hours')
             chat_hours[hour] += 1
+        elif kind == 'COMMAND':
+            player['commands'] += 1
+            cmd = facts.get('reason')
+            if cmd:
+                root_cmd = cmd.split()[0].lower()
+                commands_counter[root_cmd] += 1
         elif kind == 'DEATH':
             player['deaths'] += 1
+            cause_label = facts.get('damage_type') or facts.get('cause') or facts.get('reason') or 'unknown'
+            death_causes[cause_label] += 1
+            if uid in first and uid not in [d[0] for d in first_death_delays]:
+                first_join_time = first[uid]
+                death_time = instant(event['occurred_at'])
+                if death_time >= first_join_time:
+                    first_death_delays.append((uid, (death_time - first_join_time).total_seconds()))
             killer = facts.get('related_uuid')
             if killer and killer != uid and facts.get('related_entity_type') == 'PLAYER' and facts.get('related_is_fake') is not True:
                 if facts.get('related_is_fake') is None:
@@ -130,16 +159,26 @@ def compute(events, history, start, end, zone):
                                           'definition':'first observed in shifted period, JOIN in current period; 90-day bounded history'}
     seen_players.update(uid for uid, entered, exited in intervals if exited > entered)
     rankings = {key: [{'uuid':uid,'name':values.get('name',uid),'value':values[key]} for uid,values in
-                     sorted(players.items(),key=lambda p:(-p[1][key],p[0]))] for key in ('online_seconds','joins','chat','deaths','kills')}
-    return {'algorithm_version': 1, 'timezone': zone, 'independent_players': len(seen_players),
+                     sorted(players.items(),key=lambda p:(-p[1][key],p[0]))] for key in ('online_seconds','joins','chat','deaths','kills','commands')}
+    median_first_death_seconds = None
+    if first_death_delays:
+        delays_sorted = sorted(d[1] for d in first_death_delays)
+        mid = len(delays_sorted) // 2
+        median_first_death_seconds = delays_sorted[mid] if len(delays_sorted) % 2 != 0 else (delays_sorted[mid-1] + delays_sorted[mid]) / 2.0
+
+    return {'algorithm_version': 2, 'timezone': zone, 'independent_players': len(seen_players),
             'joins': counts['JOIN'], 'chat': counts['CHAT'], 'cancelled_chat': counts['cancelled_chat'],
-            'deaths': counts['DEATH'], 'pvp_kills': sum(interactions.values()), 'peak_online': peak,
+            'deaths': counts['DEATH'], 'commands': counts['COMMAND'], 'pvp_kills': sum(interactions.values()), 'peak_online': peak,
             'online_seconds': sum(p['online_seconds'] for p in players.values()),
             'new_observed_players': len(new), 'new_player_definition': 'first JOIN in available 90-day history, not registration',
             'players': [{'uuid': uid, **values} for uid, values in sorted(players.items(), key=lambda p: (-p[1]['online_seconds'], p[0]))],
             'hourly': [{'hour': hour, 'online_seconds': hourly[hour], 'chat': chat_hours[hour]} for hour in sorted(set(hourly) | set(chat_hours))],
             'pvp_edges': [{'from': a, 'to': b, 'kills': n} for (a, b), n in sorted(interactions.items())],
             'retention': retained, 'forward_retention': 'not_matured',
+            'session_durations': dict(session_durations),
+            'death_causes': [{'cause': k, 'count': v} for k, v in death_causes.most_common(20)],
+            'top_commands': [{'command': k, 'count': v} for k, v in commands_counter.most_common(20)],
+            'median_first_death_seconds': median_first_death_seconds,
             'rankings':rankings, 'distributions':{'world_events':dict(worlds),'chat_sources':dict(sources),'event_types':dict(counts)},
             'quality': {'status': 'partial' if warnings else 'observed', 'warnings': sorted(warnings),
                         'note': 'event-derived; queue loss, abrupt shutdown and history start can limit accuracy'}}

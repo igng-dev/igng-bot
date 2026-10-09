@@ -74,3 +74,20 @@ def test_fake_killer_does_not_enter_human_pvp_and_stale_presence_stops_carry_out
     assert stats['pvp_kills']==0
     assert stats['online_seconds']==360
     assert 'stale_presence_open_duration_is_lower_bound' in stats['quality']['warnings']
+
+
+def test_command_analytics_death_causes_and_session_durations():
+    start, end = datetime(2026, 10, 7), datetime(2026, 10, 8)
+    join = event('JOIN', '2026-10-07T00:00:00')
+    cmd1 = event('COMMAND', '2026-10-07T00:01:00', reason='/home bed')
+    cmd2 = event('COMMAND', '2026-10-07T00:02:00', reason='/tpa Friend')
+    death = event('DEATH', '2026-10-07T00:05:00', cause='FALL', damage_type='minecraft:fall')
+    quit_ev = event('QUIT', '2026-10-07T00:10:00')
+    stats = compute([join, cmd1, cmd2, death, quit_ev], [join, quit_ev], start, end, 'Asia/Shanghai')
+    assert stats['commands'] == 2
+    assert stats['top_commands'][0]['command'] == '/home'
+    assert any(c['command'] == '/tpa' for c in stats['top_commands'])
+    assert stats['death_causes'][0]['cause'] == 'minecraft:fall'
+    assert stats['session_durations']['5-15m'] == 1
+    assert stats['median_first_death_seconds'] == 300.0
+    assert stats['rankings']['commands'][0]['value'] == 2
