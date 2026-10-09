@@ -291,8 +291,11 @@ class Infrastructure:
                     headers={"Authorization": "Bearer " + self.config.ONEBOT_HTTP_TOKEN},
                     timeout=ClientTimeout(total=15)) as response:
                     result = await response.json()
-                    if response.status != 200 or result.get("status") != "ok" or result.get("retcode") != 0:
-                        result = {"ok": False, "status": "failed", "error": "OneBot 拒绝发送"}
+                    retcode = result.get("retcode")
+                    is_mute = retcode == 120 or "result=120" in str(result)
+                    if response.status != 200 or result.get("status") != "ok" or retcode != 0:
+                        err_msg = "群内已被禁言" if is_mute else "OneBot 拒绝发送"
+                        result = {"ok": False, "status": "failed", "error": err_msg, "muted": is_mute}
                         self.journal.finish_send(request_id, "failed", result)
                         return result
                 message_id = str((result.get("data") or {}).get("message_id") or "")

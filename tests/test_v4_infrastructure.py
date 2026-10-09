@@ -154,6 +154,21 @@ def test_tool_send_is_literal_segments_and_same_call_cannot_duplicate():
     asyncio.run(scenario())
 
 
+def test_mute_result_120_is_handled_as_failed_and_not_retried():
+    async def scenario():
+        app = app_for_send(Response({"status": "failed", "retcode": 120, "message": "send group message rejected: result=120"}))
+        data = {"key": "group:1001", "requestId": "native-call:muted", "message": "你好"}
+        result = await app.send(data)
+        assert result["ok"] is False
+        assert result["status"] == "failed"
+        assert result["muted"] is True
+        assert result["error"] == "群内已被禁言"
+        second = await app.send(data)
+        assert second == result
+        assert app.http.post.call_count == 1
+    asyncio.run(scenario())
+
+
 def test_uncertain_send_outcome_is_preserved_and_not_retried():
     async def scenario():
         app = app_for_send(Response(error=asyncio.TimeoutError()))

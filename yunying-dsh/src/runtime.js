@@ -356,7 +356,7 @@ export class SocialRuntime {
       const agent=runtime.handle?.agent;
       if(!agent||agent.status!=='running')return;
       await this.refreshPolicy(runtime);
-      if(runtime.progress!==progress||!this.permitted(runtime)||progress.heartbeats>=this.config.progressMaxHeartbeatPerTurn)return;
+      if(runtime.progress!==progress||!this.permitted(runtime)||runtime.state.waiting||progress.heartbeats>=this.config.progressMaxHeartbeatPerTurn)return;
       progress.heartbeats++;
       await this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:hb:${progress.heartbeats}`,heartbeatText(progress));
       if(runtime.progress===progress)this.armHeartbeat(runtime);
