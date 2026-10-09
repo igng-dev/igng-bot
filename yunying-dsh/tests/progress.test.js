@@ -81,3 +81,20 @@ test('progress reports can be switched off entirely',async()=>{
   assert.equal(sent.length,0);
  }finally{await runtime.close();await ctx.fiber.dispose();}
 });
+
+test('heartbeat mode suppresses sending while conversation is in waiting state',async()=>{
+ const {ctx,adapter}=await harness();const store=new FixtureStore(),sent=[];
+ const runtime=new SocialRuntime(ctx,store,{...testSettings(),progressModelsWithout:new Set(['script']),progressIntervalMs:20,progressMaxHeartbeatPerTurn:20,minQuietMs:10,waitMinMs:10,preSleepWaitMs:10},async(path,body)=>{sent.push({path,body});return {ok:true,message_id:'9005'};});
+ try{
+  const conv=await runtime.load('group:1001');
+  const args={key:conv.state.key,token:conv.state.agentToken};
+  adapter.script.push(toolResponse('w1','qq_wait_for_messages',{...args,timeoutMs:60,purpose:'messages'}),textResponse(''));
+  await runtime.accept(event('heartbeat-wait-1','group:1001',{atBot:true}));
+  for(let n=0;n<50&&!conv.state.waiting;n++)await pause(5);
+  assert.equal(conv.state.waiting,true);
+  await pause(30);
+  const beats=sent.filter(item=>item.body.requestId.includes(':hb:'));
+  assert.equal(beats.length,0,'heartbeat must be suppressed while waiting is true');
+  await settle(runtime);
+ }finally{await runtime.close();await ctx.fiber.dispose();}
+});
