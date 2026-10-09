@@ -9,7 +9,7 @@ import { bindWakePrompts } from '../donor/qq-bridge/wake-prompts.js';
 import { compactModelMessage, serializeModelData } from '../donor/qq-bridge/qq-model-view.js';
 import { allowed, bounded, canonicalKey, PolicyError } from './policy.js';
 import { projectEvent, toolResultMode } from './transcript.js';
-import { countToolCall, emptyProgress, forwardableText, heartbeatText, progressMode } from './progress.js';
+import { countToolCall, emptyProgress, forwardableText, heartbeatText, isReplyTool, progressMode } from './progress.js';
 const donorPreset = yaml.load(readFileSync(new URL('../donor/qq-bridge/agent.cordis.yml',import.meta.url),'utf8'));
 // The YAML's >- folding is significant: preserve the evaluated original prefix, not a hand-reflowed version.
 export const RESERVED2_PROMPT = donorPreset.find(row=>row.name==='@dsh-persona' || row.name==='@deepseek-ai/dsh-persona')?.config.prefix
@@ -90,7 +90,8 @@ export class SocialRuntime {
       handle:null,timers:new Map(),progress:null,progressMode:progressMode(this.config,this.config.model),wakePending:false,wakeMiss:0,recordTasks:new Set(),committedMessageIds:new Set(),pendingReason:null,closedThrough:state.lastReadThroughSeq,
       refreshPolicy:()=>this.refreshPolicy(runtime),permitted:()=>this.permitted(runtime),
       schedule:()=>this.schedule(runtime),cancelReplyCheck:()=>this.clearTimer(runtime,'reply'),
-      scheduleReplyCheck:()=>this.timer(runtime,'reply',this.config.replyCheckMs,()=>this.wake(runtime,'replyCheck'))};
+      scheduleReplyCheck:text=>this.scheduleReplyCheck(runtime,text),
+      stopProgress:()=>this.stopProgress(runtime)};
     if(this.config.searchProvider==='deepseek')runtime.webSearch=async(query,signal)=>{
       const result=await this.ctx.web.search({query,maxResults:8},signal);
       return {query,results:result.sources.map(source=>({title:source.title,url:source.url,snippet:source.snippet||''})),untrusted:true};
@@ -251,7 +252,10 @@ export class SocialRuntime {
       const reason=message&&runtime.state.wakeReason(message);
       if(runtime.state.chatMode&&!payload.observeOnly&&!runtime.state.bootstrapSent&&!message?.isSelf&&!message?.commandHandled)await this.wake(runtime,'bootstrap',true);
       else if(reason) {
-        if(['atMention','private','nameMention'].includes(reason))await this.wake(runtime,reason,true);
+        // A nickname is not a direct call: batch it with whatever else arrives,
+        // and let an already-running turn see it through the inbox instead of
+        // starting a second one. @ and private messages still wake immediately.
+        if(['atMention','private'].includes(reason))await this.wake(runtime,reason,true);
         else if(runtime.handle.agent.status==='idle'&&!runtime.state.waiting)this.timer(runtime,'batch',this.config.batchWindowMs,()=>this.wake(runtime,reason));
       }
       return {ok:true,eventId:event.event_id,seq:event.seq};
@@ -334,7 +338,15 @@ export class SocialRuntime {
     const data=event.data||{};
     if(event.type==='turn/start')this.startProgress(runtime,Number.isInteger(data.turn)?data.turn:0);
     else if(event.type==='step/start'){if(runtime.progress)runtime.progress.steps++;}
-    else if(event.type==='tool/call'){if(runtime.progress)countToolCall(runtime.progress,String(data.name||''));}
+    else if(event.type==='tool/call'){
+      if(runtime.progress){
+        const name=String(data.name||'');
+        countToolCall(runtime.progress,name);
+        // The reply is already on its way to the chat, so a heartbeat after this
+        // would only report work the other person has already seen finish.
+        if(isReplyTool(name))runtime.progress.quiet=true;
+      }
+    }
     else if(event.type==='assistant/message')this.forwardProgress(runtime,event);
     else if(event.type==='turn/end')this.stopProgress(runtime);
   }
@@ -356,10 +368,15 @@ export class SocialRuntime {
       const agent=runtime.handle?.agent;
       if(!agent||agent.status!=='running')return;
       await this.refreshPolicy(runtime);
-      if(runtime.progress!==progress||!this.permitted(runtime)||runtime.state.waiting||progress.heartbeats>=this.config.progressMaxHeartbeatPerTurn)return;
-      progress.heartbeats++;
-      await this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:hb:${progress.heartbeats}`,heartbeatText(progress));
-      if(runtime.progress===progress)this.armHeartbeat(runtime);
+      if(runtime.progress!==progress||progress.quiet)return;
+      // Keep checking until the turn ends. A social turn may only start a search
+      // after the first interval, and a wait only pauses the announcement.
+      const announce=this.permitted(runtime)&&!runtime.state.waiting&&progress.substantive&&progress.heartbeats<this.config.progressMaxHeartbeatPerTurn;
+      if(announce){
+        progress.heartbeats++;
+        await this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:hb:${progress.heartbeats}`,heartbeatText(progress));
+      }
+      if(runtime.progress===progress&&!progress.quiet)this.armHeartbeat(runtime);
     });
   }
   forwardProgress(runtime,event) {
@@ -381,6 +398,14 @@ export class SocialRuntime {
     // ledger keeps the request idempotent; failures are deferred, never retried.
     return this.infra('/send',{key:runtime.state.key,requestId:`progress:${id}`,message:text,
       ...(runtime.directEventId?{triggerEventId:runtime.directEventId}:{})});
+  }
+  scheduleReplyCheck(runtime,text) {
+    // Coming back to see whether anyone answered only makes sense when we asked
+    // something or left the sentence open. A finished reply ("在的") must not
+    // schedule another full turn half a minute later.
+    const body=String(text||'').trim();
+    if(!body||body==='[附件]'||!/[?？]|吗[。！!]?$|呢[。！!]?$/.test(body))return;
+    this.timer(runtime,'reply',this.config.replyCheckMs,()=>this.wake(runtime,'replyCheck'));
   }
   schedule(runtime) {
     if(this.stopping||!runtime.state.chatMode)return;

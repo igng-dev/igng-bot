@@ -47,6 +47,23 @@ test('default wake probability is 0.20 and the old 0.05 default migrates once',(
  const custom=new SocialState('group:1001','test',{wakeConfig:{...fresh.wakeConfig,triggers:{...fresh.wakeConfig.triggers,probability:0.3}}});
  assert.equal(custom.wakeConfig.triggers.probability,0.3);
 });
+test('own echo keeps its sequence but does not look like someone new spoke',()=>{
+ const s=state();append(s,1,'云萤你在吗');s.note(s.unread);s.lastWakeReason='nameMention';
+ s.append({seq:2,payload:{messageId:'2',text:'在的',plain:'在的',userId:'0',isSelf:true}});
+ assert.equal(s.lastUnreadSeq,2);
+ assert.equal(s.pendingFromOthers().map(m=>m.seq).join(','),'1','the echo is not a pending message from someone else');
+ assert.equal(s.preSleepBlocked(),false,'the ping was already seen, so closing does not need a five minute watch');
+ const before=s.lastIncomingAt;
+ s.append({seq:3,payload:{messageId:'3',text:'又一句',plain:'又一句',userId:'0',isSelf:true}});
+ assert.equal(s.lastIncomingAt,before,'an echo must not restart the pre-sleep clock');
+ s.append({seq:4,payload:{messageId:'4',text:'那你看这个',plain:'那你看这个',userId:'2001',isSelf:false}});
+ assert.equal(s.preSleepBlocked(),true,'a newer message nobody has looked at still needs the watch');
+});
+test('a nickname is a wake reason but an explicit mention still wins',()=>{
+ const s=state();
+ assert.equal(s.wakeReason({text:'云萤你在吗',plain:'云萤你在吗',userId:'2001'}),'nameMention');
+ assert.equal(s.wakeReason({text:'云萤你在吗',atBot:true,userId:'2001'}),'atMention');
+});
 test('recall tombstone removes content and media from unread/recent views',()=>{
  const s=state();append(s,1,'秘密内容');s.unread[0].media=[{type:'image'}];s.append({seq:2,payload:{kind:'recall',messageId:'1',text:'[消息已撤回]'}});
  const row=s.unreadPage(10,0).messages[0];assert.equal(row.text,'[消息已撤回]');assert.equal(row.plain,undefined);assert.deepEqual(row.media,undefined);

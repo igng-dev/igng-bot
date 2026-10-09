@@ -49,10 +49,14 @@ export class SocialState {
     }
     this.recentMessages.push(msg);
     this.recentMessages = this.recentMessages.slice(-100);
-    // All received events have durable sequence numbers, including echoes and recalls. Never skip a gap.
+    // Every received event keeps its sequence, including our own echoes and
+    // recalls, so the read watermark can never skip a gap.
     if (seq > this.lastReadThroughSeq) this.unread.push(msg);
     this.unread.sort((a, b) => a.seq - b.seq);
-    if (!replay && !msg.isSelf) {
+    // An echo of our own send is not someone talking. It must not restart the
+    // pre-sleep clock, or a reply we just made would look like new incoming
+    // chat and the turn could never close.
+    if (!replay && !msg.isSelf && !msg.isConfiguration) {
       this.lastIncomingAt = this.clock(); this.preSleepWaitSatisfiedAt = 0; this.preSleepWaitObservedAt = 0;
     }
     return msg;
@@ -116,7 +120,17 @@ export class SocialState {
     }
     return result;
   }
+  /** Other people's still-unread messages. Own echoes and config notices do not count. */
+  pendingFromOthers() {
+    return this.unread.filter(m => !m.isSelf && !m.isConfiguration && m.kind !== 'recall');
+  }
   preSleepBlocked() {
+    // A direct ping this turn has already seen, with nothing newer behind it,
+    // has nothing left to watch for. The long pre-sleep observation stays
+    // mandatory when someone else's message is still unseen, and when we are
+    // diving on our own initiative rather than answering them.
+    if (['atMention','private','nameMention'].includes(this.lastWakeReason)
+        && !this.pendingFromOthers().some(m => m.seq > this.readThrough())) return false;
     if (EXPLICIT_END_RE.test(String(this.lastIncoming()?.plain || this.lastIncoming()?.text || ''))) return false;
     const wait = this.config.preSleepWaitMs ?? 300000;
     if (this.lastIncomingAt && this.clock() - this.lastIncomingAt >= wait) return false;

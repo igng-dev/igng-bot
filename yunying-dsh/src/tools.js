@@ -132,7 +132,7 @@ export function registerTools(ctx, runtime) {
       const result=await infra('/send',{key:state.key,requestId:`${state.sessionId}:${exec.callId}:${index}`,
         triggerEventId:runtime.directEventId,message:messages[index],replyToMessageId:args.replyToMessageId,atUserId:args.atUserId},exec.signal);
       results.push(result);if(!result.ok)break;
-      state.sent(result.message_id,messages[index]);await store.saveState(state);runtime.scheduleReplyCheck();
+      state.sent(result.message_id,messages[index]);await store.saveState(state);runtime.scheduleReplyCheck(messages[index]);
     }
     return {ok:results.length===messages.length&&results.every(r=>r.ok),key:state.key,results};
   };
@@ -245,7 +245,7 @@ export function registerTools(ctx, runtime) {
     const result=await infra('/terminal/send',{key:state.key,token:state.agentToken,sessionId:args.sessionId,artifactId:args.artifactId,
       requestId:`${state.sessionId}:${exec.callId}:artifact`,replyToMessageId:args.replyToMessageId,atUserId:args.atUserId,
       triggerEventId:runtime.directEventId},exec.signal);
-    if(result.ok){state.sent(result.message_id,'[附件]');await store.saveState(state);runtime.scheduleReplyCheck();}
+    if(result.ok){state.sent(result.message_id,'[附件]');await store.saveState(state);runtime.scheduleReplyCheck('[附件]');}
     return result;
   }, { timeoutMs:300000 },
   '把隔离视频服务里的产物发回当前会话；固定能力，不接受路径、URL 或任意 OneBot 动作。');
