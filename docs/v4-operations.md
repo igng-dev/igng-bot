@@ -28,7 +28,7 @@ python -m pip install -r requirements-dev.txt
 | `YUNYING_SEARCH_PROVIDER` | `bing` 先用 donor 原 HTML 搜索，空结果时用同一受限传输读取 Bing RSS；明确设 `deepseek` 可使用官方认证搜索，默认仍是 Bing。 |
 | `DEEPSEEK_SEARCH_BASE_URL` | 可选，官方搜索独立端点，默认 `https://api.deepseek.com/anthropic/v1`；不会自动沿用模型 BASE_URL。 |
 | `YUNYING_MODELS_WITHOUT_PROGRESS` | 逗号分隔的模型清单：这些模型不会在任务中途输出进度文字，由固定间隔心跳回退。未列出的模型（如默认 DeepSeek）把带工具调用的中间步骤文本转发为过程报告。 |
-| `YUNYING_PROGRESS_INTERVAL_MS` | 心跳间隔毫秒，5000–300000，默认 30000；仅命中清单的模型启用，且只在该会话仍有发送权限时发送。 |
+| `YUNYING_PROGRESS_INTERVAL_MS` | 心跳间隔毫秒，5000–300000，默认 30000。仅命中清单的模型启用；本轮必须出现过搜索或视频类工具、尚未发出回复、且会话仍有发言权，才会发送。读未读、发消息、等待、记忆这些社交动作不触发心跳。 |
 | `YUNYING_PROGRESS_REPORTS` | `auto`（默认）或 `off`；`off` 同时关闭过程报告转发与心跳。 |
 | `YUNYING_WAIT_CHAIN_MS` | 0–600000，默认 600000。`purpose="messages"` 的沉睡前观察在一次工具调用内最多连续等待这么久（实际以工具 735s 超时为上限）：模型为"按剩余时间继续等待"产生的每次续等不再各占一个整段 Session 的模型步骤；`0` 关闭链式等待（回到每次只等 `timeoutMs`）。 |
 | `YUNYING_BOOTSTRAP_INJECT_LIMIT` | 0–500，默认 20。启动/恢复时最多把最近多少条未投递事件重放进原生 Session；更早的积压留在社会状态里，由未读/历史工具按需读取，不再永久抬高每次请求的上下文。显式 @/回复永远投递。 |
@@ -36,7 +36,7 @@ python -m pip install -r requirements-dev.txt
 | `DSH_HOME` | 持久目录，包含官方 Profile、Session、附件与派生索引；生产必须挂卷并备份。 |
 | `YUNYING_ADMIN_SECRET` | 可选 Owner/未来网站管理凭据，至少32字符且与 INTERNAL 不同；不向模型提供。 |
 
-过程报告：带工具调用的中间步骤文本按模型清单分流——未列出的模型转发过程文字（每轮最多 6 条、间隔至少 8 秒、单条截断 400 字符），清单中的模型由心跳回退（每轮最多 20 条，统计命令/搜索/思考数）。两者都走固定 `/send` capability，仍受聊天模式/直接呼叫窗口与发送账本约束；收尾答复始终只经 `qq_send_message` 工具发送，不自动转发。
+过程报告：带工具调用的中间步骤文本按模型清单分流——未列出的模型转发过程文字（每轮最多 6 条、间隔至少 8 秒、单条截断 400 字符），清单中的模型在本轮做过搜索或视频处理、且还没把回复发出去时，由心跳回退（每轮最多 20 条，文案只说「正在查资料」或「还在处理」）。普通闲聊、点名、主动冒泡不会报心跳。两者都走固定 `/send` capability，仍受聊天模式/直接呼叫窗口与发送账本约束；收尾答复始终只经 `qq_send_message` 工具发送，不自动转发。名字点到走合批窗口，不与 @、私聊一样立即唤醒；回复检查只在发出的内容像问句或没说完时安排。
 
 默认本机 capability 监听 `127.0.0.1:8787/8788`；Docker 使用内部网络，不映射主机端口。迁移和运行：
 
