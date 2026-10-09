@@ -59,8 +59,9 @@ class Infrastructure:
     def callback(self, raw):
         if self._stopping:
             return
-        # Called on the WebSocket thread; acknowledge only after durable DB acceptance.
-        asyncio.run_coroutine_threadsafe(self.enqueue(raw), self.loop).result()
+        # Dispatched to the async loop without blocking the WebSocket reception thread.
+        future = asyncio.run_coroutine_threadsafe(self.enqueue(raw), self.loop)
+        future.add_done_callback(lambda f: f.exception() if not f.cancelled() and f.exception() else None)
         if raw.get("self_id") and not self.config.BOT_USER_ID:
             self.config.BOT_USER_ID = int(raw["self_id"])
 
