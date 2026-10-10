@@ -39,6 +39,7 @@ export async function route(request,runtime,config) {
   }
   if(request.url==='/admin/memory/rollback')return store.adminRollback(data.id,data.version,data.expectedVersion,data.reason);
   if(request.url==='/admin/memory/forget')return store.memoryUpdate(actor,data,true);
+  if(request.url==='/admin/knowledge')return store.knowledgeAdmin(data);
   if(request.url==='/admin/session/events') {
     const sessionId=bounded(data.sessionId,80);
     const events=await store.sessionEvents(sessionId,data.after,integer(data.limit,1,5000,1000));

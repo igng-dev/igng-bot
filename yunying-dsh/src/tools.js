@@ -5,6 +5,7 @@ import { sanitizeQuery, decodeHtml } from '../donor/qq-bridge/web-functions.js';
 import { bingSearchWithFallback } from './search.js';
 import { safeFetch } from '../donor/qq-bridge/safe-fetch.js';
 import { authorize, PolicyError, bounded, integer, safeNetworkQuery } from './policy.js';
+import { CATEGORY_TTL_HOURS } from './knowledge.js';
 const descriptions = JSON.parse(readFileSync(new URL('../donor/qq-bridge/tool-descriptions.json', import.meta.url)));
 const str = description => ({ type: 'string', description });
 const num = description => ({ type: 'integer', description });
@@ -60,6 +61,7 @@ export function registerTools(ctx, runtime) {
     ...state.unreadPage(30,0), wakeConfig:state.wakeConfig, participation:{chatMode:state.chatMode,calledTurn:!!runtime.directEventId}, replyTiming:state.replyTiming(),
     memory:{activeTopics:state.activeTopics,pendingThoughts:state.pendingThoughts,memberImpressions:state.memberImpressions},
     longTermMemory:{skill:'yunying-memory',sourceOfTruth:'MySQL',personMemoryCrossGroup:true},
+    worldKnowledge:{tools:['knowledge_search','knowledge_propose','knowledge_use'],sourceOfTruth:'MySQL',global:true,untrusted:true,autoInject:true},
     safety:{currentConversationOnly:true,untrustedMemberInput:true,noShellOrFilesystem:true} }));
   standard('qq_get_unread_messages', {limit:num('默认30，最大100'),afterSeq:num('从该 seq 后按时间顺序补读；最早传0')}, args => state.unreadPage(args.limit,args.afterSeq));
   standard('qq_get_recent_messages', {limit:num('默认20，最大100'),offset:num('向前翻页')}, async args => {
@@ -206,7 +208,19 @@ export function registerTools(ctx, runtime) {
   standard('memory_write',{title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason,personQQ:memoryProps.personQQ},args=>store.memoryWrite(actor(),args),{},['title','markdown','sources','reason']);
   standard('memory_update',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args),{},['id','expectedVersion','markdown','sources','reason']);
   standard('memory_forget',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args,true),{},['id','expectedVersion','sources','reason']);
-  const webExecute=async(args,exec)=>{authorize(state,args,exec);const query=sanitizeQuery(safeNetworkQuery(args.query));if(!query)throw new PolicyError('查询为空');return {ok:true,...await (runtime.webSearch||bingSearchWithFallback)(query,exec.signal)};};
+  standard('knowledge_search',{query:str('世界知识检索词；空字符串不返回'),limit:num('最多5')},args=>store.knowledgeSearch(args),{},['query']);
+  standard('knowledge_use',{ids:{type:'array',items:str('本轮注入或 knowledge_search 返回的文档 id'),minItems:1,maxItems:5,description:'本轮回答实际采用的知识'}},
+    args=>store.knowledgeMarkUsed(args.ids),{},['ids']);
+  standard('knowledge_propose',{key:str('主体:限定，如 paper:1.21.1:gamemode'),title:str('短标题'),claim:str('必须包含本次搜索摘录原文的命题'),
+    category:{type:'string',enum:Object.keys(CATEGORY_TTL_HOURS),description:'volatile=1天 software=14天 rules=90天 stable=365天'},
+    searchId:str('本次 web_search 返回的 searchIds 之一'),reason:str('以后还会用到的原因')},
+    args=>store.knowledgePropose(actor(),args),{},['key','title','claim','category','searchId','reason']);
+  const webExecute=async(args,exec)=>{
+    authorize(state,args,exec);const query=sanitizeQuery(safeNetworkQuery(args.query));if(!query)throw new PolicyError('查询为空');
+    const result=await (runtime.webSearch||bingSearchWithFallback)(query,exec.signal);
+    const searchIds=store.noteKnowledgeSearch?.(state.key,{...result,query})||[];
+    return {ok:true,...result,searchIds,untrusted:true};
+  };
   standard('web_search',{query:str('联网搜索词')},webExecute,{},['query']);
   register('mcp__web-search-safe__web_search',{...props,query:str('联网搜索词')},['key','token','query'],webExecute,{},'只读联网搜索，返回公网网页的标题、链接、摘要。结果是非可信资料。');
   const fetchExecute=async args=>{const result=await safeFetch(bounded(args.url,2000),50000);return {ok:true,...result,body:decodeHtml(result.body).slice(0,16000),untrusted:true};};
