@@ -68,3 +68,17 @@ test('recall tombstone removes content and media from unread/recent views',()=>{
  const s=state();append(s,1,'秘密内容');s.unread[0].media=[{type:'image'}];s.append({seq:2,payload:{kind:'recall',messageId:'1',text:'[消息已撤回]'}});
  const row=s.unreadPage(10,0).messages[0];assert.equal(row.text,'[消息已撤回]');assert.equal(row.plain,undefined);assert.deepEqual(row.media,undefined);
 });
+
+test('ban events update self mute status and persist across snapshot',()=>{
+ const s=state();
+ assert.equal(s.muteStatus().isMuted, false);
+ s.append({seq:2, payload:{kind:'ban', subType:'ban', isSelf:true, duration:120, text:'[自己被禁言 120 秒]'}});
+ assert.equal(s.muteStatus().isMuted, true);
+ assert.equal(s.muteStatus().remainingSeconds, 120);
+ const snap = s.snapshot();
+ assert.equal(snap.muteUntil > Date.now(), true);
+ const restored = new SocialState('group:1001', 'test', snap);
+ assert.equal(restored.muteStatus().isMuted, true);
+ s.append({seq:3, payload:{kind:'ban', subType:'lift_ban', isSelf:true, duration:0, text:'[自己解除禁言]'}});
+ assert.equal(s.muteStatus().isMuted, false);
+});

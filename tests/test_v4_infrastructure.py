@@ -316,3 +316,35 @@ def test_member_cannot_toggle_chat_mode():
         assert not hasattr(app.journal,"last_control")
         assert "权限" in app.http.post.call_args.kwargs["json"]["message"][-1]["data"]["text"]
     asyncio.run(scenario())
+
+
+def test_ban_notice_and_reaction_infrastructure():
+    import json
+    async def scenario():
+        app = app_for_send(Response({"status": "ok", "retcode": 0, "data": {"result": 0}}))
+        app.db.get_message_by_msg_id.return_value = {"message_id": "12345"}
+        # Prepare ban notice
+        raw_ban = {"post_type": "notice", "notice_type": "group_ban", "sub_type": "ban",
+                   "group_id": 1001, "user_id": 3001, "operator_id": 2001, "duration": 300, "self_id": 3001}
+        prepared = await app.prepare({"event_id": "ev-ban-1", "conversation_key": "group:1001", "raw_event": json.dumps(raw_ban)})
+        assert prepared["kind"] == "ban"
+        assert prepared["isSelf"] is True
+        assert prepared["duration"] == 300
+        assert "自己被禁言 300 秒" in prepared["text"]
+
+        # Reaction API via infrastructure POST /reaction
+        data = {"key": "group:1001", "requestId": "native-call:react-1", "messageId": "12345", "emojiId": "76"}
+        # Mock request object for api method
+        req = MagicMock()
+        req.headers = {"Authorization": "Bearer " + app.settings.internal_secret}
+        req.method = "POST"
+        req.path = "/reaction"
+        f = asyncio.Future()
+        f.set_result(data)
+        req.json = MagicMock(return_value=f)
+        res = await app.api(req)
+        body = json.loads(res.text)
+        assert body["ok"] is True
+        assert app.http.post.call_count == 1
+        assert app.http.post.call_args.kwargs["json"]["emoji_id"] == "76"
+    asyncio.run(scenario())

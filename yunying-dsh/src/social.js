@@ -22,7 +22,7 @@ export class SocialState {
     this.wakeConfig = saved.wakeConfig || defaultWakeConfig();
     // The old 0.05 default is migrated once to the new 0.20; deliberate custom values stay.
     if (this.wakeConfig?.triggers?.probability === 0.05) this.wakeConfig.triggers.probability = 0.20;
-    for (const name of ['lastIncomingAt', 'lastAiReplyAt', 'lastActionAt', 'lastReadThroughSeq', 'preSleepWaitSatisfiedAt', 'preSleepWaitObservedAt', 'lastProactiveAt']) this[name] = Number(saved[name]) || 0;
+    for (const name of ['lastIncomingAt', 'lastAiReplyAt', 'lastActionAt', 'lastReadThroughSeq', 'preSleepWaitSatisfiedAt', 'preSleepWaitObservedAt', 'lastProactiveAt', 'muteUntil']) this[name] = Number(saved[name]) || 0;
     this.bootstrapSent = !!saved.bootstrapSent; this.lastWakeReason = saved.lastWakeReason || '';
     this.activeTopics = saved.activeTopics || []; this.pendingThoughts = saved.pendingThoughts || [];
     this.memberImpressions = saved.memberImpressions || {};
@@ -35,7 +35,7 @@ export class SocialState {
     const result = {};
     for (const name of ['agentToken','wakeConfig','lastIncomingAt','lastAiReplyAt','lastActionAt','lastReadThroughSeq',
       'preSleepWaitSatisfiedAt','preSleepWaitObservedAt','bootstrapSent','lastWakeReason','activeTopics','pendingThoughts',
-      'memberImpressions','wakeTimes','sendTimes','lastProactiveAt']) result[name] = this[name];
+      'memberImpressions','wakeTimes','sendTimes','lastProactiveAt','muteUntil']) result[name] = this[name];
     return result;
   }
   append(event, replay = false) {
@@ -45,6 +45,13 @@ export class SocialState {
     if (msg.kind === 'recall') {
       for (const list of [this.unread, this.recentMessages]) for (const old of list) {
         if (old.messageId === msg.messageId) { old.text = '[消息已撤回]'; old.plain = ''; old.media = []; old.structure = []; old.isRecalled = true; }
+      }
+    }
+    if (msg.kind === 'ban' && msg.isSelf) {
+      if (msg.subType === 'ban' && msg.duration > 0) {
+        this.muteUntil = this.clock() + Number(msg.duration) * 1000;
+      } else if (msg.subType === 'lift_ban' || msg.duration === 0) {
+        this.muteUntil = 0;
       }
     }
     this.recentMessages.push(msg);
@@ -119,6 +126,10 @@ export class SocialState {
       if (result.length >= limit) break;
     }
     return result;
+  }
+  muteStatus() {
+    const remaining = Math.max(0, (this.muteUntil || 0) - this.clock());
+    return { isMuted: remaining > 0, remainingSeconds: Math.ceil(remaining / 1000), muteUntil: this.muteUntil || 0 };
   }
   /** Other people's still-unread messages. Own echoes and config notices do not count. */
   pendingFromOthers() {

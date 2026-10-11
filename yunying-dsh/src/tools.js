@@ -115,7 +115,22 @@ export function registerTools(ctx, runtime) {
   const sendProperties = { messages:{oneOf:[{type:'string'},{type:'array',items:{type:'string'},minItems:1,maxItems:8}]},
     replyToMessageId:numberOrString, atUserId:numberOrString, gapMode:{type:'string',enum:['auto','fixed','byLength']},
     gapMs:{type:'number'},gaps:{type:'array',items:{type:'number'},maxItems:7} };
+  const EMOJI_ALIAS_MAP = {
+    'like': '76', '点赞': '76', '赞': '76', '👍': '76',
+    'ok': '124', '好的': '124', '👌': '124',
+    'heart': '66', '爱心': '66', '红心': '66', '心': '66', '❤️': '66',
+    'doge': '277', '旺柴': '277', '狗头': '277', '🐶': '277',
+    'think': '32', '思考': '32', '沉思': '32', '🤔': '32',
+    'laugh': '179', '笑哭': '179', '哭笑': '179', '😂': '179',
+    'sweat': '13', '擦汗': '13', '尴尬': '13', '流汗': '13', '汗': '13', '😓': '13',
+    'applause': '99', '鼓掌': '99', '啪啪啪': '99', '👏': '99',
+    'fire': '173', '火': '173', '🔥': '173',
+    'celebrate': '144', '庆祝': '144', '彩带': '144', '🎉': '144'
+  };
+
   const sendMessages = async (args,exec) => {
+    const muteInfo = state.muteStatus();
+    if (muteInfo.isMuted) throw new PolicyError(`群内已被禁言（还剩约 ${muteInfo.remainingSeconds} 秒解禁，期间无法发消息）`);
     let messages=args.messages;
     if(typeof messages==='string' && /^[\[\"]/.test(messages.trim())) {try {const parsed=JSON.parse(messages);if(typeof parsed==='string'||Array.isArray(parsed))messages=parsed;}catch {}}
     messages=Array.isArray(messages)?messages:[messages];
@@ -154,6 +169,16 @@ export function registerTools(ctx, runtime) {
     const result=await infra('/poke',{key:state.key,triggerEventId:runtime.directEventId,userId:String(args.targetUserId||state.key.split(':')[1]),requestId:`${state.sessionId}:${exec.callId}:poke`},exec.signal);
     if(result.ok){state.sent(null,'[拍一拍]');await store.saveState(state);}return result;
   });
+  standard('qq_react_message',{messageId:numberOrString,emoji:str('表情名称或 emoji 代码，如 like/点赞/👍/ok/heart/doge/think/laugh/76')},async(args,exec)=>{
+    if(!state.key.startsWith('group:'))throw new PolicyError('表情回应仅支持群聊');
+    const now=Date.now();if(state.sendTimes.filter(t=>now-t<60000).length>=config.maxSendMinute)throw new PolicyError('发送频率超限');
+    const rawEmoji=String(args.emoji||'').trim();
+    const emojiId=EMOJI_ALIAS_MAP[rawEmoji.toLowerCase()] || EMOJI_ALIAS_MAP[rawEmoji] || (/^[0-9]{1,10}$/.test(rawEmoji) ? rawEmoji : null);
+    if(!emojiId)throw new PolicyError('不支持的表情代码或名称：' + rawEmoji);
+    const targetMsgId=resolveMessageId(args.messageId);
+    const result=await infra('/reaction',{key:state.key,triggerEventId:runtime.directEventId,messageId:targetMsgId,emojiId,requestId:`${state.sessionId}:${exec.callId}:react`},exec.signal);
+    if(result.ok){state.sent(null,`[贴表情:${emojiId}]`);await store.saveState(state);}return result;
+  },{},['messageId','emoji'],'对群聊中的某条消息进行表情回应/贴表情（点赞、附和、疑惑等交互）。');
   const resolveMessageId = supplied => {
     const exact=state.recentMessages.find(m=>m.messageId===String(supplied));if(exact)return exact.messageId;
     const local=state.recentMessages.find(m=>m.seq===Number(supplied));return local?.messageId||String(supplied);
