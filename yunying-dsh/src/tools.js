@@ -6,6 +6,7 @@ import { bingSearchWithFallback } from './search.js';
 import { safeFetch } from '../donor/qq-bridge/safe-fetch.js';
 import { authorize, PolicyError, bounded, integer, safeNetworkQuery } from './policy.js';
 import { CATEGORY_TTL_HOURS } from './knowledge.js';
+import { rankSlang } from './slang.js';
 const descriptions = JSON.parse(readFileSync(new URL('../donor/qq-bridge/tool-descriptions.json', import.meta.url)));
 const str = description => ({ type: 'string', description });
 const num = description => ({ type: 'integer', description });
@@ -38,7 +39,14 @@ export function registerTools(ctx, runtime) {
         authorize(state, args, exec); exec.signal.throwIfAborted();
         await runtime.refreshPolicy();
         if (!store.healthy || !runtime.permitted()) throw new PolicyError('会话权限已关闭或运行实例已失去权限');
-        try{return await execute(args,exec);}
+        try{
+          const result=await execute(args,exec);
+          // Only data actually returned by authorized reads contributes context.
+          if(['qq_get_prompt','qq_get_unread_messages','qq_get_recent_messages','qq_get_message_detail','qq_wait_for_messages'].includes(name)) {
+            runtime.observeSlang?.([...(result.messages||[]),...(result.recent||[]),...(result.message?[result.message]:[])]);
+          }
+          return result;
+        }
         catch(error){
           if(name.startsWith('memory_'))await store.audit(actor(),name.slice(7)+'-denied',null,false,{error:error.name||'Error'}).catch(()=>{});
           if(error instanceof PolicyError || exec.signal.aborted)throw error;
@@ -259,6 +267,10 @@ export function registerTools(ctx, runtime) {
     args=>store.stylePatch(actor(),args,config),{},['expectedVersion','changes','sources','reason'],
     '小幅修订当前会话表达风格。证据不足时用 observe 保存候选；不修改身份、权限或参与规则，也不向群里播报。');
   standard('knowledge_search',{query:str('世界知识检索词；空字符串不返回'),limit:num('最多5')},args=>store.knowledgeSearch(args),{},['query']);
+  standard('slang_search',{query:str('梗、别名或当前语境；不接受凭据'),limit:num('最多3')},async args=>{
+    const query=safeNetworkQuery(args.query),snapshot=await store.slangSnapshot();
+    return {ok:true,untrusted:true,entries:rankSlang(snapshot.entries,query,{semantic:config.slangSemantic}).matches.slice(0,integer(args.limit,1,3,3))};
+  },{},['query'],'按需读取已发布梗的完整解释和来源；自动语境辅助不依赖主动调用。不会提交或发布知识。');
   standard('knowledge_use',{ids:{type:'array',items:str('本轮注入或 knowledge_search 返回的文档 id'),minItems:1,maxItems:5,description:'本轮回答实际采用的知识'}},
     args=>store.knowledgeMarkUsed(args.ids),{},['ids']);
   standard('knowledge_propose',{key:str('主体:限定，如 paper:1.21.1:gamemode'),title:str('短标题'),claim:str('必须包含本次搜索摘录原文的命题'),

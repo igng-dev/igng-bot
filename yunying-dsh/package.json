@@ -7,7 +7,8 @@
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./historian": "./src/historian.js"
+    "./historian": "./src/historian.js",
+    "./slang-curator": "./src/slang-curator.js"
   },
   "engines": {
     "node": ">=24"
@@ -19,7 +20,7 @@
   },
   "scripts": {
     "test": "node --test --test-concurrency=1 tests/*.test.js",
-    "check": "for file in src/*.js; do node --check \"$file\" || exit; done"
+    "check": "for file in src/*.js ../slang-curator-dsh/index.js ../igngbot_v4/slang/manage.js ../scripts/slang-evaluate.mjs; do node --check \"$file\" || exit; done"
   },
   "dependencies": {
     "mysql2": "3.24.5",

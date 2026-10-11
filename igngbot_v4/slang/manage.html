@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>梗知识库 · Owner 管理</title>
+<link rel="stylesheet" href="/assets/manage.css">
+<main>
+  <h1>梗 / 网络用语知识库</h1>
+  <p>仅 Owner 操作。候选不等于已审核；科普发布时间不等于流行时间。凭据只保留在当前页面内存，不写入浏览器存储。</p>
+  <label>Owner 凭据 <input id="secret" type="password" autocomplete="off"></label>
+  <button id="forget">清除凭据</button>
+  <nav id="navigation">
+    <button data-action="list">条目</button><button data-action="candidates">维护候选</button>
+    <button data-action="sources">来源</button><button data-action="jobs">任务</button>
+    <button data-action="policy">开关</button><button data-action="metrics">聚合反馈 / 用量</button>
+    <button id="export">导出全部条目</button>
+  </nav>
+  <p id="message" role="status"></p>
+  <section><h2>查询结果</h2><div id="results"></div></section>
+  <section><h2>结构化编辑 / 导入</h2>
+    <p>编辑条目可保留来源、修订状态或停用。发布前请核对真实材料；ASR / 视觉解释不能直接充当已审核原文。版本冲突时重新读取，不强制覆盖。</p>
+    <label>操作 <select id="action">
+      <option value="save">保存条目（含发布 / 停用）</option><option value="review">审核维护候选</option>
+      <option value="rollback">回滚为新版本</option><option value="source-save">保存来源订阅</option>
+      <option value="create">导入材料并创建维护任务</option><option value="poll">手动检查来源</option>
+      <option value="retry">重试失败任务</option><option value="policy">修改开关</option>
+      <option value="feedback">设置本会话表达偏好</option><option value="consent">授权 / 关闭本会话匿名计数</option>
+      <option value="semantic-consent">授权 / 关闭本会话外部语义检索</option>
+      <option value="resolve-unavailable-session">逐条确认丢失 Session 并保守预留预算</option>
+    </select></label>
+    <textarea id="editor" rows="20" spellcheck="false" aria-label="JSON 请求"></textarea>
+    <label><input id="reviewed" type="checkbox">已核对影响范围、来源与版本；明确授权提交此操作</label>
+    <button id="submit">提交</button>
+    <details><summary>请求示例</summary><pre id="examples"></pre></details>
+  </section>
+</main>
+<script src="/assets/manage.js" defer></script>
+</html>

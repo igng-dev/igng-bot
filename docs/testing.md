@@ -172,3 +172,16 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 | `YUNYING_TEST_DB=yunying_v4_test YUNYING_TEST_DB_PORT=43316 YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q` | **150 passed, 0 failed**（含真实官方 DSH CLI 双进程 smoke）；首次全量出现 1 条共享测试库顺序相关的偶发失败，单跑与重跑均通过，与本轮改动无关。 |
 
 新增 Node 回归：durable 消息不再携带 `key`/重复 `plain`/false 默认值；bootstrap 只重放最近窗口且旧积压仍在社会状态；链式等待在一次工具调用内满足；单轮步骤预算取消后模型请求数有界。未做：NAS 生产部署、真实模型/QQ 验收、大历史会话首次压缩的线上耗时与费用观测。
+
+## 梗 / 网络用语知识库（2026-10-12）
+
+详见 [功能、权限、预算与运维边界](slang-knowledge-base.md)。本地环境为共享 venv CPython3.14、Node24.18.0、固定官方 DSH、独立 loopback MariaDB11.8.6（33316）、缓存解包 ffmpeg8.0.1；数据库数据和模型 HTTP 全部为合成 fixture。未连接 NAS、真实 QQ、创作者或付费服务。
+
+- `YUNYING_TEST_DB=yunying_v4_test YUNYING_TEST_DB_PORT=33316 YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests -q`（PATH 包含 pnpm、测试 ffmpeg）：**191 passed，0 skipped**；90条既有 DBHandler `ping(reconnect=True)` 弃用 warning。先前首轮1项失败来自 Social CLI工具边界测试尚未登记新增只读 `slang_search`；显式加入该名字并新增禁止 curator 变更工具的断言后全量通过，没有放宽 host 工具权限。
+- `YUNYING_TEST_DB=yunying_v4_test YUNYING_TEST_DB_PORT=33316 npm --prefix yunying-dsh test`：**88 passed，0 skipped**；含原生 Social、curator、真实 SQL、重启、记账、Compaction和权限回归。
+- `npm --prefix yunying-dsh run check`、`bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh scripts/run-slang-curator-profile.sh`、`bash scripts/privacy-scan.sh`、`git diff --check`：通过。
+- `python -m igngbot_v4.slang.seed --evaluation | node scripts/slang-evaluate.mjs`：200条**合成**识别用例，precision/recall=1；不是人工标注真实对话，不证明生产效果。
+- 真实 ffprobe/ffmpeg 的1秒合成视频 smoke：分段音频、采样画面、缓存清理通过；模型仍是脚本服务，ASR/视觉结果保持未验证。
+- Playwright + 本机一次性 API 页面 smoke：候选保存→发布、陈旧版本拒绝、条目列表、清除凭据、无页面异常通过。检查脚本与截图仅在设备测试缓存，不引入应用运行依赖。
+
+本地 MariaDB不替代远端 MySQL8.4 CI；实际 CI结果记录在PR中。种子60条仍是未审核编辑候选；真实创作者字幕、模型识别质量、全网热度判断、真人 A/B/C 盲评及长期性能/费用仍待验收，不能把以上程序测试称为已上线或真实风格验收。

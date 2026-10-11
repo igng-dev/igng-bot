@@ -12,6 +12,7 @@ import { renderStyle } from './style.js';
 import { projectEvent, toolResultMode } from './transcript.js';
 import { countToolCall, emptyProgress, forwardableText, heartbeatText, isReplyTool, isStyleTool, progressMode } from './progress.js';
 import { renderKnowledge, shouldConsultKnowledge } from './knowledge.js';
+import { SlangContext } from './slang.js';
 const donorPreset = yaml.load(readFileSync(new URL('../donor/qq-bridge/agent.cordis.yml',import.meta.url),'utf8'));
 // The YAML's >- folding is significant: preserve the evaluated original prefix, not a hand-reflowed version.
 export const RESERVED2_PROMPT = donorPreset.find(row=>row.name==='@dsh-persona' || row.name==='@deepseek-ai/dsh-persona')?.config.prefix
@@ -63,6 +64,7 @@ export class SocialRuntime {
     const prior=runtime.state.chatMode,policy=await this.store.policy(runtime.state.key);
     runtime.state.chatMode=policy.chatMode;
     if(prior&&!policy.chatMode) {
+      runtime.slang?.clear();
       for(const name of runtime.timers.keys())this.clearTimer(runtime,name);
       runtime.pendingReason=null;runtime.wakePending=false;
       // Remove autonomous followups through the official Inbox API, retaining its audit history.
@@ -100,6 +102,14 @@ export class SocialRuntime {
       return {query,results:result.sources.map(source=>({title:source.title,url:source.url,snippet:source.snippet||''})),untrusted:true};
     };
     const refreshStyle=runtime=>this.refreshStyle(runtime);
+    runtime.slang=new SlangContext(this.store,key,this.config);
+    if(this.config.slangReadSecret?.length>=32)runtime.slang.semanticSearch=async query=>{
+      const response=await fetch(this.config.slangApiUrl.replace(/\/$/,'')+'/reader/semantic',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+this.config.slangReadSecret},
+        body:JSON.stringify({scope:key,query}),redirect:'error',signal:AbortSignal.timeout(this.config.slangSemanticTimeoutMs||800)});
+      if(!response.ok)throw new Error('slang semantic capability unavailable');
+      return response.json();
+    };
+    runtime.observeSlang=messages=>runtime.slang.observe(messages);
     const setup=async(agentCtx,agent)=>{
       await agentCtx.plugin({name:'yunying-agent-scope',inject:['tools','systemPrompt','skills','attachments'],apply:async scoped => {
       if(typeof RESERVED2_PROMPT!=='string'||RESERVED2_PROMPT.length<5000)throw new Error('donor persona missing');
@@ -126,16 +136,21 @@ export class SocialRuntime {
       // the current step renders the profile written by the previous tool call;
       // agent/pre-step is already too late for that render.
       scoped.systemPrompt.section({name:'yunying:style',order:2,text:()=>runtime.styleText});
+      scoped.systemPrompt.section({name:'yunying:slang',order:4,text:()=>runtime.slang.text});
       scoped.systemPrompt.section({name:'yunying:mute-status',order:3,text:()=>{
         const muteInfo = state.muteStatus();
         return muteInfo.isMuted ? `【禁言感知】你当前已被群管理员禁言，还剩约 ${muteInfo.remainingSeconds} 秒解禁。禁言期间你无法发送文本消息，但可以标记已读或设置唤醒条件。` : '';
       }});
       scoped.on('system-prompt/assemble',async (assembly,context,next)=>{
-        if(context?.scope?.id===state.sessionId)await refreshStyle(runtime);
+        if(context?.scope?.id===state.sessionId){
+          await refreshStyle(runtime);
+          if(this.permitted(runtime))await runtime.slang.refresh();
+          else runtime.slang.clear();
+        }
         const assembled=await next();
         const muteInfo = state.muteStatus();
         const muteText = muteInfo.isMuted ? `【禁言感知】你当前已被群管理员禁言，还剩约 ${muteInfo.remainingSeconds} 秒解禁。禁言期间你无法发送文本消息，但可以标记已读或设置唤醒条件。` : '';
-        const sections=assembled.sections.map(section=>section.name==='yunying:style'?{...section,text:runtime.styleText}:section.name==='yunying:mute-status'?{...section,text:muteText}:section);
+        const sections=assembled.sections.map(section=>section.name==='yunying:style'?{...section,text:runtime.styleText}:section.name==='yunying:mute-status'?{...section,text:muteText}:section.name==='yunying:slang'?{...section,text:runtime.slang.text}:section);
         return sections.some((section,index)=>section!==assembled.sections[index])?{...assembled,sections}:assembled;
       });
       scoped.on('agent/pre-step',async ({agent},next)=>{
@@ -252,10 +267,12 @@ export class SocialRuntime {
   }
   async deliverToAgent(runtime,event,committedIds=runtime.committedMessageIds) {
     const payload=event.payload;
+    if(payload.kind==='recall')runtime.observeSlang?.([payload]);
     const explicit=!payload.isSelf&&!payload.commandHandled&&(payload.atBot||payload.replyToBot);
     if(!runtime.state.chatMode&&!explicit||payload.observeOnly||payload.isConfiguration) {
       await this.store.delivered(event.event_id);return;
     }
+    runtime.observeSlang?.([payload]);
     if(!event.dsh_message) {
       // Durable messages carry the same donor model view the wake snapshots use:
       // identical semantics, but no session-constant `key`, no empty arrays and
@@ -323,6 +340,7 @@ export class SocialRuntime {
     // In call-only mode bring the recent conversation and call into this one turn,
     // rather than replaying an arbitrarily old unread backlog as autonomous work.
     const packet=state.chatMode?state.wakeSnapshot():state.callSnapshot();
+    runtime.observeSlang?.([...(packet.messages||[]),...(packet.recent||[])]);
     const knowledge=await this.knowledgeForWake(runtime,packet);
     const wake=createUserMessage({source:{kind:'user'},content:[{type:'text',text:buildWakePromptV2(state.key,reason)+'\n\n【本轮消息快照】\n'+serializeModelData(packet)+(knowledge?`\n\n${knowledge}`:'')}]});
     runtime.messageReceipts.set(wake.id,[...packet.messages,...packet.recent]);

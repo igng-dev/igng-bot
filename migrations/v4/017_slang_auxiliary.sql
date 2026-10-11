@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS slang_auxiliary_calls (
+  id CHAR(36) PRIMARY KEY,
+  kind VARCHAR(24) NOT NULL,
+  model VARCHAR(120) NOT NULL,
+  input_units INT NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'reserved',
+  known_tokens BIGINT NULL,
+  cost_usd DECIMAL(20,8) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS slang_source_leases (
+  source_id VARCHAR(80) PRIMARY KEY,
+  token CHAR(36) NOT NULL,
+  expires_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

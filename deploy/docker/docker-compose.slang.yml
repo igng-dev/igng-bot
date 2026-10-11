@@ -1,0 +1,38 @@
+# Explicit opt-in overlay; merge does not deploy, import seeds, or schedule paid work.
+services:
+  slang-api:
+    image: ${BOT_V4_IMAGE:?set a fixed reviewed bot image}
+    entrypoint: [python, -m, igngbot_v4.slang]
+    restart: unless-stopped
+    init: true
+    mem_limit: 1g
+    env_file: [.env, .env.slang]
+    environment:
+      SLANG_HOST: 0.0.0.0
+      SLANG_MEDIA_CACHE: /data/slang-media
+    ports: ['127.0.0.1:8792:8792']
+    volumes: ['./slang-media-cache:/data/slang-media']
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8792/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+    security_opt: [no-new-privileges:true]
+  slang-curator:
+    image: ${YUNYING_IMAGE:?set a fixed reviewed DSH image}
+    entrypoint: [sh, /app/run-slang-curator-profile.sh]
+    restart: unless-stopped
+    init: true
+    mem_limit: 1g
+    user: '1000:1001'
+    env_file: [.env, .env.slang]
+    environment:
+      SLANG_API_URL: http://slang-api:8792
+      SLANG_CURATOR_ENABLED: '1'
+      DSH_HOME: /data/slang-dsh
+      DSH_TELEMETRY_DISABLED: '1'
+    volumes: ['./slang-runtime:/data/slang-dsh']
+    depends_on:
+      slang-api:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]

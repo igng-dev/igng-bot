@@ -40,6 +40,14 @@ export function settings(env = process.env) {
     // Safety net for a runaway native turn: cancel after this many model steps
     // and let the existing reminder/schedule path hand control back.
     maxStepsPerTurn: integer(env.YUNYING_MAX_STEPS_PER_TURN, 4, 200, 30),
+    slangEnabled: env.YUNYING_SLANG_ENABLED !== '0',
+    slangRecommend: env.YUNYING_SLANG_RECOMMEND !== '0',
+    slangSemantic: env.YUNYING_SLANG_SEMANTIC === '1',
+    slangApiUrl: env.SLANG_API_URL || 'http://127.0.0.1:8792',
+    slangReadSecret: env.SLANG_READ_SECRET || '',
+    slangSemanticTimeoutMs: integer(env.YUNYING_SLANG_SEMANTIC_TIMEOUT_MS, 100, 1000, 800),
+    slangBudget: integer(env.YUNYING_SLANG_BUDGET, 300, 1800, 900),
+    slangTimeoutMs: integer(env.YUNYING_SLANG_TIMEOUT_MS, 50, 1000, 150),
     sendMinMs: 1000, sendMaxMs: 3000, maxMessageChars: 500,
     maxWakeMinute: 1, maxWakeHour: 12, maxSendMinute: 8, maxSendHour: 60,
     proactiveMinMs: 1800000, proactiveMaxMs: 5400000, proactiveIdleMs: 900000,
