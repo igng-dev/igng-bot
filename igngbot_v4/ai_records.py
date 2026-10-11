@@ -84,7 +84,7 @@ async def mirror_native_record(record_id, record):
                                 "accounting_version": 3, "usage_source": "provider"}
                     # Historian runs share this exact accounting pipeline, including compaction,
                     # settlement replacement, NULL usage and new-api pricing.
-                    for key in ("report_run_id", "report_id", "phase"):
+                    for key in ("report_run_id", "report_id", "phase", "slang_job_id"):
                         if record.get(key) is not None:
                             strategy[key] = record[key]
                     await cur.execute("""INSERT INTO ai_jobs

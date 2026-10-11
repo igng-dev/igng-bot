@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { PolicyError, canonicalKey, bounded, integer } from './policy.js';
 import { applyStyleChanges, assertStyleEvidence, emptyStyle, normalizeProfile, renderStyle, styleHash, styleReason, styleVersionNumber, styleView } from './style.js';
 import { attachKnowledge } from './knowledge.js';
+import { attachSlang } from './slang.js';
 const enabled = value => /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
 // Aliyun RDS enforces require_secure_transport. DB_SSL encrypts the connection;
 // DB_SSL_CA verifies the server certificate, otherwise TLS is unverified.
@@ -25,6 +26,7 @@ export class MySQLStore {
   constructor(pool, lockConnection) {
     this.pool = pool; this.lockConnection = lockConnection; this.healthy = true; this.ownerResolver = null;
     attachKnowledge(this);
+    attachSlang(this);
   }
   static async open(env = process.env) {
     const ssl = dbSslOptions(env);

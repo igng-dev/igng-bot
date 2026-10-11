@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS slang_semantic_consent (
+  scope_key VARCHAR(80) PRIMARY KEY,
+  enabled TINYINT NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS slang_semantic_usage (
+  day_value DATE PRIMARY KEY,
+  requests INT NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

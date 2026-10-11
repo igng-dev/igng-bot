@@ -46,6 +46,8 @@ jobs:
           cache-dependency-path: yunying-dsh/package-lock.json
       - name: Install dependencies
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
           python -m pip install -r requirements-dev.txt
           npm install --global pnpm@10.33.0 --ignore-scripts
           npm ci --prefix yunying-dsh --ignore-scripts
@@ -70,7 +72,8 @@ jobs:
           python -m compileall -q igngbot_shared igngbot_v3 igngbot_v4 scripts
           npm --prefix yunying-dsh run check
           bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh
-          sh -n scripts/run-yunying-profile.sh
+          sh -n scripts/run-yunying-profile.sh scripts/run-slang-curator-profile.sh
+          node --check igngbot_v4/slang/manage.js
           bash scripts/privacy-scan.sh
       - name: Python and published Profile process tests
         run: python -m pytest tests -q
