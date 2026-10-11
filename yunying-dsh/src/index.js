@@ -42,6 +42,7 @@ export async function route(request,runtime,config) {
   if(request.url==='/admin/style/read')return store.styleRead(bounded(data.key,80));
   if(request.url==='/admin/style/update')return store.adminStyleUpdate(bounded(data.key,80),data);
   if(request.url==='/admin/style/rollback')return store.adminStyleRollback(bounded(data.key,80),data.version,data.expectedVersion,data.reason);
+  if(request.url==='/admin/knowledge')return store.knowledgeAdmin(data);
   if(request.url==='/admin/session/events') {
     const sessionId=bounded(data.sessionId,80);
     const events=await store.sessionEvents(sessionId,data.after,integer(data.limit,1,5000,1000));

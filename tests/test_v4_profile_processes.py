@@ -79,7 +79,7 @@ async def process_scenario():
               'usage':{'input_tokens':10,'output_tokens':5},'content':[{'type':'web_search_tool_result','tool_use_id':'search-fixture',
                'content':[{'type':'web_search_result','title':'天气预报','url':'https://example.org/weather','encrypted_content':'fixture','page_age':'today'}]}]})
         names=[tool['name'] for tool in body.get('tools',[])]
-        assert names and all(name=='skill' or name.startswith(('qq_','memory_','web_','mcp__snowluma__','mcp__web-search-safe__')) for name in names), 'published Profile exposed a non-social host tool'
+        assert names and all(name=='skill' or name.startswith(('qq_','memory_','knowledge_','web_','mcp__snowluma__','mcp__web-search-safe__')) for name in names), 'published Profile exposed a non-social host tool'
         counters['requests']+=1
         counters['active']+=1
         counters['max_active']=max(counters['max_active'],counters['active'])
