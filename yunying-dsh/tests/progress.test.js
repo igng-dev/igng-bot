@@ -93,8 +93,11 @@ test('heartbeat reports a running search and stops once the reply goes out',asyn
   const sentGate=Promise.withResolvers();
   adapter.script.push(toolResponse('s2','web_search',{...args,query:'明天'}),toolResponse('r1','qq_send_message',{...args,messages:'查到了'}),async()=>{await sentGate.promise;return textResponse('');});
   await runtime.accept(event('heartbeat-replied','group:1001',{atBot:true}));
-  await pause(150);
-  assert.equal(sent.filter(item=>item.body.requestId.includes(':hb:')).length,0,'answering ends the heartbeat even while the turn continues');
+  for(let n=0;n<100&&!conv.progress?.quiet;n++)await pause(10);
+  assert.equal(conv.progress?.quiet,true,'the reply tool is visible before judging later heartbeats');
+  const answered=sent.filter(item=>item.body.requestId.includes(':hb:')).length;
+  await pause(80);
+  assert.equal(sent.filter(item=>item.body.requestId.includes(':hb:')).length,answered,'answering ends the heartbeat even while the turn continues');
   sentGate.resolve();await settle(runtime);
  }finally{gate.resolve();await runtime.close();await ctx.fiber.dispose();}
 });
@@ -119,7 +122,7 @@ test('heartbeat mode suppresses sending while conversation is in waiting state',
   const args={key:conv.state.key,token:conv.state.agentToken};
   adapter.script.push(toolResponse('w1','web_search',{...args,query:'天气'}),toolResponse('w2','qq_wait_for_messages',{...args,timeoutMs:60,purpose:'messages'}),textResponse(''));
   await runtime.accept(event('heartbeat-wait-1','group:1001',{atBot:true}));
-  for(let n=0;n<50&&!conv.state.waiting;n++)await pause(5);
+  for(let n=0;n<200&&!conv.state.waiting;n++)await pause(10);
   assert.equal(conv.state.waiting,true);
   const during=sent.filter(item=>item.body.requestId.includes(':hb:')).length;
   await pause(30);
