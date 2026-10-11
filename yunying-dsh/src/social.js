@@ -63,7 +63,7 @@ export class SocialState {
     // An echo of our own send is not someone talking. It must not restart the
     // pre-sleep clock, or a reply we just made would look like new incoming
     // chat and the turn could never close.
-    if (!replay && !msg.isSelf && !msg.isConfiguration) {
+    if (!replay && !msg.isSelf && !msg.isConfiguration && !msg.isSystemEvent) {
       this.lastIncomingAt = this.clock(); this.preSleepWaitSatisfiedAt = 0; this.preSleepWaitObservedAt = 0;
     }
     return msg;
@@ -113,13 +113,13 @@ export class SocialState {
     for (const seq of this.modelSeenSeqs) if (seq <= through) this.modelSeenSeqs.delete(seq);
     return before - this.unread.length;
   }
-  lastIncoming() { return [...this.recentMessages].reverse().find(m => !m.isSelf); }
+  lastIncoming() { return [...this.recentMessages].reverse().find(m => !m.isSelf && !m.isSystemEvent); }
   // Memory reads aggregate the IGNG account of the people who spoke most recently.
   actorQqs(limit = 12) {
     if (this.key.startsWith('private:')) return [this.key.split(':')[1]];
     const result = [];
     for (const message of [...this.recentMessages].reverse()) {
-      if (message.isSelf || !message.userId) continue;
+      if (message.isSelf || message.isSystemEvent || !message.userId) continue;
       const qq = String(message.userId);
       if (!/^[1-9][0-9]{0,19}$/.test(qq) || result.includes(qq)) continue;
       result.push(qq);
@@ -133,7 +133,7 @@ export class SocialState {
   }
   /** Other people's still-unread messages. Own echoes and config notices do not count. */
   pendingFromOthers() {
-    return this.unread.filter(m => !m.isSelf && !m.isConfiguration && m.kind !== 'recall');
+    return this.unread.filter(m => !m.isSelf && !m.isConfiguration && !m.isSystemEvent && m.kind !== 'recall');
   }
   preSleepBlocked() {
     // A direct ping this turn has already seen, with nothing newer behind it,
@@ -176,6 +176,7 @@ export class SocialState {
   }
   wakeReason(msg, random = Math.random) {
     if (msg.isSelf || msg.commandHandled) return null;
+    if (msg.isSystemEvent) return null;
     if (this.key.startsWith('private:')) return 'private';
     if (msg.atBot || msg.replyToBot) return 'atMention'; // Product guarantee: direct requests bypass ordinary cost throttles.
     if (!this.chatMode || msg.observeOnly || msg.isConfiguration) return null;

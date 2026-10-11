@@ -10,7 +10,7 @@ from PIL import Image
 from igngbot_v4.settings import Settings, conversation_key, signed_conversation
 from igngbot_v4.journal import ingress_identity
 from igngbot_v4.views import message_view, row_images
-from igngbot_v4.main import Infrastructure
+from igngbot_v4.main import Infrastructure, normalize_notice
 from igngbot_v3.onebot_client import OneBotClient
 
 
@@ -59,6 +59,48 @@ def test_private_recall_and_poke_notices_reach_optional_v4_callback():
                    {"post_type": "notice", "notice_type": "notify", "sub_type": "poke", "group_id": 1001, "user_id": 2001}]:
         client._on_message(None, json.dumps(notice))
     assert len(got) == 2
+
+
+def test_selected_qq_system_notices_are_bounded_and_untrusted():
+    announcement = normalize_notice(
+        {
+            "post_type": "notice",
+            "notice_type": "group_announcement",
+            "group_id": 1001,
+            "user_id": 2001,
+            "sender": {"nickname": "管理员"},
+            "announcement": {"title": "今晚维护", "content": "请先保存进度"},
+            "time": 12,
+        },
+        "notice-1",
+        3001,
+    )
+    assert announcement["kind"] == "system_notice"
+    assert announcement["isSystemEvent"] is True
+    assert announcement["noticeType"] == "group_announcement"
+    assert announcement["operatorName"] == "管理员"
+    assert "请先保存进度" in announcement["text"]
+    assert normalize_notice(
+        {"post_type": "notice", "notice_type": "group_card", "group_id": 1001, "user_id": 2001},
+        "notice-2",
+        3001,
+    ) is None
+
+    bot_ban = normalize_notice(
+        {
+            "post_type": "notice",
+            "notice_type": "group_ban",
+            "sub_type": "ban",
+            "group_id": 1001,
+            "user_id": 3001,
+            "operator_id": 2001,
+        },
+        "notice-3",
+        3001,
+    )
+    assert bot_ban["noticeType"] == "bot_mute_changed"
+    assert bot_ban["targetId"] == "3001"
+    assert "被禁言" in bot_ban["text"]
 
 
 def test_history_recall_and_media_views_hide_paths_and_recalled_content(tmp_path):
@@ -329,6 +371,8 @@ def test_ban_notice_and_reaction_infrastructure():
         prepared = await app.prepare({"event_id": "ev-ban-1", "conversation_key": "group:1001", "raw_event": json.dumps(raw_ban)})
         assert prepared["kind"] == "ban"
         assert prepared["isSelf"] is True
+        assert prepared["isSystemEvent"] is True
+        assert prepared["noticeType"] == "bot_mute_changed"
         assert prepared["duration"] == 300
         assert "自己被禁言 300 秒" in prepared["text"]
 

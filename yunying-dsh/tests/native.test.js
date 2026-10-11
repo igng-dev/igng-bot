@@ -27,6 +27,37 @@ test('native DSH: ordinary silence, tool-only sending, exact scoped permission b
  }finally{await runtime.close();await ctx.fiber.dispose();}
 });
 
+test('native DSH: system notices are durable context but do not start a reply turn',async()=>{
+ const {ctx,adapter}=await harness(),store=new FixtureStore(),runtime=new SocialRuntime(ctx,store,testSettings(),async()=>({ok:true}));
+ try{
+  await runtime.accept(event('announcement-1','group:1001',{kind:'system_notice',isSystemEvent:true,noticeType:'group_announcement',text:'[群公告] 今晚维护',plain:'今晚维护',sender:'管理员'}));
+  await settle(runtime);
+  assert.equal(adapter.requests.length,0);
+  const conv=runtime.conversations.get('group:1001');
+  assert.equal(conv.state.unread[0].isSystemEvent,true);
+  assert.equal(conv.state.wakeConfig.wakeCount,0);
+  await runtime.accept(event('message-after-announcement','group:1001',{atBot:true,text:'公告说什么？'}));
+  await settle(runtime);
+  assert.ok(adapter.requests.length>=1);
+ }finally{await runtime.close();await ctx.fiber.dispose();}
+});
+
+test('native DSH: a pending system notice does not bootstrap a turn after restart',async()=>{
+ const first=await harness(),store=new FixtureStore();let runtime=new SocialRuntime(first.ctx,store,testSettings(),async()=>({ok:true}));
+ await runtime.accept(event('announcement-restart','group:1001',{kind:'system_notice',isSystemEvent:true,noticeType:'group_announcement',text:'[群公告] 维护',plain:'维护',sender:'管理员'}));
+ await settle(runtime);
+ const sessionId=runtime.conversations.get('group:1001').state.sessionId;
+ await runtime.close();await first.ctx.fiber.dispose();
+ const second=await harness(new ScriptAdapter(),first.root);runtime=new SocialRuntime(second.ctx,store,testSettings(),async()=>({ok:true}));
+ try{
+  await runtime.restore();
+  const conv=runtime.conversations.get('group:1001');
+  assert.equal(conv.state.sessionId,sessionId);
+  assert.equal(second.adapter.requests.length,0);
+  assert.equal(conv.state.wakeConfig.wakeCount,0);
+ }finally{await runtime.close();await second.ctx.fiber.dispose();}
+});
+
 test('native DSH: every concurrent event persists once and same-session model work is serial',async()=>{
  let unblock;const gate=new Promise(resolve=>unblock=resolve);
  const adapter=new ScriptAdapter([async()=>{await gate;return textResponse('');}]);

@@ -68,7 +68,6 @@ test('recall tombstone removes content and media from unread/recent views',()=>{
  const s=state();append(s,1,'秘密内容');s.unread[0].media=[{type:'image'}];s.append({seq:2,payload:{kind:'recall',messageId:'1',text:'[消息已撤回]'}});
  const row=s.unreadPage(10,0).messages[0];assert.equal(row.text,'[消息已撤回]');assert.equal(row.plain,undefined);assert.deepEqual(row.media,undefined);
 });
-
 test('ban events update self mute status and persist across snapshot',()=>{
  const s=state();
  assert.equal(s.muteStatus().isMuted, false);
@@ -81,4 +80,14 @@ test('ban events update self mute status and persist across snapshot',()=>{
  assert.equal(restored.muteStatus().isMuted, true);
  s.append({seq:3, payload:{kind:'ban', subType:'lift_ban', isSelf:true, duration:0, text:'[自己解除禁言]'}});
  assert.equal(s.muteStatus().isMuted, false);
+});
+
+test('system notices stay visible but do not wake or count as another speaker',()=>{
+   const s=state();
+  s.append({seq:1,payload:{kind:'system_notice',isSystemEvent:true,noticeType:'group_announcement',messageId:'notice-1',text:'[群公告] 请看通知',plain:'请看通知',userId:'2001',sender:'管理员'}});
+  assert.equal(s.wakeReason(s.unread[0],()=>0),null);
+  assert.equal(s.pendingFromOthers().length,0);
+   assert.equal(s.lastIncomingAt,0);
+   assert.deepEqual(s.actorQqs(),[]);
+   assert.equal(s.unreadPage(10,0).messages[0].noticeType,'group_announcement');
 });
