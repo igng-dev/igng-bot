@@ -2,6 +2,7 @@ import mysql from 'mysql2/promise';
 import { randomUUID, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { PolicyError, canonicalKey, bounded, integer } from './policy.js';
+import { applyStyleChanges, assertStyleEvidence, emptyStyle, normalizeProfile, renderStyle, styleHash, styleReason, styleVersionNumber, styleView } from './style.js';
 import { attachKnowledge } from './knowledge.js';
 const enabled = value => /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
 // Aliyun RDS enforces require_secure_transport. DB_SSL encrypts the connection;
@@ -259,6 +260,82 @@ export class MySQLStore {
     bounded(sessionId, 80);
     const rows = await this.query('SELECT COALESCE(MAX(event_seq),-1) AS floor FROM yunying_session_events WHERE dsh_session_id=?', [sessionId]);
     return Number(rows[0]?.floor ?? -1);
+  }
+  async styleRead(key) {
+    canonicalKey(key);
+    const rows = await this.query('SELECT * FROM style_profiles WHERE conversation_key=?', [key]);
+    return { ok: true, profile: rows.length ? styleView(rows[0]) : emptyStyle() };
+  }
+  async styleSourceRows(actor, sources) {
+    if (!Array.isArray(sources) || !sources.length || sources.length > 12) throw new PolicyError('风格修订必须提供 1 到 12 条当前会话来源');
+    const ids = [...new Set(sources.map(source => bounded(source, 96)))];
+    const rows = await this.query(`SELECT e.event_id,e.conversation_key,e.seq,e.event_type,e.message_id,e.payload,e.created_at,m.is_recalled
+      FROM yunying_events e LEFT JOIN message_logs m ON m.group_id=? AND m.msg_id=e.message_id
+      WHERE e.conversation_key=? AND e.event_id IN (${ids.map(() => '?').join(',')})`, [signedId(actor.key), actor.key, ...ids]);
+    if (rows.length !== ids.length) throw new PolicyError('风格来源不可用');
+    for (const row of rows) {
+      row.payload = json(row.payload);
+      if (row.event_type !== 'message') throw new PolicyError('风格来源必须是真实消息');
+      if (row.is_recalled || row.payload?.isSelf || row.payload?.commandHandled || !actor.seenSeqs?.has(Number(row.seq))) throw new PolicyError('只能引用本轮已查看、未撤回且非云萤自己的消息');
+    }
+    return rows;
+  }
+  async insertStyleVersion(conn, actor, key, version, profile, operation, reason, sources = []) {
+    const refs = sources.map(source => ({ event_id: source.event_id, message_id: source.message_id ?? null, speaker_hash: hash(String(source.payload?.userId || '')).slice(0, 16), time: Number(source.payload?.time || 0) || null }));
+    await conn.execute(`INSERT INTO style_versions (conversation_key,version,rules_json,candidates_json,status,content_hash,operation,reason,actor,dsh_session_id,sources_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`, [key, version, JSON.stringify(profile.rules), JSON.stringify(profile.candidates), profile.status, profile.contentHash, operation, reason, actor.admin ? 'owner-api' : actor.sessionId, actor.sessionId || null, JSON.stringify(refs)]);
+  }
+  async stylePatch(actor, args, config = {}) {
+    canonicalKey(actor.key);
+    const expected = styleVersionNumber(args.expectedVersion);
+    const sources = await this.styleSourceRows(actor, args.sources);
+    const activating = (args.changes || []).some(change => ['add', 'replace'].includes(change?.op));
+    if (activating) assertStyleEvidence(sources, { privateConversation: actor.key.startsWith('private:'), now: Date.now(), minGapMs: config.styleEvidenceGapMs ?? 6 * 60 * 60 * 1000 });
+    return this.transaction(async conn => {
+      const [rows] = await conn.execute('SELECT * FROM style_profiles WHERE conversation_key=? FOR UPDATE', [actor.key]);
+      const current = rows[0] ? styleView(rows[0]) : emptyStyle();
+      if (current.version !== expected) throw new PolicyError('风格版本冲突；请重新读取');
+      if (activating && rows[0]?.updated_at) {
+        const elapsed = Date.now() - Date.parse(rows[0].updated_at);
+        if (Number.isFinite(elapsed) && elapsed < (config.styleRevisionCooldownMs ?? 30 * 60 * 1000)) throw new PolicyError('风格修订过于频繁，请先继续观察');
+      }
+      const next = applyStyleChanges(current, args.changes, { allowActivate: activating });
+      const version = current.version + 1;
+      if (rows[0]) await conn.execute('UPDATE style_profiles SET current_version=?,status=?,rules_json=?,candidates_json=?,content_hash=?,updated_by=? WHERE conversation_key=?', [version, next.status, JSON.stringify(next.rules), JSON.stringify(next.candidates), next.contentHash, actor.sessionId, actor.key]);
+      else await conn.execute('INSERT INTO style_profiles (conversation_key,current_version,status,rules_json,candidates_json,content_hash,updated_by) VALUES (?,?,?,?,?,?,?)', [actor.key, version, next.status, JSON.stringify(next.rules), JSON.stringify(next.candidates), next.contentHash, actor.sessionId]);
+      await this.insertStyleVersion(conn, actor, actor.key, version, next, 'patch', styleReason(args.reason), sources);
+      return { ok: true, profile: { ...next, version, contentHash: next.contentHash, prompt: renderStyle(next) } };
+    });
+  }
+  async adminStyleUpdate(key, args) {
+    canonicalKey(key);
+    const expected = styleVersionNumber(args.expectedVersion);
+    const next = normalizeProfile(args.profile || args);
+    if (next.contentHash !== styleHash(next)) throw new PolicyError('风格档案无效');
+    return this.transaction(async conn => {
+      const [rows] = await conn.execute('SELECT * FROM style_profiles WHERE conversation_key=? FOR UPDATE', [key]);
+      const current = rows[0] ? Number(rows[0].current_version) : 0;
+      if (current !== expected) throw new PolicyError('风格版本冲突；请重新读取');
+      const version = current + 1;
+      if (rows[0]) await conn.execute('UPDATE style_profiles SET current_version=?,status=?,rules_json=?,candidates_json=?,content_hash=?,updated_by=? WHERE conversation_key=?', [version, next.status, JSON.stringify(next.rules), JSON.stringify(next.candidates), next.contentHash, 'owner-api', key]);
+      else await conn.execute('INSERT INTO style_profiles (conversation_key,current_version,status,rules_json,candidates_json,content_hash,updated_by) VALUES (?,?,?,?,?,?,?)', [key, version, next.status, JSON.stringify(next.rules), JSON.stringify(next.candidates), next.contentHash, 'owner-api']);
+      await this.insertStyleVersion(conn, { admin: true }, key, version, next, 'owner-edit', styleReason(args.reason, '管理员修订'));
+      return { ok: true, profile: { ...next, version, contentHash: next.contentHash, prompt: renderStyle(next) } };
+    });
+  }
+  async adminStyleRollback(key, version, expected, reason) {
+    canonicalKey(key);
+    return this.transaction(async conn => {
+      const [rows] = await conn.execute('SELECT * FROM style_profiles WHERE conversation_key=? FOR UPDATE', [key]);
+      const [versions] = await conn.execute('SELECT * FROM style_versions WHERE conversation_key=? AND version=?', [key, styleVersionNumber(version)]);
+      const current = rows[0], old = versions[0];
+      if (!current || !old || Number(current.current_version) !== styleVersionNumber(expected)) throw new PolicyError('风格版本冲突或版本不存在');
+      const restored = normalizeProfile({ status: old.status, rules: json(old.rules_json), candidates: json(old.candidates_json) });
+      const nextVersion = Number(current.current_version) + 1;
+      await conn.execute('UPDATE style_profiles SET current_version=?,status=?,rules_json=?,candidates_json=?,content_hash=?,updated_by=? WHERE conversation_key=?', [nextVersion, restored.status, JSON.stringify(restored.rules), JSON.stringify(restored.candidates), restored.contentHash, 'owner-api', key]);
+      await this.insertStyleVersion(conn, { admin: true }, key, nextVersion, restored, 'rollback', styleReason(reason, '管理员回滚'));
+      return { ok: true, profile: { ...restored, version: nextVersion, contentHash: restored.contentHash, prompt: renderStyle(restored) } };
+    });
   }
   async sessionEvents(sessionId, after = 0, limit = 2000) {
     bounded(sessionId, 80);

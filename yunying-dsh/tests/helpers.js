@@ -36,6 +36,7 @@ export const textToolResponse=(text,id,name,args)=>[
 export class ScriptAdapter extends LlmAdapter {
  constructor(script=[]){super();this.script=script;this.requests=[];this.active=0;this.maxActive=0;}
  async resolveModel(provider,model){return {provider,id:model,name:model,context:{contextWindow:200000},inputModalities:['text','image']};}
+ async prepareCall(provider,model,signal){return {model:await this.resolveModel(provider,model,signal),stream:options=>this.stream(options)};}
  async *stream(options){
   this.requests.push(options);this.active++;this.maxActive=Math.max(this.maxActive,this.active);
   try{const entry=this.script.shift();const chunks=typeof entry==='function'?await entry(options):entry||textResponse('');for(const chunk of chunks){options.signal?.throwIfAborted();yield chunk;}}
@@ -74,7 +75,7 @@ export class FixtureStore {
   noteKnowledgeSearch(){return [];}
   async knowledgeSearch(){return {ok:true,documents:[]};}
  async sessionEventFloor(id){return this.transcripts.filter(row=>row.dsh_session_id===id).reduce((floor,row)=>Math.max(floor,row.event_seq),-1);}
-}
+ async styleRead(){return {ok:true,profile:this.styleProfile||{version:0,status:'active',rules:[],candidates:[],contentHash:'empty'}}};}
 export const event=(id,key='group:1001',extra={})=>({eventId:id,key,kind:'message',messageId:String(id),userId:'2001',sender:'群友',text:'今天风很舒服',plain:'今天风很舒服',isSelf:false,time:Date.now(),...extra});
 export async function durableEvents(ctx,id){const h=await ctx.sessionPersistence.open(id,'read');try{return(await h.read()).events;}finally{await h.close();}}
 export async function settle(runtime,key='group:1001'){

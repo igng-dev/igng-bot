@@ -63,6 +63,7 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 | Raw QQ | 原 `message_logs`、附件树、撤回状态 | 网站历史、媒体和来源证据；不替代 Agent Session。 |
 | Runtime Session | 官方 DSH JSONL/附件持久目录（权威）；MySQL `yunying_session_events` 为过滤投影 | 模型真实运行历史、原生 Inbox、工具结果、request context、compaction；不把 summary 当长期记忆。投影表供查询/还原，可从官方日志重建。 |
 | Long-term Memory | MySQL Markdown 文档/版本/来源 | 稳定事实与长期约定；模型受控访问，Owner/未来网站管理。 |
+| Conversation Style | MySQL `style_profiles` / `style_versions` | 当前会话可偏离的表达倾向；模型经受控工具小幅修订，不替代身份、权限或参与规则。 |
 | World Knowledge | MySQL `knowledge_documents` / `knowledge_versions` | 全局、带来源和 TTL 的公开事实缓存。模型只能提议，服务端引用本轮搜索摘录；唤醒时按词面自动注入，过期降级不删除。 |
 
 新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`、`yunying_session_events`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅增加结构，不删除、重写或导入 V3 context summary；历史 `007_drop_audio_transcript.sql` 保留文件名与 checksum 身份，但默认启动跳过，避免破坏共享的 `message_logs.audio_transcript`。009 负责补齐缺失的转写列。003 在 ingress 增加机械阶段状态、独立重试/时间/错误与命令结果，在 sessions 增加真实呼叫的 event/到期权限；004 增加机械队列索引；008 增加会话事件的过滤投影表；010 把来源链并入 `memory_versions.sources`，身份/绑定/身份审计与访问审计不再被运行时代码使用（退役由受控运维阶段执行）。2026-10-07 已按 `memory-legacy` / `archive-tables` 阶段关闭回滚窗口并退役 005 归档层（见 [归档层退役实录](v4-archive-retirement-20261007.md)）。既有记录回填为已完成机械阶段，已应用001/002保持原 checksum。V4 启动只初始化消息、撤回和群配置，不再初始化/seed 旧摘要和 system Prompt；V3 rollback 初始化器保留。

@@ -51,7 +51,7 @@ export function registerTools(ctx, runtime) {
     names.add(name); ctx.tools.register(definition);
     return definition;
   };
-  const standard = (name, properties, execute, extra = {}, required = []) => register(name, {...props,...properties}, ['key','token',...required], execute, extra);
+  const standard = (name, properties, execute, extra = {}, required = [], description) => register(name, {...props,...properties}, ['key','token',...required], execute, extra, description);
   standard('qq_get_prompt', {}, async () => ({ ok:true, key:state.key,
     role:{ role:'云萤', content:'你是云萤，长期在线的 QQ 群友。按原始二代仿真规则参与。', version:1 },
     recommendations: { defaultInfinite:true, sleepMinMs:300000, sleepMaxMs:7200000, probability:.20,
@@ -208,6 +208,14 @@ export function registerTools(ctx, runtime) {
   standard('memory_write',{title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason,personQQ:memoryProps.personQQ},args=>store.memoryWrite(actor(),args),{},['title','markdown','sources','reason']);
   standard('memory_update',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,title:memoryProps.title,markdown:memoryProps.markdown,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args),{},['id','expectedVersion','markdown','sources','reason']);
   standard('memory_forget',{id:memoryProps.id,expectedVersion:memoryProps.expectedVersion,sources:memorySources,reason:memoryProps.reason},args=>store.memoryUpdate(actor(),args,true),{},['id','expectedVersion','sources','reason']);
+  const styleRule = object({ id:str('稳定规则标识，如 casual.concise'), context:{type:'string',enum:['general','casual','technical','support','conflict']},
+    dimension:{type:'string',enum:['length','segmentation','register','punctuation','particles','humor','structure']},
+    preference:str('可偏离的表达倾向，不写固定台词'), exceptions:{type:'array',items:str('例外场景')}, strength:{type:'string',enum:['mild','moderate']}, evidence:str('候选证据摘要') });
+  standard('style_read',{},()=>store.styleRead(state.key),{},[],'读取当前会话的表达风格档案与版本。修订前必须先读。');
+  standard('style_patch',{expectedVersion:num('style_read 返回的 version；空档案为 0'),changes:{type:'array',items:object({op:{type:'string',enum:['add','replace','retire','observe']},id:str('规则标识'),rule:styleRule})},
+    sources:memorySources,reason:str('观察到的稳定习惯、独立证据、排除的临时解释和本次变更')},
+    args=>store.stylePatch(actor(),args,config),{},['expectedVersion','changes','sources','reason'],
+    '小幅修订当前会话表达风格。证据不足时用 observe 保存候选；不修改身份、权限或参与规则，也不向群里播报。');
   standard('knowledge_search',{query:str('世界知识检索词；空字符串不返回'),limit:num('最多5')},args=>store.knowledgeSearch(args),{},['query']);
   standard('knowledge_use',{ids:{type:'array',items:str('本轮注入或 knowledge_search 返回的文档 id'),minItems:1,maxItems:5,description:'本轮回答实际采用的知识'}},
     args=>store.knowledgeMarkUsed(args.ids),{},['ids']);
