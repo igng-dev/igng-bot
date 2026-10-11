@@ -153,6 +153,17 @@ class Infrastructure:
             if notice == "notify" and raw.get("sub_type") == "poke":
                 return {"eventId": event_id, "key": key, "kind": "poke", "userId": str(raw.get("user_id") or "0"),
                         "targetId": str(raw.get("target_id") or "0"), "text": "[拍一拍]", "poke": True}
+            if notice == "group_ban":
+                sub_type = str(raw.get("sub_type") or "ban")
+                target_id = str(raw.get("user_id") or "0")
+                bot_id = str(raw.get("self_id") or self.config.BOT_USER_ID or "")
+                is_self = bool(bot_id and target_id == bot_id)
+                duration = int(raw.get("duration", 0))
+                operator_id = str(raw.get("operator_id") or "0")
+                text = (f"[自己被禁言 {duration} 秒]" if duration > 0 else "[自己解除禁言]") if is_self else (f"[群友被禁言 {duration} 秒]" if duration > 0 else "[群友解除禁言]")
+                return {"eventId": event_id, "key": key, "kind": "ban", "subType": sub_type,
+                        "userId": target_id, "isSelf": is_self, "duration": duration,
+                        "operatorId": operator_id, "text": text}
             return None
         parsed = parse_message(raw)
         if not parsed:
@@ -395,6 +406,34 @@ class Infrastructure:
                 return web.json_response(prior)
             try:
                 async with self.http.post(self.config.ONEBOT_HTTP_URL.rstrip("/") + "/send_poke", json={"user_id": int(uid), **({"group_id": gid} if gid > 0 else {})}, headers={"Authorization": "Bearer " + self.config.ONEBOT_HTTP_TOKEN}, timeout=ClientTimeout(total=15)) as response:
+                    body = await response.json()
+                    ok = response.status == 200 and body.get("status") == "ok" and body.get("retcode") == 0
+                    result = {"ok": ok}
+                    self.journal.finish_send(data["requestId"], "sent" if ok else "failed", result)
+                    return web.json_response(result)
+            except Exception:
+                self.journal.finish_send(data["requestId"], "unknown", {"ok": False, "status": "unknown"})
+                return web.json_response({"ok": False, "status": "unknown"})
+        if request.path == "/reaction":
+            if not self.speaking_allowed(key, data.get("triggerEventId")):
+                return web.json_response({"ok": False, "error": "当前发言权限已关闭或呼叫已结束"})
+            if gid <= 0:
+                return web.json_response({"ok": False, "error": "表情回应仅支持群聊会话"})
+            msg_id = str(data.get("messageId", ""))
+            if not msg_id or not self.db.get_message_by_msg_id(gid, msg_id):
+                raise web.HTTPNotFound()
+            emoji_id = str(data.get("emojiId", ""))
+            if not re.fullmatch(r"[0-9]{1,10}", emoji_id):
+                raise web.HTTPBadRequest()
+            fresh, prior = self.journal.begin_send(data["requestId"], key, {"reaction": msg_id, "emoji_id": emoji_id})
+            if not fresh:
+                return web.json_response(prior)
+            try:
+                payload = {"group_id": gid, "message_id": int(msg_id) if msg_id.lstrip("-").isdigit() else msg_id, "emoji_id": emoji_id}
+                async with self.http.post(self.config.ONEBOT_HTTP_URL.rstrip("/") + "/set_msg_emoji_like",
+                                         json=payload,
+                                         headers={"Authorization": "Bearer " + self.config.ONEBOT_HTTP_TOKEN},
+                                         timeout=ClientTimeout(total=15)) as response:
                     body = await response.json()
                     ok = response.status == 200 and body.get("status") == "ok" and body.get("retcode") == 0
                     result = {"ok": ok}

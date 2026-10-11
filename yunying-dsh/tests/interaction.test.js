@@ -111,3 +111,28 @@ test('native runaway turn is cancelled at the configured step budget and keeps t
   assert.ok(adapter.requests.length<=6,`model requests stay bounded, got ${adapter.requests.length}`);
  }finally{await runtime.close();await ctx.fiber.dispose();}
 });
+
+test('qq_react_message sends reaction and mute blocks qq_send_message',async()=>{
+ const adapter=new ScriptAdapter(),{ctx}=await harness(adapter),sent=[];
+ const runtime=new SocialRuntime(ctx,new FixtureStore(),testSettings(),async(path,body)=>{sent.push({path,body});return {ok:true};});
+ try{
+  await runtime.load('group:1001');const conv=runtime.conversations.get('group:1001');
+  const execute=(name,args)=>conv.handle.agent.ctx.tools.execute({agent:conv.handle.agent,callId:'fixture-'+name,name,arguments:args,signal:new AbortController().signal});
+  const tokenArgs = {key:conv.state.key, token:conv.state.agentToken};
+
+  // Test qq_react_message
+  conv.state.recentMessages.push({messageId:'10086', seq:1, text:'好图'});
+  const reactRes = await execute('qq_react_message', {...tokenArgs, messageId:'10086', emoji:'like'});
+  assert.equal(reactRes.isError, false);
+  const reactCall = sent.find(s=>s.path==='/reaction');
+  assert.ok(reactCall);
+  assert.equal(reactCall.body.emojiId, '76');
+  assert.equal(reactCall.body.messageId, '10086');
+
+  // Test mute block
+  conv.state.muteUntil = Date.now() + 60000;
+  const sendRes = await execute('qq_send_message', {...tokenArgs, messages:'说话'});
+  assert.equal(sendRes.isError, true);
+  assert.ok(JSON.stringify(sendRes).includes('禁言'));
+ }finally{await runtime.close();await ctx.fiber.dispose();}
+});
