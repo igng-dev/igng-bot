@@ -11,6 +11,10 @@ test('native Skill loads only the bundled Memory instructions and unread exposes
   const skill=await execute('skill',{name:'yunying-memory'});assert.equal(skill.isError,false);assert.ok(skill.content[0].text.includes('MySQL'));
   const unread=await execute('qq_get_unread_messages',{key:conv.state.key,token:conv.state.agentToken});
   assert.equal(JSON.parse(unread.content[0].text).messages[0].eventId,'source-visible');
+  for(const name of ['qq_get_account_status','qq_get_current_group_info','qq_get_notifications','qq_get_bot_permissions','qq_get_member_info']){
+   const args={key:conv.state.key,token:conv.state.agentToken,...(name==='qq_get_member_info'?{userId:'2001'}:{})};
+   const result=await execute(name,args);assert.equal(result.isError,false,name);
+  }
   const forbidden=await execute('skill',{name:'arbitrary-filesystem'});assert.equal(forbidden.isError,true);
  }finally{await runtime.close();await ctx.fiber.dispose();}
 });
