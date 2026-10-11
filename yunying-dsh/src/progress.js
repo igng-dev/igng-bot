@@ -14,6 +14,7 @@
 // when the turn itself runs longer than the interval.
 export const PROGRESS_TEXT_LIMIT = 400;
 const SEARCH_TOOLS = new Set(['web_search', 'web_fetch', 'mcp__web-search-safe__web_search', 'mcp__web-search-safe__web_fetch']);
+const STYLE_TOOLS = new Set(['style_read', 'style_patch']);
 const SUBSTANTIVE_TOOLS = new Set(['qq_video_open', 'qq_video_probe', 'qq_video_extract_frames', 'qq_video_extract_audio', 'qq_video_transcode', 'qq_send_artifact']);
 
 export function progressMode(config, model = config.model) {
@@ -23,7 +24,7 @@ export function progressMode(config, model = config.model) {
 
 export function emptyProgress(turn, now = Date.now()) {
   return { turn, startedAt: now, steps: 0, commands: 0, searches: 0,
-    substantive: false, quiet: false,
+    substantive: false, quiet: false, styleOnly: null,
     lastForwardAt: 0, forwarded: 0, heartbeats: 0 };
 }
 
@@ -32,9 +33,15 @@ export function isSubstantiveTool(name) {
   return SEARCH_TOOLS.has(name) || SUBSTANTIVE_TOOLS.has(name);
 }
 
+export function isStyleTool(name) {
+  return STYLE_TOOLS.has(name);
+}
+
 export function countToolCall(progress, name) {
+  if (isStyleTool(name)) progress.styleOnly = progress.styleOnly !== false;
+  else progress.styleOnly = false;
   if (SEARCH_TOOLS.has(name)) progress.searches++;
-  else progress.commands++;
+  else if (!isStyleTool(name)) progress.commands++;
   if (isSubstantiveTool(name)) progress.substantive = true;
 }
 

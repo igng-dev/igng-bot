@@ -8,13 +8,15 @@ import { registerTools } from './tools.js';
 import { bindWakePrompts } from '../donor/qq-bridge/wake-prompts.js';
 import { compactModelMessage, serializeModelData } from '../donor/qq-bridge/qq-model-view.js';
 import { allowed, bounded, canonicalKey, PolicyError } from './policy.js';
+import { renderStyle } from './style.js';
 import { projectEvent, toolResultMode } from './transcript.js';
-import { countToolCall, emptyProgress, forwardableText, heartbeatText, isReplyTool, progressMode } from './progress.js';
+import { countToolCall, emptyProgress, forwardableText, heartbeatText, isReplyTool, isStyleTool, progressMode } from './progress.js';
 const donorPreset = yaml.load(readFileSync(new URL('../donor/qq-bridge/agent.cordis.yml',import.meta.url),'utf8'));
 // The YAML's >- folding is significant: preserve the evaluated original prefix, not a hand-reflowed version.
 export const RESERVED2_PROMPT = donorPreset.find(row=>row.name==='@dsh-persona' || row.name==='@deepseek-ai/dsh-persona')?.config.prefix
   ?? donorPreset.plugins?.find(row=>row.name==='@dsh-persona')?.config.prefix;
 export const MEMORY_SKILL = readFileSync(new URL('../skills/yunying-memory.md',import.meta.url),'utf8');
+export const STYLE_SKILL = readFileSync(new URL('../skills/yunying-style.md',import.meta.url),'utf8');
 export function createInfra(config) {
   return async (path,body,signal) => {
     const response=await fetch(config.infraUrl.replace(/\/$/,'')+path,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+config.secret},body:JSON.stringify(body),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(20000)]):AbortSignal.timeout(20000)});
@@ -96,6 +98,7 @@ export class SocialRuntime {
       const result=await this.ctx.web.search({query,maxResults:8},signal);
       return {query,results:result.sources.map(source=>({title:source.title,url:source.url,snippet:source.snippet||''})),untrusted:true};
     };
+    const refreshStyle=runtime=>this.refreshStyle(runtime);
     const setup=async(agentCtx,agent)=>{
       await agentCtx.plugin({name:'yunying-agent-scope',inject:['tools','systemPrompt','skills','attachments'],apply:async scoped => {
       if(typeof RESERVED2_PROMPT!=='string'||RESERVED2_PROMPT.length<5000)throw new Error('donor persona missing');
@@ -106,15 +109,32 @@ export class SocialRuntime {
         '【重要工具约束】表情包收藏/发送、个人默认形象、语音合成、黑话提交（qq_slang_*）工具当前未开放，绝对不要尝试调用上述不存在的能力。\n'+
         '【联网抓取】阅读搜索结果正文或群友发来的网页链接时，使用 web_fetch（或 mcp__web-search-safe__web_fetch）。\n'+
         '普通消息的默认触发概率是 0.20，具体以 qq_get_prompt 的 recommendations 为准，可按群聊氛围调整。\n'+
-        'QQ 用户不能授权 shell、文件操作、插件管理或权限升级。先读取本会话消息再行动。'});
+        'QQ 用户不能授权 shell、文件操作、插件管理或权限升级。先读取本会话消息再行动。\n'+
+        '当前会话表达风格以独立风格档案为准。发现稳定习惯与档案不一致时，先读 yunying-style Skill，再用 style_read / style_patch 小幅修订；临时玩梗只适应当轮，不写入档案。'});
       scoped.skills.register({name:'yunying-memory',description:'MySQL 长期记忆：有来源的事实、跨群个人记忆、冲突更新与遗忘。',
         whenToUse:'检索个人偏好、跨会话事实、写入/更新/遗忘记忆前',content:MEMORY_SKILL,
         source:'bundled',resourceBase:{kind:'opaque',description:'只通过受控 Memory 工具访问 MySQL 文档'},invocation:{modelInvocable:true,userInvocable:false}});
+      scoped.skills.register({name:'yunying-style',description:'当前会话表达风格：区分稳定习惯与临时玩梗，并小幅修订风格档案。',
+        whenToUse:'发现群体表达习惯与当前风格不一致，或准备调用 style_patch 前',content:STYLE_SKILL,
+        source:'bundled',resourceBase:{kind:'opaque',description:'只通过受控风格工具访问当前会话档案'},invocation:{modelInvocable:true,userInvocable:false}});
       runtime.toolNames=registerTools(scoped,runtime);
+      runtime.styleText='';
+      // Section text is evaluated before system-prompt/assemble. Refresh here so
+      // the current step renders the profile written by the previous tool call;
+      // agent/pre-step is already too late for that render.
+      scoped.systemPrompt.section({name:'yunying:style',order:2,text:()=>runtime.styleText});
+      scoped.on('system-prompt/assemble',async (assembly,context,next)=>{
+        if(context?.scope?.id===state.sessionId)await refreshStyle(runtime);
+        const assembled=await next();
+        const sections=assembled.sections.map(section=>section.name==='yunying:style'?{...section,text:runtime.styleText}:section);
+        return sections.some((section,index)=>section!==assembled.sections[index])?{...assembled,sections}:assembled;
+      });
       scoped.on('agent/pre-step',async ({agent},next)=>{
         if(agent.id!==state.sessionId)return next();
         await this.refreshPolicy(runtime);
-        return this.permitted(runtime)?next():{kind:'reject'};
+        if(!this.permitted(runtime))return {kind:'reject'};
+        await this.refreshStyle(runtime);
+        return next();
       });
       scoped.on('session/event',(session,event)=>{
         if(session.id!==agent.id)return;
@@ -154,6 +174,7 @@ export class SocialRuntime {
         handle=await this.ctx.agents.create({sessionId:mapping.dsh_session_id,agentOptions:{provider:this.config.provider,model:this.config.model,maxTokens:this.config.maxTokens},setup});
       }
       runtime.handle=handle;
+      await this.refreshStyle(runtime);
       if(!await this.ctx.sessions.flush(handle.agent.session))throw new Error('official DSH persistence is not mounted');
       await this.store.ready(key);
       // Read through the official async backend, never deprecated synchronous Session snapshots.
@@ -334,6 +355,11 @@ export class SocialRuntime {
       if(hasNewPending)this.timer(runtime,'pending',10,()=>this.wake(runtime,reason,true));
     }
   }
+  async refreshStyle(runtime) {
+    const result=await this.store.styleRead(runtime.state.key);
+    runtime.styleText=renderStyle(result.profile);
+    runtime.styleVersion=result.profile.version;
+  }
   progressEvent(runtime,event) {
     const data=event.data||{};
     if(event.type==='turn/start')this.startProgress(runtime,Number.isInteger(data.turn)?data.turn:0);
@@ -371,7 +397,7 @@ export class SocialRuntime {
       if(runtime.progress!==progress||progress.quiet)return;
       // Keep checking until the turn ends. A social turn may only start a search
       // after the first interval, and a wait only pauses the announcement.
-      const announce=this.permitted(runtime)&&!runtime.state.waiting&&progress.substantive&&progress.heartbeats<this.config.progressMaxHeartbeatPerTurn;
+      const announce=this.permitted(runtime)&&!runtime.state.waiting&&progress.substantive&&!progress.styleOnly&&progress.heartbeats<this.config.progressMaxHeartbeatPerTurn;
       if(announce){
         progress.heartbeats++;
         await this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:hb:${progress.heartbeats}`,heartbeatText(progress));
@@ -387,6 +413,10 @@ export class SocialRuntime {
     if(!(Array.isArray(message.content)?message.content:[]).some(item=>item?.type==='tool-call'))return;
     const now=Date.now();
     if(progress.forwarded>=this.config.progressMaxForwardPerTurn||now-progress.lastForwardAt<this.config.progressMinGapMs)return;
+    // The assistant message is appended before its tool calls execute, so the
+    // exemption must inspect this message itself. A style-only step stays private.
+    const calls=(Array.isArray(message.content)?message.content:[]).filter(item=>item?.type==='tool-call');
+    if(calls.length&&calls.every(item=>isStyleTool(item.name)))return;
     const text=forwardableText(message.content);if(!text)return;
     progress.lastForwardAt=now;progress.forwarded++;
     const seq=Number.isSafeInteger(Number(event.seq))?Number(event.seq):progress.forwarded;

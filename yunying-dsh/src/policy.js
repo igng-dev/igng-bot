@@ -50,6 +50,10 @@ export function settings(env = process.env) {
     progressModelsWithout: new Set((env.YUNYING_MODELS_WITHOUT_PROGRESS || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean)),
     progressIntervalMs: integer(env.YUNYING_PROGRESS_INTERVAL_MS, 5000, 300000, 30000),
     progressMinGapMs: 8000, progressMaxForwardPerTurn: 6, progressMaxHeartbeatPerTurn: 20,
+    // Style learning is autonomous but rate-limited. These are conservative
+    // starting points, not claims about an objectively correct learning rate.
+    styleRevisionCooldownMs: integer(env.YUNYING_STYLE_COOLDOWN_MS, 0, 7 * 24 * 60 * 60 * 1000, 30 * 60 * 1000),
+    styleEvidenceGapMs: integer(env.YUNYING_STYLE_EVIDENCE_GAP_MS, 0, 30 * 24 * 60 * 60 * 1000, 6 * 60 * 60 * 1000),
   };
 }
 export function allowed(key, config) {
