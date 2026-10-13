@@ -5,7 +5,7 @@ import {HistorianRuntime, PROMPT} from '../src/historian.js';
 import {harness, ScriptAdapter, toolResponse, textResponse, durableEvents} from './helpers.js';
 
 function job() { return {id:randomUUID(),report_id:randomUUID(),dsh_session_id:randomUUID(),lease_token:randomUUID(),
- server_id:1,kind:'daily',period_start:'2026-10-07',timezone:'Asia/Shanghai',period_from:'2026-10-06 16:00:00',period_to:'2026-10-07 16:00:00',
+ server_id:1,kind:'weekly',period_start:'2026-10-05',timezone:'Asia/Shanghai',period_from:'2026-10-04 16:00:00',period_to:'2026-10-11 16:00:00',
  config:{provider:'script',model:'script',max_steps:20,max_tokens:100000,max_seconds:30,output_tokens:8192}}; }
 
 test('historian runs real native DSH multi-step tools, isolated sessions and existing accounting',async()=>{
@@ -19,7 +19,7 @@ test('historian runs real native DSH multi-step tools, isolated sessions and exi
   await runtime.run(first);
   assert.equal(adapter.requests.length,3);assert.ok(calls.some(c=>c.action==='context'));
   assert.ok(calls.some(c=>c.action==='finish'&&c.data.success));
-  assert.ok(calls.filter(c=>c.action==='account').every(c=>c.data.record.task_type==='server_daily_report'));
+  assert.ok(calls.filter(c=>c.action==='account').every(c=>c.data.record.task_type==='server_weekly_report'));
   assert.ok(adapter.requests.every(r=>!r.tools.some(t=>t.name==='dangerous_sql'||t.name.startsWith('qq_'))));
   assert.ok((await durableEvents(ctx,first.dsh_session_id)).some(e=>e.type==='tool/call'));
   const second=job();adapter.script.push(textResponse('不能替代提交工具的正文'));
@@ -27,6 +27,7 @@ test('historian runs real native DSH multi-step tools, isolated sessions and exi
   assert.notEqual(first.dsh_session_id,second.dsh_session_id);
   assert.ok(calls.some(c=>c.action==='finish'&&c.data.run_id===second.id&&!c.data.success));
   assert.ok(PROMPT.includes('同秒'));
+  assert.ok(PROMPT.includes('周报')&&!PROMPT.includes('日报'));
  } finally {await runtime.close();await ctx.fiber.dispose();}
 });
 

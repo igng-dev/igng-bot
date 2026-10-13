@@ -69,14 +69,18 @@ class Repository:
                         (run_id, report_id, request_key, retry_of, actor[:80], encode(config), start, end, str(uuid.uuid4())))
             return {'run_id': run_id, 'report_id': report_id, 'status': 'pending'}
 
-    def claim(self):
+    def claim(self, kinds=('daily', 'weekly')):
+        kinds = tuple(kinds)
+        if not kinds or any(kind not in {'daily', 'weekly'} for kind in kinds):
+            raise ValueError('invalid claim kinds')
         with self.transaction() as cur:
             # Locking the oldest queue row serializes competing workers, without reusing QQ's runtime lock.
             cur.execute("SELECT r.*,p.server_id,p.kind,p.timezone,p.period_start,p.display_revision report_display_revision FROM historian_runs r JOIN historian_reports p ON p.id=r.report_id "
                         "WHERE r.status='pending' AND r.available_at<=UTC_TIMESTAMP(6) AND NOT EXISTS "
                         "(SELECT 1 FROM historian_runs active WHERE active.report_id=r.report_id AND active.status='running') "
+                        f"AND p.kind IN ({','.join(['%s']*len(kinds))}) "
                         f"AND p.server_id IN ({','.join(['%s']*len(self.config['servers']))}) "
-                        "ORDER BY r.created_at,r.id LIMIT 1 FOR UPDATE",self.config['servers'])
+                        "ORDER BY r.created_at,r.id LIMIT 1 FOR UPDATE",(*kinds,*self.config['servers']))
             row = cur.fetchone()
             if not row:
                 return None
@@ -108,8 +112,9 @@ class Repository:
             if row['manifest']:
                 return  # A retry of snapshot installation never rewrites evidence.
             context_end = row['period_start'] + timedelta(days=7) if row['kind']=='weekly' else row['period_start']
+            # Only previous weekly prose is a lead; mechanical daily snapshots are not model input.
             cur.execute("SELECT r.id FROM historian_reports p JOIN historian_runs r ON r.id=p.current_run_id "
-                        "WHERE p.server_id=%s AND p.timezone=%s AND p.period_start<%s AND p.id<>%s "
+                        "WHERE p.server_id=%s AND p.timezone=%s AND p.kind='weekly' AND p.period_start<%s AND p.id<>%s "
                         "AND r.status='completed' AND r.ended_at<=%s ORDER BY p.period_start DESC,p.id DESC LIMIT 21",
                         (row['server_id'],row['timezone'],context_end,row['report_id'],manifest['cutoff']))
             manifest = {**manifest,'context_run_ids':[r['id'] for r in cur.fetchall()]}
@@ -241,6 +246,19 @@ class Repository:
                         (encode(observations), markdown, run_id))
             return {'ok': True, 'draft_saved': True, 'requires_native_turn_completion': True}
 
+    def display(self, cur, row):
+        # An older run can never replace a newer success (including a manual selection).
+        cur.execute('SELECT current_run_id,display_revision FROM historian_reports WHERE id=%s FOR UPDATE', (row['report_id'],))
+        current = cur.fetchone()
+        prior = current['current_run_id']
+        if prior:
+            cur.execute('SELECT created_at FROM historian_runs WHERE id=%s', (prior,))
+            newer = cur.fetchone()['created_at'] > row['created_at']
+        else:
+            newer = False
+        if not newer and current['display_revision']==row['display_revision']:
+            cur.execute('UPDATE historian_reports SET current_run_id=%s,display_revision=display_revision+1 WHERE id=%s', (row['id'], row['report_id']))
+
     def finish(self, run_id, token, success, error=None):
         with self.transaction() as cur:
             row = self.owned(cur, run_id, token)
@@ -249,18 +267,21 @@ class Repository:
             cur.execute('UPDATE historian_runs SET status=%s,error=%s,ended_at=UTC_TIMESTAMP(6),lease_token=NULL,lease_until=NULL WHERE id=%s',
                         ('completed' if success else 'failed', None if success else (error or 'DSH execution failed')[:255], run_id))
             if success:
-                # An older run can never replace a newer success (including a manual selection).
-                cur.execute('SELECT current_run_id,display_revision FROM historian_reports WHERE id=%s FOR UPDATE', (row['report_id'],))
-                display = cur.fetchone()
-                prior = display['current_run_id']
-                if prior:
-                    cur.execute('SELECT created_at FROM historian_runs WHERE id=%s', (prior,))
-                    newer = cur.fetchone()['created_at'] > row['created_at']
-                else:
-                    newer = False
-                if not newer and display['display_revision']==row['display_revision']:
-                    cur.execute('UPDATE historian_reports SET current_run_id=%s,display_revision=display_revision+1 WHERE id=%s', (run_id, row['report_id']))
+                self.display(cur, row)
             return {'ok': True}
+
+    def publish_mechanical(self, run_id, token):
+        # Daily reports are deterministic snapshots: no model call, no AI prose, no accounting.
+        with self.transaction() as cur:
+            row = self.owned(cur, run_id, token)
+            if row['kind'] != 'daily':
+                raise Conflict('mechanical publication is limited to daily reports')
+            if not row['statistics']:
+                raise Conflict('statistics snapshot is required before mechanical publication')
+            cur.execute("UPDATE historian_runs SET status='completed',phase='mechanical_publish',error=NULL,ended_at=UTC_TIMESTAMP(6),"
+                        "lease_token=NULL,lease_until=NULL,accounting_reconciled=TRUE WHERE id=%s", (run_id,))
+            self.display(cur, row)
+            return {'ok': True, 'mechanical': True}
 
     def phase(self, run_id, token, phase):
         if phase not in PHASES:

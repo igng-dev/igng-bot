@@ -96,14 +96,56 @@ def test_concurrent_claim_lease_fencing_and_terminal_accounting_recovery():
         assert cur.fetchone()['n']==1
 
 
-def test_weekly_can_read_daily_clues_across_its_whole_week():
-    repo=repository();daily,event=start(repo,label='2026-01-15');final(repo,daily,event)
+def test_weekly_context_reads_only_weekly_versions_not_mechanical_daily_snapshots():
+    repo=repository();daily,event=start(repo,label='2026-01-15')
+    assert repo.publish_mechanical(daily['id'],daily['lease_token'])=={'ok':True,'mechanical':True}
+    older,_=start(repo,kind='weekly',label='2026-01-05');final(repo,older,event)
     weekly,_=start(repo,kind='weekly',label='2026-01-12')
     try:
         clues=repo.previous(weekly['id'],weekly['lease_token'])['reports']
-        assert any(r['id']==daily['report_id'] for r in clues)
+        assert all(r['kind']=='weekly' for r in clues)
+        assert any(r['period_start'].isoformat()=='2026-01-05' for r in clues)
+        assert daily['report_id'] not in {r['id'] for r in clues}
         assert all('statistics' not in r for r in clues)
     finally:repo.finish(weekly['id'],weekly['lease_token'],False,'fixture complete')
+
+
+def test_claim_separates_ai_and_mechanical_queues():
+    repo=repository()
+    daily=repo.create(190001,'daily','2026-01-26','Asia/Shanghai','site:fixture',str(uuid.uuid4()))
+    weekly=repo.create(190001,'weekly','2026-01-26','Asia/Shanghai','site:fixture',str(uuid.uuid4()))
+    with repo.transaction() as cur:
+        cur.execute("UPDATE historian_runs SET available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 1 DAY) WHERE id NOT IN (%s,%s) AND status='pending'",(daily['run_id'],weekly['run_id']))
+    claimed_weekly=repo.claim(('weekly',));assert claimed_weekly['id']==weekly['run_id']
+    claimed_daily=repo.claim(('daily',));assert claimed_daily['id']==daily['run_id']
+    with pytest.raises(ValueError):repo.claim(())
+    repo.finish(claimed_weekly['id'],claimed_weekly['lease_token'],False,'fixture cleanup')
+    repo.finish(claimed_daily['id'],claimed_daily['lease_token'],False,'fixture cleanup')
+
+
+def test_mechanical_daily_publication_skips_ai_and_updates_display():
+    repo=repository();run,event=start(repo,label='2026-01-22')
+    assert repo.publish_mechanical(run['id'],run['lease_token'])=={'ok':True,'mechanical':True}
+    with repo.transaction() as cur:
+        cur.execute('SELECT r.status,r.markdown,r.observations,r.phase,r.accounting_reconciled,p.current_run_id FROM historian_runs r JOIN historian_reports p ON p.id=r.report_id WHERE r.id=%s',(run['id'],))
+        row=cur.fetchone()
+        assert row['status']=='completed' and row['markdown'] is None and row['observations'] is None
+        assert row['phase']=='mechanical_publish' and row['accounting_reconciled']==1 and row['current_run_id']==run['id']
+    with pytest.raises(Conflict):repo.publish_mechanical(run['id'],run['lease_token'])
+
+
+def test_mechanical_publication_requires_statistics_and_only_daily():
+    repo=repository()
+    daily=repo.create(190001,'daily','2026-01-24','Asia/Shanghai','site:fixture',str(uuid.uuid4()))
+    weekly=repo.create(190001,'weekly','2026-01-19','Asia/Shanghai','site:fixture',str(uuid.uuid4()))
+    with repo.transaction() as cur:
+        cur.execute("UPDATE historian_runs SET available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 1 DAY) WHERE id NOT IN (%s,%s) AND status='pending'",(daily['run_id'],weekly['run_id']))
+    claimed_daily=repo.claim(('daily',))
+    with pytest.raises(Conflict):repo.publish_mechanical(claimed_daily['id'],claimed_daily['lease_token'])
+    repo.finish(claimed_daily['id'],claimed_daily['lease_token'],False,'fixture cleanup')
+    claimed_weekly=repo.claim(('weekly',))
+    with pytest.raises(Conflict):repo.publish_mechanical(claimed_weekly['id'],claimed_weekly['lease_token'])
+    repo.finish(claimed_weekly['id'],claimed_weekly['lease_token'],False,'fixture cleanup')
 
 
 def test_manual_selection_is_not_overwritten_by_an_inflight_generation():
