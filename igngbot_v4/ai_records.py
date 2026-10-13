@@ -79,25 +79,29 @@ async def mirror_native_record(record_id, record):
                     return True
                 if not prior:
                     strategy = {"dsh_session_id": record_id.rsplit(":", 1)[0], "native_turn": record.get("native_turn"),
-                                "group_id": record.get("group_id"), "sender_id": record.get("sender_id"),
-                                "sender_name": record.get("sender_name"), "message_text": record.get("message_text", "")[:2000],
-                                "accounting_version": 3, "usage_source": "provider"}
+                        "group_id": record.get("group_id"), "sender_id": record.get("sender_id"),
+                        "sender_name": record.get("sender_name"), "message_text": record.get("message_text", "")[:2000],
+                        "accounting_version": 3, "usage_source": "provider"}
+                    if record.get("trace_id"):
+                        strategy["trace_id"] = record["trace_id"]
                     # Historian runs share this exact accounting pipeline, including compaction,
                     # settlement replacement, NULL usage and new-api pricing.
                     for key in ("report_run_id", "report_id", "phase", "slang_job_id"):
                         if record.get(key) is not None:
                             strategy[key] = record[key]
                     await cur.execute("""INSERT INTO ai_jobs
-                        (service,task_type,task_key,operator_type,strategy,system_prompt,user_prompt,status,attempt_count,
+                        (service,task_type,task_key,trace_id,operator_type,strategy,system_prompt,user_prompt,status,attempt_count,
                          prompt_tokens,completion_tokens,total_tokens,cached_tokens,round,created_at,updated_at)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,'running',0,0,0,0,0,0,%s,%s)""",
-                        (legacy.SITE_AI_SERVICE, record["task_type"], task_key, legacy.SITE_AI_OPERATOR_TYPE,
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'running',0,0,0,0,0,0,%s,%s)""",
+                        (legacy.SITE_AI_SERVICE, record["task_type"], task_key, record.get("trace_id"), legacy.SITE_AI_OPERATOR_TYPE,
                          json.dumps(strategy, ensure_ascii=False), record.get("system_prompt"), record.get("user_prompt"),
-                         timestamp(record.get("started_at")), timestamp(record.get("ended_at"))))
+                         timestamp(record.get("job_started_at") or record.get("started_at")), timestamp(record.get("ended_at"))))
                     job_id = cur.lastrowid
                 else:
                     job_id = prior[0]
                     strategy = json.loads(prior[1])
+                if record.get("trace_id"):
+                    strategy["trace_id"] = record["trace_id"]
                 if record["record_kind"] == "attempt":
                     # A settlement replacement removes the superseded attempt
                     # before the new one lands, so one model call never bills twice.
@@ -138,11 +142,11 @@ async def mirror_native_record(record_id, record):
                     FROM ai_job_attempts WHERE job_id=%s""", (job_id,))
                 count, prompt, completion, total, cached, input_tokens, output_tokens, cache_read, cache_write, reasoning, cost_quota, cost_usd, unknown = await cur.fetchone()
                 strategy["usage_unknown_attempts"] = int(unknown or 0)
-                await cur.execute("""UPDATE ai_jobs SET attempt_count=%s,prompt_tokens=%s,completion_tokens=%s,
+                await cur.execute("""UPDATE ai_jobs SET trace_id=COALESCE(trace_id,%s),attempt_count=%s,prompt_tokens=%s,completion_tokens=%s,
                     total_tokens=%s,cached_tokens=%s,input_tokens=%s,output_tokens=%s,cache_read_tokens=%s,
                     cache_write_tokens=%s,reasoning_tokens=%s,cost_quota=%s,cost_usd=%s,strategy=%s,
                     updated_at=GREATEST(updated_at,%s) WHERE id=%s""",
-                    (count, prompt, completion, total, cached, input_tokens, output_tokens, cache_read, cache_write,
+                    (record.get("trace_id"), count, prompt, completion, total, cached, input_tokens, output_tokens, cache_read, cache_write,
                      reasoning, cost_quota, cost_usd, json.dumps(strategy, ensure_ascii=False), timestamp(record.get("ended_at")), job_id))
                 if record.get("task_status"):
                     strategy["end_reason"] = record.get("end_reason")
@@ -154,6 +158,9 @@ async def mirror_native_record(record_id, record):
                     await cur.execute("UPDATE ai_jobs SET status=%s,final_result=%s,last_error=%s,strategy=%s WHERE id=%s",
                         (record["task_status"], final[1] if final else None,
                          None if record["task_status"] == "success" else record.get("end_reason"), json.dumps(strategy, ensure_ascii=False), job_id))
+                    execution_id = hashlib.sha256(record_id.encode()).hexdigest()
+                    await cur.execute("INSERT IGNORE INTO ai_runtime_completions (job_id,execution_id,created_at) VALUES (%s,%s,CURRENT_TIMESTAMP(3))",
+                                      (job_id, execution_id))
                 await conn.commit()
                 return True
             except Exception:

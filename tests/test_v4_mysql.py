@@ -75,7 +75,7 @@ def test_real_mysql_unlinked_baseline_export_without_call_logs_is_idempotent(mon
     # Website schema-shaped fixtures live only in the disposable test database.
     with conn.cursor() as cur:
         cur.execute('''CREATE TABLE IF NOT EXISTS ai_jobs (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,service VARCHAR(50),task_type VARCHAR(50),task_key VARCHAR(191),operator_type VARCHAR(20),operator_id BIGINT NULL,
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,service VARCHAR(50),task_type VARCHAR(50),task_key VARCHAR(191),trace_id VARCHAR(64) NULL,operator_type VARCHAR(20),operator_id BIGINT NULL,
           strategy JSON,system_prompt TEXT,user_prompt TEXT,status VARCHAR(20),attempt_count INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,
           input_tokens BIGINT,output_tokens BIGINT,cache_read_tokens BIGINT,cache_write_tokens BIGINT,reasoning_tokens BIGINT,cost_quota BIGINT,cost_usd DECIMAL(18,8),
           round INT,last_provider VARCHAR(100),last_error TEXT,final_result TEXT,created_at DATETIME,updated_at DATETIME) ENGINE=InnoDB''')
@@ -84,9 +84,12 @@ def test_real_mysql_unlinked_baseline_export_without_call_logs_is_idempotent(mon
           started_at DATETIME,ended_at DATETIME,ok INT,prompt_tokens BIGINT,completion_tokens BIGINT,total_tokens BIGINT,cached_tokens BIGINT,
           input_tokens BIGINT,output_tokens BIGINT,cache_read_tokens BIGINT,cache_write_tokens BIGINT,reasoning_tokens BIGINT,cost_quota BIGINT,cost_usd DECIMAL(18,8),pricing_source VARCHAR(64),pricing_model VARCHAR(191),
           error_kind VARCHAR(50),error_message TEXT,raw_response TEXT,request_id VARCHAR(191),selected INT) ENGINE=InnoDB''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS ai_runtime_completions (
+          job_id BIGINT NOT NULL,execution_id CHAR(64) NOT NULL,created_at DATETIME(3) NOT NULL,
+          PRIMARY KEY (job_id,execution_id)) ENGINE=InnoDB''')
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE ai_jobs MODIFY task_key VARCHAR(191)")
-        for table,column,kind in [('ai_jobs','last_provider','VARCHAR(100)'),('ai_jobs','created_at','DATETIME'),('ai_jobs','updated_at','DATETIME'),
+        for table,column,kind in [('ai_jobs','trace_id','VARCHAR(64)'),('ai_jobs','last_provider','VARCHAR(100)'),('ai_jobs','created_at','DATETIME'),('ai_jobs','updated_at','DATETIME'),
                                   ('ai_jobs','input_tokens','BIGINT'),('ai_jobs','output_tokens','BIGINT'),('ai_jobs','cache_read_tokens','BIGINT'),
                                   ('ai_jobs','cache_write_tokens','BIGINT'),('ai_jobs','reasoning_tokens','BIGINT'),('ai_jobs','cost_quota','BIGINT'),('ai_jobs','cost_usd','DECIMAL(18,8)'),
                                   ('ai_job_attempts','request_id','VARCHAR(191)'),('ai_job_attempts','error_kind','VARCHAR(50)'),

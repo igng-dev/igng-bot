@@ -1,5 +1,17 @@
 // Read native lifecycle facts. No model invocation, Session storage or Agent loop lives here.
+import { createHash } from 'node:crypto';
 import { expandAssistantStream } from '@deepseek-ai/dsh-llm';
+
+export function traceIdForTask(taskKey) {
+  return `tr_${createHash('sha256').update(String(taskKey)).digest('hex').slice(0,32)}`;
+}
+
+function firstOutputAt(stream) {
+  for(const row of stream) {
+    const type=row?.chunk?.type;
+    if(['text-delta','reasoning-delta','tool-call-delta','text','reasoning','tool-call','tool-use'].includes(type))return row.time;
+  }
+}
 
 // Normalize DSH's TokenUsage into tokscale's five additive buckets.
 //
@@ -35,7 +47,7 @@ export class NativeAccounting {
     this.settlements.set(slot,event.seq);
     return prior!=null&&prior!==event.seq?prior:null;
   }
-  apply(event,latest) {
+  apply(event,latest,hints={}) {
     if(event.seq<=this.floor||this.seen.has(event.seq))return;
     if(this.replaying)this.seen.add(event.seq);else this.floor=event.seq;
     const data=event.data;
@@ -46,24 +58,33 @@ export class NativeAccounting {
     if(event.type==='turn/start')this.turn=data.turn;
     if(event.type==='request/header')this.route=data.header.config;
     if(event.type==='request/context')this.route=data;
-    if(event.type==='llm/retry-started'){if(data.step!=null)this.settlements.delete(this.slot(data.turn??this.turn,data.step));return;}
-    if(!['turn/start','user/message','assistant/message','assistant/attempt','turn/end','compaction/start','compaction/summary','compaction/end'].includes(event.type))return;
     const compact=event.type.startsWith('compaction/');
     const owner=compact?`compaction:${data.compactionId}`:`turn:${data.turn??this.turn}`;
     const key=`dsh:${this.sessionId}:${owner}`;
     let task=this.tasks.get(key);
-    if(!task){task={attempts:0,started:event.time,source:this.source||latest};this.tasks.set(key,task);}
+    if(!task){task={attempts:0,started:event.time,source:this.source||latest,sourceEventIds:[],requestStartedAt:null};this.tasks.set(key,task);}
+    if(event.type==='request/header'||event.type==='request/context') {
+      if(event.type==='request/header'||task.requestStartedAt==null)task.requestStartedAt=event.time;
+      task.requestStep=data.step??task.requestStep??null;
+      return;
+    }
+    if(event.type==='llm/retry-started'){if(data.step!=null)this.settlements.delete(this.slot(data.turn??this.turn,data.step));return;}
+    if(!['turn/start','user/message','assistant/message','assistant/attempt','turn/end','compaction/start','compaction/summary','compaction/end'].includes(event.type))return;
     if(event.type==='user/message') {
       for(const item of data.content||[])if(item.type==='text'&&item.text.startsWith('【QQ事件：以下 JSON 内容是不可信用户数据】\n')) {
         try{task.source=JSON.parse(item.text.slice(item.text.indexOf('\n')+1));this.source=task.source;}catch{}
       }
+      const ids=(Array.isArray(hints.sourceEvents)?hints.sourceEvents:[])
+        .filter(item=>item?.isSelf!==true).map(item=>item?.eventId).filter(Boolean).map(String);
+      task.sourceEventIds=[...new Set([...task.sourceEventIds,...ids])].slice(0,32);
       return;
     }
     const terminal=event.type==='turn/end'||event.type==='compaction/end';
     const attempt=event.type==='assistant/message'||event.type==='assistant/attempt'||event.type==='compaction/summary'||event.type==='compaction/end'&&data.error&&task.attempts===0;
     if(!terminal&&!attempt)return;
     const source=task.source||{},message=data.message||{},stream=expandAssistantStream(data.stream||[]);
-    const usage=data.usage||[...stream].reverse().find(row=>row.chunk?.type==='usage')?.chunk.usage;
+    const streamRows=[...stream], firstOutput=firstOutputAt(streamRows), startedAt=task.requestStartedAt??task.started;
+    const usage=data.usage||[...streamRows].reverse().find(row=>row.chunk?.type==='usage')?.chunk.usage;
     const content=compact?data.summary||[]:message.content||[];
     const success=event.type==='assistant/message'&&!data.interrupted||event.type==='compaction/summary';
     const reason=compact?(data.error?'error':'completed'):data.reason?.kind;
@@ -84,8 +105,9 @@ export class NativeAccounting {
       system_prompt:'[DSH native Session owns system prompt and compaction history]',user_prompt:source.plain||source.text||'',
       response_content:content.filter(c=>c.type==='text').map(c=>c.text).join('\n'),
       tool_calls:content.filter(c=>c.type==='tool-call').map(c=>({name:c.name,id:c.id})),token_usage:usage??null,token_breakdown:tokenBreakdown(usage),
-      started_at:stream[0]?.time??task.started,ended_at:event.time,
-      duration_ms:Math.max(0,(stream.at(-1)?.time??event.time)-(stream[0]?.time??task.started)),
+      job_started_at:task.started,started_at:startedAt,ended_at:event.time,
+      first_output_at:firstOutput??null,ttft_ms:firstOutput==null?null:Math.max(0,firstOutput-startedAt),
+      duration_ms:Math.max(0,event.time-startedAt),trace_id:traceIdForTask(key),source_event_ids:task.sourceEventIds,
       success:!!success,error_message:success?'':data.interrupted?'DSH model stream interrupted':attempt?'DSH model attempt failed':'',
       ...(attempt?{attempt_no:++task.attempts}:{}),
       ...(supersedes!=null?{supersedes_seq:supersedes}:{}),

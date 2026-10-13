@@ -66,6 +66,12 @@ test('live turns project into MySQL rows that reconstruct in order', async () =>
     const ordered = reconstruct(rows);
     assert.deepEqual(ordered.map(item => item.seq), [...ordered.map(item => item.seq)].sort((left, right) => left - right));
     assert.ok(ordered.some(item => item.role === 'user' && item.text.includes('你好')));
+    await conv.latencyWrite;
+    const spans = [...store.latencySpans.values()];
+    assert.ok(spans.some(span => span.spanType === 'dsh_turn' && /^tr_[0-9a-f]{32}$/.test(span.traceId)));
+    assert.ok(spans.some(span => span.spanType === 'model_attempt'));
+    assert.ok(spans.some(span => span.spanType === 'tool_call'));
+    assert.ok(spans.every(span => !JSON.stringify(span.attributes || {}).includes('你好')));
   } finally { await runtime.close(); await ctx.fiber.dispose(); }
 });
 

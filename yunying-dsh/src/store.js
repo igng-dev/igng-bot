@@ -244,6 +244,53 @@ export class MySQLStore {
     if(payload?.supersedes_record_id) await this.query('DELETE FROM yunying_ai_records WHERE record_id=?', [payload.supersedes_record_id]);
     await this.query('INSERT IGNORE INTO yunying_ai_records (record_id,dsh_session_id,request_seq,payload) VALUES (?,?,?,?)', [recordId, sessionId, seq, JSON.stringify(payload)]);
   }
+  async recordLatencySpan(span) {
+    const spanId = String(span?.spanId || '').slice(0, 160);
+    const spanType = String(span?.spanType || '').slice(0, 64);
+    if(!spanId || !spanType) return;
+    const startedAt = span.startedAt == null ? new Date() : new Date(span.startedAt);
+    if(Number.isNaN(startedAt.getTime())) return;
+    const endedAt = span.endedAt == null ? null : new Date(span.endedAt);
+    await this.query(`INSERT INTO yunying_latency_spans
+      (span_id,trace_id,task_key,correlation_id,span_type,parent_span_id,started_at,ended_at,status,attributes,mirror_status)
+      VALUES (?,?,?,?,?,?,?,?,?,?, 'pending')
+      ON DUPLICATE KEY UPDATE
+        trace_id=COALESCE(VALUES(trace_id),trace_id),
+        task_key=COALESCE(VALUES(task_key),task_key),
+        correlation_id=COALESCE(VALUES(correlation_id),correlation_id),
+        span_type=VALUES(span_type), parent_span_id=COALESCE(VALUES(parent_span_id),parent_span_id),
+        started_at=LEAST(started_at,VALUES(started_at)),
+        ended_at=COALESCE(VALUES(ended_at),ended_at), status=VALUES(status),
+        attributes=COALESCE(VALUES(attributes),attributes), mirror_status='pending'`, [
+      spanId, span.traceId || null, span.taskKey ? String(span.taskKey).slice(0, 191) : null,
+      span.correlationId ? String(span.correlationId).slice(0, 128) : null, spanType,
+      span.parentSpanId ? String(span.parentSpanId).slice(0, 160) : null, startedAt, endedAt,
+      String(span.status || 'ok').slice(0, 32), span.attributes == null ? null : JSON.stringify(span.attributes),
+    ]);
+  }
+  async linkLatencyTrace(correlationIds, traceId, taskKey) {
+    const ids = [...new Set((Array.isArray(correlationIds) ? correlationIds : [])
+      .map(String).filter(Boolean).map(value => value.slice(0, 128)))];
+    if(!ids.length || !traceId) return;
+    await this.query(`UPDATE yunying_latency_spans SET trace_id=?,task_key=?,mirror_status='pending'
+      WHERE correlation_id IN (${ids.map(() => '?').join(',')})`, [traceId, taskKey || null, ...ids]);
+  }
+  async pendingLatencySpans(limit = 100) {
+    const rows = await this.query('SELECT * FROM yunying_latency_spans WHERE mirror_status=\'pending\' ORDER BY updated_at,span_id LIMIT ?', [integer(limit, 1, 100, 100)]);
+    return rows.map(row => ({
+      span_id: row.span_id, trace_id: row.trace_id, task_key: row.task_key,
+      correlation_id: row.correlation_id, span_type: row.span_type, parent_span_id: row.parent_span_id,
+      started_at: row.started_at, ended_at: row.ended_at, status: row.status,
+      attributes: json(row.attributes) || {}, updated_at: row.updated_at,
+    }));
+  }
+  async markLatencySpansMirrored(spans) {
+    const rows = (Array.isArray(spans) ? spans : []).filter(row => row && row.span_id && row.updated_at);
+    for(const row of rows) {
+      await this.query(`UPDATE yunying_latency_spans SET mirror_status='mirrored'
+        WHERE span_id=? AND updated_at=?`, [String(row.span_id), row.updated_at]);
+    }
+  }
   async recordSessionEvents(rows) {
     // INSERT IGNORE on (dsh_session_id,event_seq) makes live capture and log replay
     // idempotent. Chunked so one long session cannot exceed max_allowed_packet.
