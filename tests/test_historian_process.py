@@ -33,14 +33,15 @@ async def scenario():
     api_port,model_port=port(),port()
     admin,worker=secrets.token_hex(32),secrets.token_hex(32)
     server=1990000000+uuid4().int%1000000
-    start_day=(datetime.now(timezone.utc)-timedelta(days=3)).date()
-    label=start_day.isoformat()
+    today=datetime.now(timezone.utc).date()
+    weekly_label=(today-timedelta(days=today.weekday()+7)).isoformat()
+    daily_label=(today-timedelta(days=3)).isoformat()
     conn=pymysql.connect(host='127.0.0.1',port=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),user='root',database='yunying_v4_test',autocommit=True)
     with conn.cursor() as cur:
         cur.execute('CREATE TABLE IF NOT EXISTS chat_messages (id BIGINT AUTO_INCREMENT PRIMARY KEY,server_id INT,sent_at DATETIME(3),player_uuid VARCHAR(36),player_name VARCHAR(64),content TEXT,source VARCHAR(16),cancelled BOOLEAN)')
         cur.execute('CREATE TABLE IF NOT EXISTS player_event_logs (id BIGINT AUTO_INCREMENT PRIMARY KEY,server_id INT,occurred_at DATETIME(3),player_uuid VARCHAR(36),player_name VARCHAR(64),event_type VARCHAR(32),reason TEXT)')
         cur.execute('INSERT INTO chat_messages(server_id,sent_at,player_uuid,player_name,content,source,cancelled) VALUES(%s,%s,%s,%s,%s,%s,0)',
-                    (server,datetime.combine(start_day,datetime.min.time()),str(uuid4()),'Synthetic','合成玩家说你好。','paper'))
+                    (server,datetime.fromisoformat(weekly_label)+timedelta(hours=1),str(uuid4()),'Synthetic','合成玩家说你好。','paper'))
         event_id=f'mc:{server}:chat_messages:{cur.lastrowid}'
     conn.close()
     observed=[]
@@ -83,6 +84,12 @@ async def scenario():
             except (aiohttp.ClientError,OSError):pass
             await asyncio.sleep(.2)
         raise AssertionError(f'fixture timed out; logs: {data}')
+    def run_row(run_id):
+        db=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
+        try:
+            with db.cursor() as cur:
+                cur.execute('SELECT status,error,markdown,phase FROM historian_runs WHERE id=%s',(run_id,));return cur.fetchone()
+        finally:db.close()
     try:
         await spawn('api',[sys.executable,'-m','igngbot_v4.historian'])
         async with aiohttp.ClientSession() as client:
@@ -90,24 +97,37 @@ async def scenario():
                 async with client.get(f'http://127.0.0.1:{api_port}/health') as response:return response.status==200
             await wait_until(healthy)
             async with client.post(f'http://127.0.0.1:{api_port}/admin/create',headers={'Authorization':'Bearer '+admin},json={
-                    'server_id':server,'kind':'daily','period_start':label,'actor':'site:fixture','request_key':str(uuid4())}) as response:
-                assert response.status==200,await response.text();created=await response.json()
-            await spawn('dsh',['sh',str(root/'scripts/run-historian-profile.sh')])
-            async def completed():
-                db=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
-                try:
-                    with db.cursor() as cur:
-                        cur.execute('SELECT status,error FROM historian_runs WHERE id=%s',(created['run_id'],));status,error=cur.fetchone()
-                        if status=='failed':raise AssertionError(f'run failed: {error}; logs: {data}')
-                        return status=='completed'
-                finally:db.close()
-            await wait_until(completed,180)
+                    'server_id':server,'kind':'weekly','period_start':weekly_label,'actor':'site:fixture','request_key':str(uuid4())}) as response:
+                assert response.status==200,await response.text();weekly=await response.json()
+            async with client.post(f'http://127.0.0.1:{api_port}/admin/create',headers={'Authorization':'Bearer '+admin},json={
+                    'server_id':server,'kind':'daily','period_start':daily_label,'actor':'site:fixture','request_key':str(uuid4())}) as response:
+                assert response.status==200,await response.text();daily=await response.json()
+        async def daily_completed():
+            status,error,markdown,phase=run_row(daily['run_id'])
+            if status=='failed':raise AssertionError(f'daily run failed: {error}; logs: {data}')
+            return status=='completed'
+        await wait_until(daily_completed,120)
+        assert observed==[],'mechanical daily must not call the model'
+        db=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
+        try:
+            with db.cursor() as cur:
+                cur.execute('SELECT status,markdown,phase FROM historian_runs WHERE id=%s',(daily['run_id'],));status,markdown,phase=cur.fetchone()
+                assert status=='completed' and markdown is None and phase=='mechanical_publish'
+                cur.execute('SELECT COUNT(*) FROM historian_calls WHERE run_id=%s',(daily['run_id'],));assert cur.fetchone()[0]==0
+                cur.execute('SELECT current_run_id FROM historian_reports WHERE id=%s',(daily['report_id'],));assert cur.fetchone()[0]==daily['run_id']
+        finally:db.close()
+        await spawn('dsh',['sh',str(root/'scripts/run-historian-profile.sh')])
+        async def weekly_completed():
+            status,error,markdown,phase=run_row(weekly['run_id'])
+            if status=='failed':raise AssertionError(f'weekly run failed: {error}; logs: {data}')
+            return status=='completed'
+        await wait_until(weekly_completed,180)
         assert len(observed)==2
         db=pymysql.connect(host='127.0.0.1',port=int(env['DB_PORT']),user='root',database='yunying_v4_test')
         try:
             with db.cursor() as cur:
-                cur.execute('SELECT COUNT(*) FROM historian_calls WHERE run_id=%s',(created['run_id'],));assert cur.fetchone()[0]>=3
-                cur.execute('SELECT current_run_id FROM historian_reports WHERE id=%s',(created['report_id'],));assert cur.fetchone()[0]==created['run_id']
+                cur.execute('SELECT COUNT(*) FROM historian_calls WHERE run_id=%s',(weekly['run_id'],));assert cur.fetchone()[0]>=3
+                cur.execute('SELECT current_run_id FROM historian_reports WHERE id=%s',(weekly['report_id'],));assert cur.fetchone()[0]==weekly['run_id']
         finally:db.close()
     finally:
         for process in processes:

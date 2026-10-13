@@ -34,7 +34,7 @@ def settings(env=os.environ):
             'schedule_enabled': env.get('HISTORIAN_SCHEDULE', '1') == '1',
             'provider': env.get('HISTORIAN_PROVIDER', 'deepseek-official'),
             'model': env.get('HISTORIAN_MODEL', 'deepseek-v4-flash'),
-            'prompt_version': 'server-historian-v1',
+            'prompt_version': 'server-historian-v2',
             'max_steps': min(2048, max(1, int(env.get('HISTORIAN_MAX_STEPS', '512')))),
             'max_tokens': min(10000000, max(1000, int(env.get('HISTORIAN_TOKEN_BUDGET', '2000000')))),
             'max_seconds': min(14400, max(60, int(env.get('HISTORIAN_MAX_SECONDS', '3600')))),
@@ -61,6 +61,33 @@ class Service:
     async def call(self, function, *args, **kwargs):
         # Each repository operation has its own connection; bounded requests don't block the HTTP loop.
         return await asyncio.to_thread(function, *args, **kwargs)
+
+    async def claim_and_prepare(self, kinds):
+        # Snapshot preparation is serialized separately from the long model execution.
+        async with self.lock:
+            row = await self.call(self.repo.claim, kinds)
+            if not row:
+                return None
+            try:
+                events, history, manifest = await self.call(self.source.snapshot, row['server_id'], row['period_from'], row['period_to'])
+                statistics = await self.call(compute, events, history, row['period_from'], row['period_to'], row['timezone'])
+                await self.call(self.repo.snapshot, row['id'], row['lease_token'], events, manifest, statistics)
+            except Exception as error:
+                await self.call(self.repo.finish, row['id'], row['lease_token'], False, type(error).__name__)
+                raise
+            return {k: row[k] for k in ('id', 'report_id', 'server_id', 'kind', 'timezone', 'period_start',
+                                        'period_from', 'period_to', 'dsh_session_id', 'lease_token', 'config')}
+
+    async def mechanical(self):
+        # Daily reports are published from the deterministic snapshot; no model or DSH is involved.
+        while True:
+            try:
+                row = await self.claim_and_prepare(('daily',))
+                if row:
+                    await self.call(self.repo.publish_mechanical, row['id'], row['lease_token'])
+            except Exception as error:
+                logger.error('historian mechanical publication deferred: %s', type(error).__name__)
+            await asyncio.sleep(30)
 
     async def route(self, request):
         worker = request.path.startswith('/worker/')
@@ -93,20 +120,7 @@ class Service:
             elif action == 'reconcile':
                 result = await self.call(self.repo.account, data.get('run_id'), None, data.get('record', {}), True)
             elif action == 'claim':
-                # Snapshot preparation is serialized separately from the long model execution.
-                async with self.lock:
-                    row = await self.call(self.repo.claim)
-                    if row:
-                        try:
-                            events, history, manifest = await self.call(self.source.snapshot, row['server_id'], row['period_from'], row['period_to'])
-                            statistics = await self.call(compute, events, history, row['period_from'], row['period_to'], row['timezone'])
-                            await self.call(self.repo.snapshot, row['id'], row['lease_token'], events, manifest, statistics)
-                        except Exception as error:
-                            await self.call(self.repo.finish, row['id'], row['lease_token'], False, type(error).__name__)
-                            raise
-                        row = {k: row[k] for k in ('id', 'report_id', 'server_id', 'kind', 'timezone', 'period_start',
-                                                   'period_from', 'period_to', 'dsh_session_id', 'lease_token', 'config')}
-                    result = {'ok': True, 'run': row}
+                result = {'ok': True, 'run': await self.claim_and_prepare(('weekly',))}
             else:
                 run, token = data.get('run_id'), data.get('lease_token')
                 if action == 'heartbeat':
@@ -185,7 +199,7 @@ class Service:
                 return web.json_response({'ok': False}, status=503)
         app.router.add_get('/health', health)
         async def start(_app):
-            self.background = [asyncio.create_task(self.maintenance()), asyncio.create_task(self.mirror())]
+            self.background = [asyncio.create_task(self.maintenance()), asyncio.create_task(self.mechanical()), asyncio.create_task(self.mirror())]
         async def stop(_app):
             for task in self.background:
                 task.cancel()
