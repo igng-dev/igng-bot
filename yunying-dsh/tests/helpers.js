@@ -57,7 +57,7 @@ export async function harness(adapter=new ScriptAdapter(),root) {
  return {ctx,adapter,root};
 }
 export class FixtureStore {
- constructor(){this.healthy=true;this.maps=new Map();this.rows=new Map();this.bindings=new Map();this.calls=[];this.transcripts=[];this.failDeliveryOnce=false;}
+ constructor(){this.healthy=true;this.maps=new Map();this.rows=new Map();this.bindings=new Map();this.calls=[];this.transcripts=[];this.latencySpans=new Map();this.failDeliveryOnce=false;}
  async mapping(key){if(!this.maps.has(key))this.maps.set(key,{conversation_key:key,dsh_session_id:randomUUID(),provisioning_status:'provisioning',social_state:null});return structuredClone(this.maps.get(key));}
  async mappings(){return [...this.maps.values()].map(v=>structuredClone(v));}
  async policy(key){const row=this.maps.get(key);return {chatMode:row?.chatMode??true};}
@@ -71,6 +71,15 @@ export class FixtureStore {
  async bindMessage(id,message){this.rows.get(id).dsh_message=message;}
  async delivered(id){if(this.failDeliveryOnce){this.failDeliveryOnce=false;throw new Error('simulated SQL acknowledgement failure');}this.rows.get(id).delivered=1;}
  async recordCall(...args){this.calls.push(args);}
+ async recordLatencySpan(span){
+  const prior=this.latencySpans.get(span.spanId);
+  this.latencySpans.set(span.spanId,{...(prior||{}),...structuredClone(span),startedAt:prior ? Math.min(prior.startedAt,span.startedAt) : span.startedAt,endedAt:span.endedAt??prior?.endedAt,updatedAt:Date.now()});
+ }
+ async linkLatencyTrace(ids,traceId,taskKey){
+  for(const id of ids)for(const span of this.latencySpans.values())if(span.correlationId===id){span.traceId=traceId;span.taskKey=taskKey;}
+ }
+ async pendingLatencySpans(){return [...this.latencySpans.values()];}
+ async markLatencySpansMirrored(rows){for(const row of rows){const span=this.latencySpans.get(row.spanId||row.span_id);if(span)span.mirrorStatus='mirrored';}}
  async recordSessionEvents(rows){for(const row of rows)this.transcripts.push(structuredClone(row));}
   noteKnowledgeSearch(){return [];}
   async knowledgeSearch(){return {ok:true,documents:[]};}

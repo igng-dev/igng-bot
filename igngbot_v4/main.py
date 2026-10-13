@@ -8,6 +8,7 @@ import re
 import signal
 import threading
 import uuid
+from datetime import datetime, timezone
 from aiohttp import ClientSession, ClientTimeout, web
 from igngbot_shared.config import Config
 from igngbot_shared.db import DBHandler
@@ -20,6 +21,7 @@ from igngbot_shared.timeutil import unix_to_utc_naive
 from igngbot_shared.call_log_db import mirror_call_to_site, close_call_log_pool
 from .ai_records import mirror_native_record, historical_record
 from .broker_client import BrokerClient
+from .latency import mirror_latency_spans
 from .journal import Journal, decode, encode
 from .migrate import connect, migrate
 from .settings import Settings, signed_conversation
@@ -27,6 +29,15 @@ from .terminal import TerminalGateway
 from .views import message_view, row_images, safe_structure
 
 logger = logging.getLogger("yunying.infrastructure")
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _trace_id(value):
+    text = str(value or "")
+    return text if re.fullmatch(r"tr_[0-9a-f]{32,64}", text) else None
 
 
 _ANNOUNCEMENT_NOTICE_TYPES = {
@@ -593,6 +604,12 @@ class Infrastructure:
             raise web.HTTPBadRequest(text="invalid reply id")
         if reply and not self.db.get_message_by_msg_id(gid, str(reply)):
             raise web.HTTPForbidden(text="reply is outside conversation")
+        trace_id = _trace_id(data.get("traceId"))
+        if data.get("traceId") not in (None, "") and trace_id is None:
+            raise web.HTTPBadRequest(text="invalid trace identity")
+        task_key = data.get("taskKey")
+        if task_key is not None and (not isinstance(task_key, str) or len(task_key) > 191):
+            raise web.HTTPBadRequest(text="invalid task identity")
         at_user = data.get("atUserId")
         if at_user is not None:
             if gid < 0 or not re.fullmatch(r"[1-9][0-9]{0,19}", str(at_user)):
@@ -608,7 +625,26 @@ class Infrastructure:
         async def prepared():
             return {"segments": segments, "text": message, "reply": reply}
 
-        return await self._deliver(key, gid, request_id, {"message": message, "reply": reply, "at": at_user}, prepared)
+        return await self._deliver(key, gid, request_id, {
+            "message": message, "reply": reply, "at": at_user,
+            "_trace_id": trace_id, "_task_key": task_key,
+        }, prepared)
+
+    def _record_latency_span(self, span):
+        """Write a local span when the active journal supports the new ledger.
+
+        A small compatibility seam keeps older test journals and rollback
+        adapters usable while the production Journal always has this method.
+        Latency collection must never turn a successful QQ action into a
+        failed action.
+        """
+        recorder = getattr(self.journal, "record_latency_span", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(span)
+        except Exception as error:
+            logger.warning("Latency span deferred: %s", type(error).__name__)
 
     async def _deliver(self, key, gid, request_id, journal_payload, provider):
         """Durable send core shared by text and artifact delivery.
@@ -620,16 +656,30 @@ class Infrastructure:
             fresh, prior = self.journal.begin_send(request_id, key, journal_payload)
             if not fresh:
                 return prior
+            trace_id = journal_payload.get("_trace_id")
+            task_key = journal_payload.get("_task_key")
+            send_started = _utc_now()
+
+            def latency(kind, started_at, ended_at, status, attributes=None):
+                self._record_latency_span({
+                    "span_id": f"{kind}:{request_id}", "trace_id": trace_id,
+                    "task_key": task_key, "correlation_id": request_id,
+                    "span_type": kind, "started_at": started_at, "ended_at": ended_at,
+                    "status": status, "attributes": attributes or {},
+                })
+
             try:
                 prepared = await provider()
             except Exception:
                 result = {"ok": False, "status": "failed", "error": "附件不可用"}
                 self.journal.finish_send(request_id, "failed", result)
+                latency("send_api", send_started, _utc_now(), "failed", {"sendStatus": "failed"})
                 return result
             segments = prepared["segments"]
             message = prepared["text"]
             attachment = prepared.get("attachment")
             reply = prepared.get("reply")
+            http_started = _utc_now()
             try:
                 action = "send_group_msg" if gid > 0 else "send_private_msg"
                 target = {"group_id": gid} if gid > 0 else {"user_id": -gid}
@@ -644,11 +694,19 @@ class Infrastructure:
                         err_msg = "群内已被禁言" if is_mute else "OneBot 拒绝发送"
                         result = {"ok": False, "status": "failed", "error": err_msg, "muted": is_mute}
                         self.journal.finish_send(request_id, "failed", result)
+                        latency("onebot_http", http_started, _utc_now(), "failed", {
+                            "httpStatus": response.status, "retcode": retcode, "sendStatus": "failed",
+                        })
+                        latency("send_api", send_started, _utc_now(), "failed", {"sendStatus": "failed"})
                         return result
                 message_id = str((result.get("data") or {}).get("message_id") or "")
                 result = {"ok": bool(message_id), "status": "sent" if message_id else "unknown", "message_id": message_id or None}
+                latency("onebot_http", http_started, _utc_now(), result["status"], {
+                    "httpStatus": 200, "retcode": 0, "sendStatus": result["status"],
+                })
                 # Persist remote outcome first; DB history failure must never cause an automatic resend.
                 self.journal.finish_send(request_id, result["status"], result)
+                latency("send_api", send_started, _utc_now(), result["status"], {"sendStatus": result["status"]})
                 if message_id:
                     try:
                         self.db.insert_message(group_id=gid, sender_id=self.config.BOT_USER_ID,
@@ -663,6 +721,8 @@ class Infrastructure:
             except (asyncio.CancelledError, Exception) as error:
                 # A timeout after remote acceptance is not proof of failure. No retry across restart.
                 self.journal.finish_send(request_id, "unknown", {"ok": False, "status": "unknown", "error": "发送结果不确定；不得自动重发"})
+                latency("onebot_http", http_started, _utc_now(), "unknown", {"sendStatus": "unknown"})
+                latency("send_api", send_started, _utc_now(), "unknown", {"sendStatus": "unknown"})
                 if isinstance(error, asyncio.CancelledError):
                     raise
                 return {"ok": False, "status": "unknown", "error": "发送结果不确定；不得自动重发"}
@@ -672,7 +732,13 @@ class Infrastructure:
         gid = signed_conversation(key)
         if not self.speaking_allowed(key, data.get("triggerEventId")):
             return {"ok": False, "error": "当前发言权限已关闭或呼叫已结束"}
-        return await self.terminal.send(data, gid=gid, deliver=self._deliver)
+        trace_id = _trace_id(data.get("traceId"))
+        if data.get("traceId") not in (None, "") and trace_id is None:
+            raise web.HTTPBadRequest(text="invalid trace identity")
+        task_key = data.get("taskKey")
+        if task_key is not None and (not isinstance(task_key, str) or len(task_key) > 191):
+            raise web.HTTPBadRequest(text="invalid task identity")
+        return await self.terminal.send({**data, "traceId": trace_id, "taskKey": task_key}, gid=gid, deliver=self._deliver)
 
     async def terminal_call(self, path, data):
         if self.terminal is None:
@@ -693,6 +759,11 @@ class Infrastructure:
         key = data.get("key", "")
         if request.path == "/ai-records":
             return web.json_response(await self.ai_record(data))
+        if request.path == "/latency-spans":
+            spans = data.get("spans")
+            if not isinstance(spans, list) or len(spans) > 100:
+                raise web.HTTPBadRequest(text="invalid latency span batch")
+            return web.json_response(await mirror_latency_spans(spans))
         if request.path == "/identity":
             return web.json_response(await self.identity(data))
         if request.path == "/authorized":
@@ -751,18 +822,37 @@ class Infrastructure:
                     cur.execute("SELECT 1 FROM message_logs WHERE group_id=%s AND sender_id=%s LIMIT 1", (gid, uid))
                     if not cur.fetchone():
                         raise web.HTTPForbidden()
-            fresh, prior = self.journal.begin_send(data["requestId"], key, {"poke": uid})
+            trace_id = _trace_id(data.get("traceId"))
+            task_key = data.get("taskKey")
+            if data.get("traceId") not in (None, "") and trace_id is None:
+                raise web.HTTPBadRequest(text="invalid trace identity")
+            if task_key is not None and (not isinstance(task_key, str) or len(task_key) > 191):
+                raise web.HTTPBadRequest(text="invalid task identity")
+            request_id = data["requestId"]
+            send_started = _utc_now()
+            fresh, prior = self.journal.begin_send(request_id, key, {"poke": uid, "_trace_id": trace_id, "_task_key": task_key})
             if not fresh:
                 return web.json_response(prior)
             try:
+                http_started = _utc_now()
                 async with self.http.post(self.config.ONEBOT_HTTP_URL.rstrip("/") + "/send_poke", json={"user_id": int(uid), **({"group_id": gid} if gid > 0 else {})}, headers={"Authorization": "Bearer " + self.config.ONEBOT_HTTP_TOKEN}, timeout=ClientTimeout(total=15)) as response:
                     body = await response.json()
                     ok = response.status == 200 and body.get("status") == "ok" and body.get("retcode") == 0
                     result = {"ok": ok}
-                    self.journal.finish_send(data["requestId"], "sent" if ok else "failed", result)
+                    status = "sent" if ok else "failed"
+                    self.journal.finish_send(request_id, status, result)
+                    self._record_latency_span({"span_id": f"onebot_http:{request_id}", "trace_id": trace_id, "task_key": task_key,
+                        "correlation_id": request_id, "span_type": "onebot_http", "started_at": http_started, "ended_at": _utc_now(),
+                        "status": status, "attributes": {"httpStatus": response.status, "retcode": body.get("retcode"), "sendStatus": status}})
+                    self._record_latency_span({"span_id": f"send_api:{request_id}", "trace_id": trace_id, "task_key": task_key,
+                        "correlation_id": request_id, "span_type": "send_api", "started_at": send_started, "ended_at": _utc_now(),
+                        "status": status, "attributes": {"sendStatus": status}})
                     return web.json_response(result)
             except Exception:
-                self.journal.finish_send(data["requestId"], "unknown", {"ok": False, "status": "unknown"})
+                self.journal.finish_send(request_id, "unknown", {"ok": False, "status": "unknown"})
+                self._record_latency_span({"span_id": f"send_api:{request_id}", "trace_id": trace_id, "task_key": task_key,
+                    "correlation_id": request_id, "span_type": "send_api", "started_at": send_started, "ended_at": _utc_now(),
+                    "status": "unknown", "attributes": {"sendStatus": "unknown"}})
                 return web.json_response({"ok": False, "status": "unknown"})
         if request.path == "/reaction":
             if not self.speaking_allowed(key, data.get("triggerEventId")):
@@ -775,10 +865,19 @@ class Infrastructure:
             emoji_id = str(data.get("emojiId", ""))
             if not re.fullmatch(r"[0-9]{1,10}", emoji_id):
                 raise web.HTTPBadRequest()
-            fresh, prior = self.journal.begin_send(data["requestId"], key, {"reaction": msg_id, "emoji_id": emoji_id})
+            trace_id = _trace_id(data.get("traceId"))
+            task_key = data.get("taskKey")
+            if data.get("traceId") not in (None, "") and trace_id is None:
+                raise web.HTTPBadRequest(text="invalid trace identity")
+            if task_key is not None and (not isinstance(task_key, str) or len(task_key) > 191):
+                raise web.HTTPBadRequest(text="invalid task identity")
+            request_id = data["requestId"]
+            send_started = _utc_now()
+            fresh, prior = self.journal.begin_send(request_id, key, {"reaction": msg_id, "emoji_id": emoji_id, "_trace_id": trace_id, "_task_key": task_key})
             if not fresh:
                 return web.json_response(prior)
             try:
+                http_started = _utc_now()
                 payload = {"group_id": gid, "message_id": int(msg_id) if msg_id.lstrip("-").isdigit() else msg_id, "emoji_id": emoji_id}
                 async with self.http.post(self.config.ONEBOT_HTTP_URL.rstrip("/") + "/set_msg_emoji_like",
                                          json=payload,
@@ -787,10 +886,20 @@ class Infrastructure:
                     body = await response.json()
                     ok = response.status == 200 and body.get("status") == "ok" and body.get("retcode") == 0
                     result = {"ok": ok}
-                    self.journal.finish_send(data["requestId"], "sent" if ok else "failed", result)
+                    status = "sent" if ok else "failed"
+                    self.journal.finish_send(request_id, status, result)
+                    self._record_latency_span({"span_id": f"onebot_http:{request_id}", "trace_id": trace_id, "task_key": task_key,
+                        "correlation_id": request_id, "span_type": "onebot_http", "started_at": http_started, "ended_at": _utc_now(),
+                        "status": status, "attributes": {"httpStatus": response.status, "retcode": body.get("retcode"), "sendStatus": status}})
+                    self._record_latency_span({"span_id": f"send_api:{request_id}", "trace_id": trace_id, "task_key": task_key,
+                        "correlation_id": request_id, "span_type": "send_api", "started_at": send_started, "ended_at": _utc_now(),
+                        "status": status, "attributes": {"sendStatus": status}})
                     return web.json_response(result)
             except Exception:
-                self.journal.finish_send(data["requestId"], "unknown", {"ok": False, "status": "unknown"})
+                self.journal.finish_send(request_id, "unknown", {"ok": False, "status": "unknown"})
+                self._record_latency_span({"span_id": f"send_api:{request_id}", "trace_id": trace_id, "task_key": task_key,
+                    "correlation_id": request_id, "span_type": "send_api", "started_at": send_started, "ended_at": _utc_now(),
+                    "status": "unknown", "attributes": {"sendStatus": "unknown"}})
                 return web.json_response({"ok": False, "status": "unknown"})
         raise web.HTTPNotFound()
 

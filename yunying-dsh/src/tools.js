@@ -168,6 +168,7 @@ export function registerTools(ctx, runtime) {
         await sleep(Math.max(0,Math.min(10000,gap||0)),undefined,{signal:exec.signal});
       }
       const result=await infra('/send',{key:state.key,requestId:`${state.sessionId}:${exec.callId}:${index}`,
+        traceId:runtime.traceId,taskKey:runtime.latencyTaskKey,
         triggerEventId:runtime.directEventId,message:messages[index],replyToMessageId:args.replyToMessageId,atUserId:args.atUserId},exec.signal);
       results.push(result);if(!result.ok)break;
       state.sent(result.message_id,messages[index]);await store.saveState(state);runtime.scheduleReplyCheck(messages[index]);
@@ -187,7 +188,7 @@ export function registerTools(ctx, runtime) {
   register('mcp__snowluma__qq_reply',replyProps,['key','token','message','replyToMessageId'],replyExecute,{},descriptions.qq_reply);
   standard('qq_send_poke',{targetUserId:numberOrString},async(args,exec)=>{
     const now=Date.now();if(state.sendTimes.filter(t=>now-t<60000).length>=config.maxSendMinute)throw new PolicyError('发送频率超限');
-    const result=await infra('/poke',{key:state.key,triggerEventId:runtime.directEventId,userId:String(args.targetUserId||state.key.split(':')[1]),requestId:`${state.sessionId}:${exec.callId}:poke`},exec.signal);
+    const result=await infra('/poke',{key:state.key,triggerEventId:runtime.directEventId,userId:String(args.targetUserId||state.key.split(':')[1]),requestId:`${state.sessionId}:${exec.callId}:poke`,traceId:runtime.traceId,taskKey:runtime.latencyTaskKey},exec.signal);
     if(result.ok){state.sent(null,'[拍一拍]');await store.saveState(state);}return result;
   });
   standard('qq_react_message',{messageId:numberOrString,emoji:str('表情名称或 emoji 代码，如 like/点赞/👍/ok/heart/doge/think/laugh/76')},async(args,exec)=>{
@@ -197,7 +198,7 @@ export function registerTools(ctx, runtime) {
     const emojiId=EMOJI_ALIAS_MAP[rawEmoji.toLowerCase()] || EMOJI_ALIAS_MAP[rawEmoji] || (/^[0-9]{1,10}$/.test(rawEmoji) ? rawEmoji : null);
     if(!emojiId)throw new PolicyError('不支持的表情代码或名称：' + rawEmoji);
     const targetMsgId=resolveMessageId(args.messageId);
-    const result=await infra('/reaction',{key:state.key,triggerEventId:runtime.directEventId,messageId:targetMsgId,emojiId,requestId:`${state.sessionId}:${exec.callId}:react`},exec.signal);
+    const result=await infra('/reaction',{key:state.key,triggerEventId:runtime.directEventId,messageId:targetMsgId,emojiId,requestId:`${state.sessionId}:${exec.callId}:react`,traceId:runtime.traceId,taskKey:runtime.latencyTaskKey},exec.signal);
     if(result.ok){state.sent(null,`[贴表情:${emojiId}]`);await store.saveState(state);}return result;
   },{},['messageId','emoji'],'对群聊中的某条消息进行表情回应/贴表情（点赞、附和、疑惑等交互）。');
   const resolveMessageId = supplied => {
@@ -320,7 +321,7 @@ export function registerTools(ctx, runtime) {
     if(minute.length+1>config.maxSendMinute||hour.length+1>config.maxSendHour)throw new PolicyError('发送频率超限，请等待');
     const result=await infra('/terminal/send',{key:state.key,token:state.agentToken,sessionId:args.sessionId,artifactId:args.artifactId,
       requestId:`${state.sessionId}:${exec.callId}:artifact`,replyToMessageId:args.replyToMessageId,atUserId:args.atUserId,
-      triggerEventId:runtime.directEventId},exec.signal);
+      triggerEventId:runtime.directEventId,traceId:runtime.traceId,taskKey:runtime.latencyTaskKey},exec.signal);
     if(result.ok){state.sent(result.message_id,'[附件]');await store.saveState(state);runtime.scheduleReplyCheck('[附件]');}
     return result;
   }, { timeoutMs:300000 },

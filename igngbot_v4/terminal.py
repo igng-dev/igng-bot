@@ -325,4 +325,5 @@ class TerminalGateway:
                     "reply": reply}
 
         return await deliver(key, gid, request_id,
-                             {"artifactId": artifact_id, "reply": reply, "at": at_user}, prepared)
+                             {"artifactId": artifact_id, "reply": reply, "at": at_user,
+                              "_trace_id": data.get("traceId"), "_task_key": data.get("taskKey")}, prepared)

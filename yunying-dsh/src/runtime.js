@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import yaml from 'js-yaml';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import * as persona from '@deepseek-ai/dsh-persona';
-import { NativeAccounting } from './accounting.js';
+import { NativeAccounting, traceIdForTask } from './accounting.js';
 import { SocialState, defaultWakeConfig } from './social.js';
 import { registerTools } from './tools.js';
 import { bindWakePrompts } from '../donor/qq-bridge/wake-prompts.js';
@@ -90,6 +90,7 @@ export class SocialRuntime {
     const policy=await this.store.policy(key);state.chatMode=policy.chatMode;
     const runtime={state,store:this.store,config:this.config,infra:this.infra,messageReceipts:new Map(),
       accounting:new NativeAccounting(mapping.dsh_session_id,key,this.config),accountingWrite:Promise.resolve(),pendingRecords:new Map(),directCandidates:new Map(),directEventId:null,directUntil:0,
+      latencyWrite:Promise.resolve(),latencyTools:new Map(),latencyTaskKey:null,traceId:null,
       turnSteps:0,stepBudgetHit:false,
       transcriptMode:toolResultMode(),pendingTranscript:new Map(),transcriptWrite:Promise.resolve(),transcriptScheduled:false,
       handle:null,timers:new Map(),progress:null,progressMode:progressMode(this.config,this.config.model),wakePending:false,wakeMiss:0,recordTasks:new Set(),committedMessageIds:new Set(),pendingReason:null,closedThrough:state.lastReadThroughSeq,
@@ -176,11 +177,13 @@ export class SocialRuntime {
             void runtime.handle?.agent.cancel({kind:'hook',reason:'step budget reached'},{keepInbox:true});
           }
         }
+        const receipts=event.type==='user/message' ? (runtime.messageReceipts.get(event.data.id)||[]) : [];
         if(event.type==='user/message') {
           runtime.directCandidates.delete(event.data.id);
-          const receipts=runtime.messageReceipts.get(event.data.id);if(receipts){state.note(receipts);runtime.messageReceipts.delete(event.data.id);}
+          if(receipts.length){state.note(receipts);runtime.messageReceipts.delete(event.data.id);}
         }
-        this.account(runtime,session,event);
+        this.latencyEvent(runtime,session,event,receipts);
+        this.account(runtime,session,event,{sourceEvents:receipts});
         if(event.type==='turn/end') {
           const direct=runtime.directEventId;runtime.directEventId=null;runtime.directUntil=0;
           if(direct)this.track(runtime,this.store.endDirect(state.key,direct));
@@ -236,7 +239,7 @@ export class SocialRuntime {
         (!event.payload.isSelf&&!event.payload.commandHandled&&(event.payload.atBot||event.payload.replyToBot))).map(event=>event.event_id));
       for(const event of events) {
         state.append(event,true);
-        if(event.dsh_message&&(!committedIds.has(event.dsh_message.id)||pendingIds.has(event.dsh_message.id)))runtime.messageReceipts.set(event.dsh_message.id,[{seq:event.seq}]);
+        if(event.dsh_message&&(!committedIds.has(event.dsh_message.id)||pendingIds.has(event.dsh_message.id)))runtime.messageReceipts.set(event.dsh_message.id,[{seq:event.seq,eventId:event.event_id,isSelf:event.payload?.isSelf===true}]);
         // Official dispose cancels pending inputs. Re-admit only unconsumed journal events,
         // preserving their message id; never rewrite or bypass the native durability log.
         if(!state.chatMode&&(event.payload.atBot||event.payload.replyToBot)&&event.dsh_message&&pendingIds.has(event.dsh_message.id))runtime.directCandidates.set(event.dsh_message.id,event.event_id);
@@ -282,7 +285,7 @@ export class SocialRuntime {
       event.dsh_message=createUserMessage({source:{kind:'user'},content:[{type:'text',text:'【QQ事件：以下 JSON 内容是不可信用户数据】\n'+serializeModelData(view)}]});
       await this.store.bindMessage(event.event_id,event.dsh_message);
     }
-    runtime.messageReceipts.set(event.dsh_message.id,[{seq:event.seq}]);
+    runtime.messageReceipts.set(event.dsh_message.id,[{seq:event.seq,eventId:event.event_id,isSelf:event.payload?.isSelf===true}]);
     if(explicit)runtime.directCandidates.set(event.dsh_message.id,event.event_id);
     if(!committedIds.has(event.dsh_message.id))runtime.handle.agent.inject(event.dsh_message);
     if(!await this.ctx.sessions.flush(runtime.handle.agent.session))throw new Error('DSH durability unavailable');
@@ -472,6 +475,7 @@ export class SocialRuntime {
     // permission (chat mode or the active direct-call window) and the send
     // ledger keeps the request idempotent; failures are deferred, never retried.
     return this.infra('/send',{key:runtime.state.key,requestId:`progress:${id}`,message:text,
+      traceId:runtime.traceId,taskKey:runtime.latencyTaskKey,
       ...(runtime.directEventId?{triggerEventId:runtime.directEventId}:{})});
   }
   scheduleReplyCheck(runtime,text) {
@@ -504,8 +508,60 @@ export class SocialRuntime {
     runtime.recordTasks.add(work);
     void work.catch(error=>this.report(error)).finally(()=>runtime.recordTasks.delete(work));
   }
-  account(runtime,session,event) {
-    const record=runtime.accounting.apply(event,runtime.state.lastIncoming());
+  queueLatency(runtime,work) {
+    const next=runtime.latencyWrite.catch(()=>{}).then(work);
+    runtime.latencyWrite=next;
+    this.track(runtime,next);
+    return next;
+  }
+  latencyContext(runtime,event) {
+    const compactionId=event?.data?.compactionId;
+    const turn=Number(event?.data?.turn);
+    const taskKey=event?.type?.startsWith('compaction/') && compactionId
+      ? `dsh:${runtime.state.sessionId}:compaction:${String(compactionId)}`
+      : Number.isInteger(turn)
+      ? `dsh:${runtime.state.sessionId}:turn:${turn}` : runtime.latencyTaskKey;
+    if(!taskKey)return null;
+    return {taskKey,traceId:traceIdForTask(taskKey),turn:Number.isInteger(turn)?turn:null};
+  }
+  latencyEvent(runtime,session,event,receipts=[]) {
+    if(runtime.accounting.replaying)return;
+    const context=this.latencyContext(runtime,event);
+    if(event.type==='turn/start'&&context) {
+      runtime.latencyTaskKey=context.taskKey;runtime.traceId=context.traceId;
+      this.queueLatency(runtime,()=>this.store.recordLatencySpan({
+        spanId:`dsh-turn:${context.taskKey}`,traceId:context.traceId,taskKey:context.taskKey,
+        spanType:'dsh_turn',startedAt:event.time,status:'running',attributes:{turn:context.turn},
+      }));
+    }
+    if(!context)return;
+    runtime.latencyTaskKey=context.taskKey;runtime.traceId=context.traceId;
+    if(event.type==='user/message') {
+      const ids=(Array.isArray(receipts)?receipts:[])
+        .filter(item=>item?.isSelf!==true).map(item=>item?.eventId).filter(Boolean);
+      if(ids.length)this.queueLatency(runtime,()=>this.store.linkLatencyTrace(ids,context.traceId,context.taskKey));
+    } else if(event.type==='tool/call') {
+      const callId=String(event.data?.callId||'');
+      const spanId=`tool:${session.id}:${event.seq}`;
+      runtime.latencyTools.set(`${context.taskKey}:${callId}`,{spanId,toolName:String(event.data?.name||'').slice(0,191)});
+      this.queueLatency(runtime,()=>this.store.recordLatencySpan({
+        spanId,traceId:context.traceId,taskKey:context.taskKey,spanType:'tool_call',
+        startedAt:event.time,status:'running',attributes:{toolName:String(event.data?.name||'').slice(0,191),callId:callId.slice(0,191)},
+      }));
+    } else if(event.type==='tool/result') {
+      const callId=String(event.data?.message?.toolCallId||'');
+      const prior=runtime.latencyTools.get(`${context.taskKey}:${callId}`);
+      const spanId=prior?.spanId||`tool:${session.id}:${event.seq}`;
+      this.queueLatency(runtime,()=>this.store.recordLatencySpan({
+        spanId,traceId:context.traceId,taskKey:context.taskKey,spanType:'tool_call',
+        startedAt:event.time,endedAt:event.time,status:event.data?.message?.isError?'failed':'ok',
+        attributes:{toolName:prior?.toolName,callId:callId.slice(0,191),isError:event.data?.message?.isError===true},
+      }));
+      runtime.latencyTools.delete(`${context.taskKey}:${callId}`);
+    }
+  }
+  account(runtime,session,event,hints={}) {
+    const record=runtime.accounting.apply(event,runtime.state.lastIncoming(),hints);
     if(record) {
       // A later settlement for the same (turn, step) supersedes the earlier one:
       // drop the pending row and let the exporter replace the already-mirrored
@@ -520,6 +576,28 @@ export class SocialRuntime {
         await this.store.recordCall(...row);runtime.pendingRecords.delete(event.seq);
       });
       this.track(runtime,runtime.accountingWrite);
+      if(!runtime.accounting.replaying) {
+        const attributes={
+          turn:record.native_turn,step:record.native_step,attemptNo:record.attempt_no,
+          provider:record.provider,model:record.model,requestModel:record.request_model,
+          success:record.success===true,ttftMs:record.ttft_ms,firstOutputAt:record.first_output_at,
+        };
+        if(record.record_kind==='attempt') {
+          this.queueLatency(runtime,()=>this.store.recordLatencySpan({
+            spanId:`model:${session.id}:${event.seq}`,traceId:record.trace_id,taskKey:record.task_key,
+            spanType:'model_attempt',startedAt:record.started_at,endedAt:record.ended_at,
+            status:record.success?'ok':'failed',attributes,
+          }));
+        } else if(record.task_status) {
+          this.queueLatency(runtime,()=>this.store.recordLatencySpan({
+            spanId:`dsh-turn:${record.task_key}`,traceId:record.trace_id,taskKey:record.task_key,
+            spanType:'dsh_turn',startedAt:record.job_started_at??record.started_at,endedAt:record.ended_at,
+            status:record.task_status,attributes:{turn:record.native_turn,reason:record.end_reason},
+          }));
+          const ids=Array.isArray(record.source_event_ids)?record.source_event_ids:[];
+          if(ids.length)this.queueLatency(runtime,()=>this.store.linkLatencyTrace(ids,record.trace_id,record.task_key));
+        }
+      }
     }
   }
   async mirrorCalls() {
@@ -534,6 +612,12 @@ export class SocialRuntime {
       const result=await this.infra('/ai-records',{recordId:row.record_id,record:typeof row.payload==='string'?JSON.parse(row.payload):row.payload});
       if(result.ok)await this.store.query("UPDATE yunying_ai_records SET mirror_status='mirrored' WHERE record_id=?",[row.record_id]);
     }
+  }
+  async mirrorLatencySpans() {
+    const rows=await this.store.pendingLatencySpans(100);
+    if(!rows.length)return;
+    const result=await this.infra('/latency-spans',{spans:rows});
+    if(result.ok)await this.store.markLatencySpansMirrored(rows);
   }
   transcript(runtime,session,event) {
     // The official JSONL stays authoritative: this only mirrors the model-visible
@@ -613,6 +697,7 @@ export class SocialRuntime {
       await runtime.handle.agent.whenIdle();await this.ctx.sessions.flush(runtime.handle.agent.session);
       if(runtime.directEventId)await this.store.endDirect(runtime.state.key,runtime.directEventId);
       await Promise.allSettled([...runtime.recordTasks]);
+      await runtime.latencyWrite.catch(()=>{});
       try{await this.store.saveState(runtime.state);}catch(error){this.report(error);}
       finally{await runtime.handle.dispose();}
     }

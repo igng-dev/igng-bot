@@ -87,7 +87,7 @@ export async function apply(ctx) {
       void close().finally(()=>process.kill(process.pid,'SIGTERM')).catch(error=>runtime.report(error));
     }),5000);heartbeat.unref();
     let mirroring=false;
-    mirror=setInterval(()=>{if(mirroring)return;mirroring=true;void Promise.all([runtime.mirrorCalls(),runtime.flushTranscripts()]).catch(error=>runtime.report(error)).finally(()=>{mirroring=false;});},5000);mirror.unref();
+    mirror=setInterval(()=>{if(mirroring)return;mirroring=true;void Promise.all([runtime.mirrorCalls(),runtime.mirrorLatencySpans(),runtime.flushTranscripts()]).catch(error=>runtime.report(error)).finally(()=>{mirroring=false;});},5000);mirror.unref();
     ctx.logger.info('YunYing native DSH Profile ready; official Session persistence, MySQL transcript projection and scoped social tools');
   }catch(error){await close();throw error;}
 }
