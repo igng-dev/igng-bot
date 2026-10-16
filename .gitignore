@@ -4,6 +4,7 @@
 !.env.example
 !.env.v4.example
 !.env.historian.example
+!.env.moderation.example
 !.env.slang.example
 *.pem
 *.key
