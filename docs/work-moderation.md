@@ -44,5 +44,7 @@ MCP/ACP 及通用网络能力。禁用入口降低暴露面，不代表依赖漏
 
 ## 尚未完成
 
-视觉能力、统一管理中心、影子/灰度/回滚验收仍属后续阶段；当前不要启用 active 消费。
-新 Profile 不能用 OCR 或图片标签冒充视觉覆盖；图片路径未就绪时应 defer。
+统一管理中心、影子/灰度/回滚验收仍属后续阶段；当前不要启用 active 消费。
+阶段5增加 `work_media`：只接收清单单元ID，由站点独立视觉模型完整检查固定hash原图，返回观察与回执。不接受任意URL、OCR或图片标签冒充视觉覆盖；不可用则立即defer，不能继续提交内容结论。图片证据需本轮receiptId及observation原文。
+目前12项审核原生测试通过，包含跨作品并发隔离与记账故障关闭；Node整轮98 passed / 5 skipped。实际官方CLI双进程冒烟再次通过，Python仍为161 passed / 35 skipped。真实视觉/付费模型未验收。阶段4版本CI：[run 38892288158](https://github.com/igng-dev/igng-bot/actions/runs/38892288158)，`verify`通过（2m17s），不覆盖后续视觉工具补丁。
+跨仓本地验收由站点 `tests/work-moderation-bot-contract.test.mjs` 提供：显式传入本Bot的scratch根路径后，使用真实HTTP处理器/站点覆盖与预算服务/官方DSH工具，模型与数据库为隔离夹具；不加载.env或生产密钥，不把该结果伪称为真实MySQL或付费模型验收。

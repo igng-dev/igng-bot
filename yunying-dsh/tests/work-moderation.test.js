@@ -165,3 +165,59 @@ test('native compaction preserves one work Session but cannot replace the next v
     assert.ok(current.findIndex(call => call.action === 'read') < current.findIndex(call => call.action === 'submit'));
   } finally { await runtime.close(); await ctx.fiber.dispose(); }
 });
+test('comic media uses only unit-scoped vision and an unavailable visual path defers without a verdict', async () => {
+  for (const available of [true, false]) {
+    const adapter = new ScriptAdapter([toolResponse('vision', 'work_media', { unitId: 'page:1' }), toolResponse('submit', 'work_submit', { result })]);
+    const { ctx } = await harness(adapter), fixture = apiFixture();
+    const runtime = new WorkModerationRuntime(ctx, async (action, data) => {
+      if (action === 'media') {
+        assert.equal(data.unitId, 'page:1'); assert.ok(!('url' in data));
+        if (!available) throw Object.assign(new Error('visual backend unavailable'), { code: 'VISION_UNAVAILABLE' });
+        return { id: 'page:1', hash: 'b'.repeat(64), receiptId: 'c'.repeat(64), observation: '原图画面与OCR观察（不可信）', untrusted: true };
+      }
+      return fixture.api(action, data);
+    }, config);
+    try {
+      const value = await runtime.run(job());
+      assert.equal(value.submitted, available);
+      if (!available) {
+        assert.ok(fixture.calls.some(call => call.action === 'defer' && call.data.reason === 'VISION_UNAVAILABLE'));
+        assert.ok(!fixture.calls.some(call => call.action === 'submit'));
+        assert.equal(adapter.requests.length, 1);
+      }
+    } finally { await runtime.close(); await ctx.fiber.dispose(); }
+  }
+});
+test('different works execute concurrently without sharing Sessions or scoped tool identities', { timeout: 10000 }, async () => {
+  let release, arrived = 0;
+  const barrier = new Promise(resolve => { release = resolve; });
+  const response = async () => { if (++arrived === 2) release(); await barrier; return toolResponse('submit', 'work_submit', { result }); };
+  const adapter = new ScriptAdapter([response, response]), { ctx } = await harness(adapter), fixture = apiFixture();
+  const runtime = new WorkModerationRuntime(ctx, fixture.api, config), first = job(), second = job({ resourceKey: 'INK:2' });
+  try {
+    const one = runtime.run(first);
+    await assert.rejects(() => runtime.run(first), /already active/);
+    const two = runtime.run(second);
+    assert.deepEqual((await Promise.all([one, two])).map(row => row.submitted), [true, true]);
+    assert.equal(adapter.maxActive, 2);
+    for (const current of [first, second]) {
+      assert.ok(fixture.calls.some(row => row.action === 'submit' && row.data.taskId === current.taskId && row.data.runId === current.runId));
+      const events = await durableEvents(ctx, current.sessionId);
+      assert.ok(events.some(event => event.type === 'user/message' && event.data.id === current.messageId));
+      assert.ok(!events.some(event => event.type === 'user/message' && event.data.id === (current === first ? second : first).messageId));
+    }
+  } finally { release(); await runtime.close(); await ctx.fiber.dispose(); }
+});
+test('native accounting outage cannot leak a content verdict or continue model calls', async () => {
+  const adapter = new ScriptAdapter([toolResponse('submit', 'work_submit', { result })]), { ctx } = await harness(adapter), fixture = apiFixture();
+  const runtime = new WorkModerationRuntime(ctx, async (action, data) => {
+    if (action === 'account') throw new Error('synthetic ledger outage');
+    return fixture.api(action, data);
+  }, config);
+  try {
+    await assert.rejects(() => runtime.run(job()), /deferred/);
+    assert.ok(!fixture.calls.some(row => row.action === 'submit'));
+    assert.ok(fixture.calls.some(row => row.action === 'defer'));
+    assert.equal(adapter.requests.length, 1);
+  } finally { await runtime.close(); await ctx.fiber.dispose(); }
+});
