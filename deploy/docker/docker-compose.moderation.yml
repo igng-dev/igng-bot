@@ -1,0 +1,19 @@
+# Opt-in only. This file does not authorize deployment, migrations or active rollout.
+services:
+  moderation:
+    profiles: [work-moderation]
+    image: ${MODERATION_DSH_IMAGE:?set a fixed DSH image containing moderation-dsh}
+    entrypoint: [sh, /app/run-moderation-profile.sh]
+    restart: unless-stopped
+    init: true
+    user: '1000:1001'
+    # Do not inherit QQ, bot SQL, Memory or other service credentials from .env.
+    env_file: [.env.moderation]
+    environment:
+      DSH_HOME: /data/moderation-dsh
+      DSH_TELEMETRY_DISABLED: '1'
+    volumes: ['./moderation-runtime:/data/moderation-dsh']
+    read_only: true
+    tmpfs: ['/tmp:size=64m,mode=1777']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]

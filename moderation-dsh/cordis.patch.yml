@@ -1,0 +1,76 @@
+# Independent work review only. Search is a bounded custom capability, not web fetch.
+- { id: plugin-manager, disabled: true }
+- { id: tool-plugin-manager, disabled: true }
+- { id: hmr, disabled: true }
+- { id: jobs, disabled: true }
+- { id: typert-gateway, disabled: true }
+- { id: user-questions, disabled: true }
+- { id: session-title-llm, disabled: true }
+- { id: session-telemetry-otel, disabled: true }
+- { id: subprocess, disabled: true }
+- { id: sandbox, disabled: true }
+- { id: sandbox-policy, disabled: true }
+- { id: bash-sandbox, disabled: true }
+- { id: pwsh-sandbox, disabled: true }
+- { id: approval, disabled: true }
+- { id: permission, disabled: true }
+- { id: shell-env, disabled: true }
+- { id: tool-bash, disabled: true }
+- { id: tool-pwsh, disabled: true }
+- { id: tool-jobs, disabled: true }
+- { id: fs-observation-policy, disabled: true }
+- { id: tool-fs, disabled: true }
+- { id: tool-fs-search, disabled: true }
+- { id: fs-sandbox, disabled: true }
+- { id: agent-instructions, disabled: true }
+- { id: skill-filesystem, disabled: true }
+- { id: commands, disabled: true }
+- { id: command-feedback, disabled: true }
+- { id: goal, disabled: true }
+- { id: goal-round-driver, disabled: true }
+- { id: command-goal, disabled: true }
+- { id: plan-mode, disabled: true }
+- { id: command-compact, disabled: true }
+- { id: subagent, disabled: true }
+- { id: subagent-spawn-in-process, disabled: true }
+- { id: subagent-fork-in-process, disabled: true }
+- { id: tool-subagent-control, disabled: true }
+- { id: tool-subagent-list-agents, disabled: true }
+- { id: tool-subagent, disabled: true }
+- { id: tool-subagent-fork, disabled: true }
+- { id: ptc-runtime, disabled: true }
+- { id: workflow-ptc, disabled: true }
+- { id: tool-workflow, disabled: true }
+- { id: tool-todo, disabled: true }
+- { id: tool-goal, disabled: true }
+- { id: tool-web, disabled: true }
+- { id: web-fetch-http, disabled: true }
+- { id: mcp-resources, disabled: true }
+- { id: llm-deepseek-account, disabled: true }
+- { id: yunying-social, disabled: true }
+- id: tools
+  config: { mode: native }
+- id: llm-pi-ai
+  config:
+    # Official adapter, independent credentials. An empty/off Profile creates no
+    # model route and never borrows the social Profile's provider or secrets.
+    providers: !!js >-
+      process.env.WORK_MODERATION_WORKER_ENABLED === '1' ? {
+        'work-moderation': {
+          api: process.env.WORK_MODERATION_MODEL_PROTOCOL || 'anthropic-messages',
+          baseURL: process.env.WORK_MODERATION_MODEL_BASE_URL,
+          apiKeyEnv: 'WORK_MODERATION_MODEL_API_KEY',
+          models: [{ id: process.env.WORK_MODERATION_MODEL, input: ['text'],
+            contextWindow: Number(process.env.WORK_MODERATION_CONTEXT_WINDOW || 262144),
+            maxTokens: Number(process.env.WORK_MODERATION_OUTPUT_TOKENS || 8192) }]
+        }
+      } : {}
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.2
+    headroomTokens: 4096
+    retainTokens: 12000
+    maxTokens: 4096
+- insert:
+    - id: work-moderation
+      name: '@igng/work-moderation-dsh'
