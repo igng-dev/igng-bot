@@ -221,3 +221,20 @@ test('native accounting outage cannot leak a content verdict or continue model c
     assert.equal(adapter.requests.length, 1);
   } finally { await runtime.close(); await ctx.fiber.dispose(); }
 });
+test('incomplete coverage returns only a safe corrective code; a budget error stops immediately', async () => {
+  for (const code of ['INCOMPLETE_COVERAGE', 'BUDGET_EXCEEDED']) {
+    const adapter = new ScriptAdapter([toolResponse('early', 'work_submit', { result }), toolResponse('read', 'work_read', { unitId: 'body:0' }), toolResponse('fixed', 'work_submit', { result })]);
+    const { ctx } = await harness(adapter), fixture = apiFixture(); let submissions = 0;
+    const runtime = new WorkModerationRuntime(ctx, async (action, data) => {
+      if (action === 'submit' && ++submissions === 1) throw Object.assign(new Error('synthetic-private-diagnostic'), { code });
+      return fixture.api(action, data);
+    }, config);
+    try {
+      const completed = await runtime.run(job());
+      assert.equal(completed.submitted, code === 'INCOMPLETE_COVERAGE');
+      assert.equal(adapter.requests.length, code === 'INCOMPLETE_COVERAGE' ? 3 : 1);
+      assert.doesNotMatch(JSON.stringify(adapter.requests), /synthetic-private-diagnostic/);
+      if (code === 'BUDGET_EXCEEDED') assert.ok(fixture.calls.some(row => row.action === 'defer' && row.data.reason === code));
+    } finally { await runtime.close(); await ctx.fiber.dispose(); }
+  }
+});

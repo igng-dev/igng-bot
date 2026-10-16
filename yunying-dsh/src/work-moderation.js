@@ -113,7 +113,8 @@ export class WorkModerationRuntime {
             let value;
             try { value = await call(tool.slice('work_'.length), args, exec.signal); }
             catch (error) {
-              if (['VISION_UNAVAILABLE', 'POLICY_UNAVAILABLE', 'ACTIVE_NOT_READY', 'STALE_SNAPSHOT', 'LEASE_LOST'].includes(error.code)) stop(error.code);
+              if (['INCOMPLETE_COVERAGE', 'INVALID_EVIDENCE', 'INVALID_DECISION'].includes(error.code)) return { ok: false, code: error.code, error: '当前版本覆盖或证据校验未通过；读取清单并修正，不能降级为通过。' };
+              if (['VISION_UNAVAILABLE', 'BUDGET_EXCEEDED', 'POLICY_UNAVAILABLE', 'ACTIVE_NOT_READY', 'STALE_SNAPSHOT', 'LEASE_LOST'].includes(error.code)) stop(error.code);
               throw new Error('moderation capability did not complete');
             }
             if (tool === 'work_submit' && value.ok) { submitted = true; exec.concludeTurn(); }
