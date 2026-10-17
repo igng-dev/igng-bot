@@ -1,6 +1,6 @@
 # 作品审核 DSH Profile
 
-站点契约真源：`igng-sites/docs/work-moderation.md`（协议 v1）。本文件只记录 Bot 接入边界，不复制发布业务规则。
+站点契约真源：`igng-sites/docs/work-moderation.md`（协议 v2：按范围决定）。本文件只记录 Bot 接入边界，不复制发布业务规则。
 
 ## 实现边界
 
@@ -41,6 +41,13 @@ MCP/ACP 及通用网络能力。禁用入口降低暴露面，不代表依赖漏
 - `yunying-dsh/tests/work-moderation.test.js` 覆盖原生工具隔离、重复投递、Session 丢失、受控搜索、预算、双 Node 进程恢复及强制 compaction 后的新版本读取。
 - `YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tests/test_moderation_profile.py -q`：实际官方 CLI/Profile 两次进程启动、固定 Session、HTTP capability 与 Anthropic 线协议夹具。本地通过，未连接真实 QQ/数据库/付费模型。
 - `python -m pytest tests -q` 本地 161 passed / 35 skipped；Node 全套重跑通过（首次已有 progress 计时用例失败，未改社交逻辑）。真实 MySQL/社交进程项目在本机跳过，仍以 CI 为准。
+
+## 阶段 6：按范围决定（works-v2）
+
+- `work_submit` 的 `result` 支持 `decisions` 数组：每个必检 scope（`WORK` 或 `NODE:<id>`）一条独立结论；单一必检范围仍可用顶层 `verdict`。站点按范围独立校验覆盖与域内证据，旧格式保持兼容。
+- 提示词要求逐范围表态；`required:false` 的未变更章节只是上下文，沿用既有决定，不要求结论。
+- `yunying-dsh/tests/work-moderation.test.js` 新增多域透传用例（`scoped decisions pass through unchanged for chapter-level review`）。
+- 未连接真实付费模型；真实影子验收仍待显式执行。
 
 ## 尚未完成
 
