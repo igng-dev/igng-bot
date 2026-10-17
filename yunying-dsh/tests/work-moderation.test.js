@@ -36,6 +36,22 @@ test('native work review tools are isolated and native accounting precedes submi
     assert.ok(fixture.calls.every(c => c.data.taskId === task.taskId && c.data.runId === task.runId));
     assert.ok((await durableEvents(ctx, task.sessionId)).some(e => e.type === 'tool/call'));
     assert.match(PROMPT, /压缩摘要/);
+    assert.match(PROMPT, /decisions/);
+  } finally { await runtime.close(); await ctx.fiber.dispose(); }
+});
+test('scoped decisions pass through unchanged for chapter-level review', async () => {
+  const scopedResult = { snapshotHash: 'a'.repeat(64), policyVersion: 'works-v2', decisions: [
+    { scope: 'WORK', verdict: 'APPROVED' },
+    { scope: 'NODE:chapter1', verdict: 'REJECTED', reason: '本章违规', evidence: [{ unitId: 'body:0', hash: 'b'.repeat(64), rule: 'ILLEGAL_CONTENT', quote: '固定作品正文' }] },
+  ] };
+  const adapter = new ScriptAdapter([toolResponse('manifest', 'work_manifest', {}), toolResponse('read', 'work_read', { unitId: 'body:0' }), toolResponse('submit', 'work_submit', { result: scopedResult })]);
+  const { ctx } = await harness(adapter), fixture = apiFixture(), runtime = new WorkModerationRuntime(ctx, fixture.api, config), task = job({ policyVersion: 'works-v2' });
+  try {
+    assert.equal((await runtime.run(task)).submitted, true);
+    const submit = fixture.calls.find(call => call.action === 'submit');
+    assert.deepEqual(submit.data.result.decisions, scopedResult.decisions);
+    assert.equal(submit.data.result.decisions.length, 2);
+    assert.equal(submit.data.result.decisions[1].scope, 'NODE:chapter1');
   } finally { await runtime.close(); await ctx.fiber.dispose(); }
 });
 test('new versions resume one official work Session and repeat delivery does not duplicate native input', async () => {
