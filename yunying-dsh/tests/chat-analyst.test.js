@@ -84,3 +84,16 @@ test('chat analyst prompt keeps the safety and title rules',()=>{
   assert.ok(taskMessage(job()).includes('2026-10-07'));
   assert.ok(!taskMessage(job()).includes('123456'));
 });
+
+test('chat analyst records the provider failure reason when the model gateway gives up',async()=>{
+  const adapter=new ScriptAdapter([toolResponse('read','chat_timeline',{after:0})]);
+  const {ctx}=await harness(adapter),calls=[];
+  adapter.script.push(()=>{throw Object.assign(new Error('503: system cpu overloaded'),{code:'SERVER'});});
+  const runtime=new ChatAnalystRuntime(ctx,async(action,data)=>{calls.push({action,data});return {ok:true,messages:[],coverage_complete:true};});
+  try {
+    await runtime.run(job());
+    const finish=calls.find(c=>c.action==='finish');
+    assert.equal(finish.data.success,false);
+    assert.match(finish.data.error,/^model error: .*cpu overloaded/);
+  } finally{await runtime.close();await ctx.fiber.dispose();}
+});

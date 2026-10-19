@@ -45,6 +45,15 @@ def conversation(platform, conversation_type, external_id):
     return platform, conversation_type, external
 
 
+# Account-, group- and phone-like numbers. Forwarded records and bare @mentions render IDs as text.
+ACCOUNT_LIKE = re.compile(r'(?<![0-9A-Za-z])[1-9][0-9]{4,11}(?![0-9])')
+
+
+def redact(text, names):
+    """Known participants' account numbers become their display name; any other account-like number is masked."""
+    return ACCOUNT_LIKE.sub(lambda m: names.get(m.group(0), '[号码]'), text)
+
+
 def masked_name(account_id):
     tail = str(account_id)[-4:]
     return f'群友{tail}' if tail else '群友'
@@ -240,6 +249,10 @@ class QQGroupSource:
                              'reply_to': reply, 'mentions': sorted(set(mentions)), 'emoji': emoji_tokens(structure),
                              'time_precision': 'second'})
         entries = roster.finalize(fallback)
+        # Second pass: the full roster is only known now. Nothing downstream (model, statistics, report) sees raw IDs.
+        names = {e['account']: e['name'] for e in entries.values()}
+        for message in messages:
+            message['text'] = redact(message['text'], names)
         human = [m for m in messages if not m['is_bot']]
         speakers = {m['sender'] for m in human}
         context = {'recalled': sum(1 for row in rows if row.get('is_recalled')),

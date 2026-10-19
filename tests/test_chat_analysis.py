@@ -233,3 +233,21 @@ def test_sender_name_snapshot_is_written_only_when_the_column_exists(column):
     inserts = [(sql, args) for sql, args in db._conn.log if sql.startswith('INSERT INTO message_logs')]
     assert len(inserts) == 1
     assert ('sender_name' in inserts[0][0]) is column and (('阿青' in inserts[0][1]) is column)
+
+
+def test_forwarded_records_and_bare_mentions_never_carry_account_numbers():
+    forwarded = '[聊天记录]\n  1094950020: 这是什么网站\n  10001: 你马上就能在别的群见到你自己了 13800138000'
+    rows = [row(1, 10001, '在吗', 0, sender_name='阿青'),
+            row(2, 10002, forwarded, 1, sender_name='小白', message_structure=json.dumps([{'type': 'forward', 'id': 'f', 'children': []}])),
+            row(3, 10002, '@10001 @55667788 看这个，2026 年 36 分钟', 2, sender_name='小白')]
+    messages, _, manifest = QQGroupSource(None, BOT).normalize(rows, {}, set(), [], {}, 'now', 3)
+    text = json.dumps(messages, ensure_ascii=False)
+    for secret in ('1094950020', '10001', '55667788', '13800138000'):
+        assert secret not in text
+    assert '阿青: 你马上就能' in messages[1]['text'] and '[号码]: 这是什么网站' in messages[1]['text']
+    assert messages[2]['text'].startswith('@阿青 @[号码]') and '2026 年 36 分钟' in messages[2]['text']
+    roster = {p['alias']: p for p in manifest['participants']}
+    check = Validator({m['ref'] for m in messages}, roster, {m['ref']: m for m in messages}, 3)
+    with pytest.raises(Invalid, match='forwarded record'):
+        check.quote({'ref': 'qq:2'}, 0)
+    assert check.quote({'ref': 'qq:3'}, 0)['text'].startswith('@阿青')

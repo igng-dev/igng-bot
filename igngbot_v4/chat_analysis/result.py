@@ -6,6 +6,8 @@ CERTAINTY = {'fact', 'inference', 'speculation'}
 CERTAINTY_LABEL = {'fact': '', 'inference': '（推断）', 'speculation': '（推测）'}
 OPEN_KINDS = {'question': '待回答的问题', 'plan': '约定与计划', 'announcement': '公告与通知', 'request': '求助与请求'}
 ALIAS = re.compile(r'(?:u[1-9][0-9]{0,4}|bot)')
+# Forwarded chat records and cards are other people's words, not the member's own.
+UNQUOTABLE = {'forward', 'card'}
 SECTIONS = ('mood', 'topics', 'quotes', 'titles', 'relations', 'open_items', 'slang')
 
 
@@ -83,6 +85,8 @@ class Validator:
         message = self.messages.get(ref)
         if not message or message['is_bot']:
             raise Invalid(field + ' must quote a member message, not the bot')
+        if message['kind'] in UNQUOTABLE:
+            raise Invalid(field + ' must be something the member typed, not a forwarded record or card')
         if not message['text'].strip():
             raise Invalid(field + ' has no quotable text')
         comment = item.get('comment') or ''
