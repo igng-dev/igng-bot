@@ -14,6 +14,16 @@ from .timeutil import MYSQL_UTC_INIT_COMMAND, ensure_utc_naive, utc_now
 logger = logging.getLogger(__name__)
 
 
+def normalize_sender_name(name, sender_id=None):
+    """Display-name snapshot; a bare numeric fallback is not a name and stays NULL."""
+    if name is None:
+        return None
+    text = re.sub(r"\s+", " ", str(name)).strip()[:120]
+    if not text or (sender_id is not None and text == str(sender_id)):
+        return None
+    return text
+
+
 class DBHandler:
     def __init__(self, config, *, legacy_compat=True):
         self.config = config
@@ -26,6 +36,8 @@ class DBHandler:
         # hit the identity database on every message.
         self._tier_cache = {}
         self._tier_lock = threading.Lock()
+        # None until probed; a missing snapshot column must never drop a message write.
+        self._sender_name_column = None
 
     def connect(self):
         self._conn = pymysql.connect(
@@ -79,6 +91,7 @@ class DBHandler:
                     attachments_json MEDIUMTEXT COMMENT '附件JSON',
                     reply_to_msg_id VARCHAR(50) COMMENT '回复的消息ID',
                     msg_id VARCHAR(50) NOT NULL COMMENT '消息ID',
+                    sender_name VARCHAR(120) NULL COMMENT '发送时的群名片/昵称快照',
                     {legacy_columns}
                     audio_transcript TEXT COMMENT '语音转写文本',
                     is_self TINYINT(1) DEFAULT 0 COMMENT '是否是自己发送的消息',
@@ -89,6 +102,7 @@ class DBHandler:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'UTC时间(+00:00)',
                     INDEX idx_group_id (group_id),
                     INDEX idx_created_at (created_at),
+                    INDEX idx_group_created (group_id, created_at),
                     INDEX idx_msg_id (msg_id),
                     INDEX idx_recalled (group_id, is_recalled),
                     UNIQUE KEY uq_message_group_msg (group_id, msg_id)
@@ -121,6 +135,7 @@ class DBHandler:
                 "ALTER TABLE message_logs ADD COLUMN recalled_at DATETIME NULL COMMENT '检测到撤回的UTC时间'",
                 "ALTER TABLE message_logs ADD COLUMN recall_operator_id BIGINT NULL COMMENT '执行撤回的QQ号'",
                 "ALTER TABLE message_logs ADD COLUMN message_source VARCHAR(32) NOT NULL DEFAULT 'inbound' COMMENT '消息来源'",
+                "ALTER TABLE message_logs ADD COLUMN sender_name VARCHAR(120) NULL COMMENT '发送时的群名片/昵称快照'",
             ):
                 if not self.legacy_compat and any(name in sql for name in ("file_url", "file_type", "audio_file_path")):
                     continue
@@ -137,12 +152,14 @@ class DBHandler:
                 )
             except Exception as exc:
                 logger.warning("Failed to backfill message_logs.message_source: %s", exc)
-            try:
-                cursor.execute(
-                    "ALTER TABLE message_logs ADD INDEX idx_recalled (group_id, is_recalled)"
-                )
-            except Exception:
-                pass
+            for index_sql in (
+                "ALTER TABLE message_logs ADD INDEX idx_recalled (group_id, is_recalled)",
+                "ALTER TABLE message_logs ADD INDEX idx_group_created (group_id, created_at)",
+            ):
+                try:
+                    cursor.execute(index_sql)
+                except Exception:
+                    pass
             try:
                 cursor.execute(
                     "ALTER TABLE message_logs ADD UNIQUE KEY uq_message_group_msg (group_id, msg_id)"
@@ -615,6 +632,21 @@ class DBHandler:
 
 
 
+    def _has_sender_name_column(self):
+        if self._sender_name_column is None:
+            try:
+                with self.conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT COUNT(*) AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+                        "AND TABLE_NAME='message_logs' AND COLUMN_NAME='sender_name'"
+                    )
+                    row = cursor.fetchone() or {}
+                self._sender_name_column = bool(row.get("n"))
+            except Exception as exc:
+                logger.debug("Cannot probe message_logs.sender_name: %s", exc)
+                return False
+        return self._sender_name_column
+
     def insert_message(self, group_id, sender_id, message_content,
                        reply_to_msg_id, msg_id, file_url=None,
                        file_type=None, created_at=None, is_self=False,
@@ -622,7 +654,8 @@ class DBHandler:
                        attachments_json=None, audio_file_path=None,
                        is_recalled=False,
                        recalled_at=None, recall_operator_id=None,
-                       message_source=None, audio_transcript=None):
+                       message_source=None, audio_transcript=None,
+                       sender_name=None):
         # message_logs.created_at is always stored as naive UTC (+00:00).
         stored_created_at = ensure_utc_naive(created_at) or utc_now()
         stored_recalled_at = ensure_utc_naive(recalled_at)
@@ -646,6 +679,10 @@ class DBHandler:
         values += (stored_created_at, is_self, normalized_source,
                    1 if is_recalled else 0, stored_recalled_at, recall_operator_id,
                    audio_transcript)
+        normalized_name = normalize_sender_name(sender_name, sender_id)
+        if normalized_name is not None and self._has_sender_name_column():
+            columns.append("sender_name")
+            values += (normalized_name,)
         sql = "INSERT INTO message_logs (" + ", ".join(columns) + ") VALUES (" + ", ".join(["%s"] * len(columns)) + ")"
         for attempt in range(2):
             try:

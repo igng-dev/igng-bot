@@ -70,6 +70,7 @@ DSH 插件在 SQL 分配连续 seq，先保存原生 UserMessage ID，再 `injec
 | Conversation Style | MySQL `style_profiles` / `style_versions` | 当前会话可偏离的表达倾向；模型经受控工具小幅修订，不替代身份、权限或参与规则。 |
 | World Knowledge | MySQL `knowledge_documents` / `knowledge_versions` | 全局、带来源和 TTL 的公开事实缓存。模型只能提议，服务端引用本轮搜索摘录；唤醒时按词面自动注入，过期降级不删除。 |
 | Slang Knowledge | MySQL `slang_entries` / `slang_versions`，独立 candidates/jobs/runs | 有限长度的自动语境辅助与表达参考，独立公开证据维护 worker；与 Memory、风格、世界事实分离，详见 [梗库设计与运维](slang-knowledge-base.md)。 |
+| Daily Chat Analysis | MySQL `chat_analysis_reports` / `chat_analysis_runs`，快照 `chat_analysis_messages` | 按群按天的机械统计与独立 `chat-analyst` Profile 的带证据日报；只读 `message_logs`，与 Social Session/Memory 分离，详见 [群聊日报](chat-analysis.md)。 |
 
 新增：`yunying_sessions`、`yunying_ingress`、`yunying_events`、`yunying_sends`、`yunying_ai_records`、`yunying_session_events`；`memory_identities`、`memory_identity_bindings`、`memory_identity_audit`；`memory_documents`、`memory_versions`、`memory_sources`、`memory_audit`；checksum 迁移登记 `yunying_schema_migrations`。迁移仅增加结构，不删除、重写或导入 V3 context summary；历史 `007_drop_audio_transcript.sql` 保留文件名与 checksum 身份，但默认启动跳过，避免破坏共享的 `message_logs.audio_transcript`。009 负责补齐缺失的转写列。003 在 ingress 增加机械阶段状态、独立重试/时间/错误与命令结果，在 sessions 增加真实呼叫的 event/到期权限；004 增加机械队列索引；008 增加会话事件的过滤投影表；010 把来源链并入 `memory_versions.sources`，身份/绑定/身份审计与访问审计不再被运行时代码使用（退役由受控运维阶段执行）。2026-10-07 已按 `memory-legacy` / `archive-tables` 阶段关闭回滚窗口并退役 005 归档层（见 [归档层退役实录](v4-archive-retirement-20261007.md)）。既有记录回填为已完成机械阶段，已应用001/002保持原 checksum。V4 启动只初始化消息、撤回和群配置，不再初始化/seed 旧摘要和 system Prompt；V3 rollback 初始化器保留。
 

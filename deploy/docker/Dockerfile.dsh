@@ -10,6 +10,8 @@ COPY yunying-dsh/ ./
 COPY scripts/run-yunying-profile.sh /app/run-yunying-profile.sh
 COPY historian-dsh/ /app/historian-dsh/
 COPY scripts/run-historian-profile.sh /app/run-historian-profile.sh
+COPY chat-analyst-dsh/ /app/chat-analyst-dsh/
+COPY scripts/run-chat-analyst-profile.sh /app/run-chat-analyst-profile.sh
 COPY slang-curator-dsh/ /app/slang-curator-dsh/
 COPY scripts/run-slang-curator-profile.sh /app/run-slang-curator-profile.sh
 COPY moderation-dsh/ /app/moderation-dsh/

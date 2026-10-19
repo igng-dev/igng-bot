@@ -6,6 +6,7 @@
 !.env.historian.example
 !.env.moderation.example
 !.env.slang.example
+!.env.chat-analysis.example
 *.pem
 *.key
 *.p12

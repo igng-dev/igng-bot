@@ -151,6 +151,7 @@ async def persist_message(self, data):
             is_self=parsed.get("is_self", False),
             message_source=parsed.get("message_source"),
             audio_transcript=parsed.get("audio_transcript"),
+            sender_name=parsed.get("sender_name"),
             **({"file_url": file_url, "file_type": file_type, "audio_file_path": audio_file_path} if legacy_compat else {}),
         )
 

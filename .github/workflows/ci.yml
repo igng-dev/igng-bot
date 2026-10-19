@@ -77,7 +77,7 @@ jobs:
           python -m compileall -q igngbot_shared igngbot_v3 igngbot_v4 scripts
           npm --prefix yunying-dsh run check
           bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh
-          sh -n scripts/run-yunying-profile.sh scripts/run-slang-curator-profile.sh scripts/run-moderation-profile.sh
+          sh -n scripts/run-yunying-profile.sh scripts/run-slang-curator-profile.sh scripts/run-moderation-profile.sh scripts/run-chat-analyst-profile.sh
           node --check igngbot_v4/slang/manage.js
           bash scripts/privacy-scan.sh
       - name: Python and published Profile process tests
