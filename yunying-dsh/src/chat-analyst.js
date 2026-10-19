@@ -102,7 +102,7 @@ export class ChatAnalystRuntime {
     const call = (action, args = {}, signal) => this.api(action, { ...identity, ...args }, signal);
     const accounting = this.accounting(job);
     accounting.finishReplay(-1);
-    let handle, writing = Promise.resolve(), failure = null, submitted = false, turnCompleted = false, steps = 0;
+    let handle, writing = Promise.resolve(), failure = null, submitted = false, turnCompleted = false, steps = 0, modelError = null;
     const settlements = new Map();
     const stop = reason => { failure ||= reason; handle?.agent.cancel({ kind: 'hook', reason }, { keepInbox: false }); };
     const setup = async agentCtx => {
@@ -138,7 +138,11 @@ export class ChatAnalystRuntime {
         });
         scoped.on('session/event', (session, event) => {
           if (session.id !== job.dsh_session_id) return;
-          if (event.type === 'turn/end') turnCompleted = event.data.reason?.kind === 'completed';
+          if (event.type === 'turn/end') {
+            turnCompleted = event.data.reason?.kind === 'completed';
+            // Keep the provider's reason (e.g. a gateway 503 after retries) instead of a generic "no submission".
+            if (event.data.reason?.kind === 'error') modelError = String(event.data.reason.error?.message || 'unknown').slice(0, 160);
+          }
           if (event.type === 'step/start' && ++steps > job.config.max_steps) stop('step budget exceeded');
           const record = accounting.apply(event);
           if (!record) return;
@@ -166,7 +170,8 @@ export class ChatAnalystRuntime {
       await writing;
       if (!await this.ctx.sessions.flush(handle.agent.session)) throw new Error('official Session persistence unavailable');
       await call('finish', { success: submitted && turnCompleted && !failure,
-        error: failure || (!submitted ? 'DSH ended without final submission' : !turnCompleted ? 'native turn did not complete' : null) });
+        error: failure || (modelError ? 'model error: ' + modelError : !submitted ? 'DSH ended without final submission'
+          : !turnCompleted ? 'native turn did not complete' : null) });
     } catch (error) {
       stop(failure || 'DSH execution failed');
       await writing.catch(() => {});
