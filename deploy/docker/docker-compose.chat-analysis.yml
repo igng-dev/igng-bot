@@ -1,0 +1,33 @@
+# Explicit opt-in overlay; no service is deployed or enabled merely by merging code.
+services:
+  chat-analysis-api:
+    image: ${BOT_V4_IMAGE:?set a fixed bot image}
+    entrypoint: [python, -m, igngbot_v4.chat_analysis]
+    restart: unless-stopped
+    init: true
+    env_file: [.env, .env.chat-analysis]
+    environment:
+      CHAT_ANALYSIS_HOST: 0.0.0.0
+    # Publish only through the operator's authenticated internal network/tunnel to the site.
+    ports: ['127.0.0.1:8792:8792']
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8792/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+  chat-analyst:
+    image: ${YUNYING_IMAGE:?set a fixed DSH image with the chat analyst bundle}
+    entrypoint: [sh, /app/run-chat-analyst-profile.sh]
+    restart: unless-stopped
+    init: true
+    user: '1000:1001'
+    env_file: [.env, .env.chat-analysis]
+    environment:
+      CHAT_ANALYSIS_API_URL: http://chat-analysis-api:8792
+      DSH_HOME: /data/chat-analyst-dsh
+      DSH_TELEMETRY_DISABLED: '1'
+    volumes: ['./chat-analyst-runtime:/data/chat-analyst-dsh']
+    depends_on:
+      chat-analysis-api:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
