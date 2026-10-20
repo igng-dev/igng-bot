@@ -66,12 +66,13 @@ def running(repo, created):
 
 def full_report(messages):
     first, reply = messages[0]['ref'], messages[1]['ref']
-    return {'headline': '约局', 'summary': '有人约开黑。', 'summary_refs': [first],
-            'mood': {'label': '热络', 'description': '积极', 'certainty': 'inference', 'evidence_refs': [reply]},
-            'topics': [{'title': '开黑', 'summary': '约九点。', 'participants': ['u1', 'u2'], 'certainty': 'fact', 'evidence_refs': [first, reply]}],
-            'quotes': [{'ref': reply, 'comment': '秒回'}],
+    return {'headline': '约局',
+            'highlights': [{'text': '有人约开黑', 'evidence_refs': [first]}],
+            'topics': [{'title': '开黑', 'gist': '阿青约开黑，小白答应。', 'points': [{'text': '阿青约九点开黑', 'evidence_refs': [first, reply]}],
+                        'outcome': {'status': 'settled', 'text': '九点开黑'}, 'participants': ['u1', 'u2'], 'certainty': 'fact'}],
+            'quotes': [{'ref': reply, 'context': '小白在回应阿青'}],
             'titles': [{'member': 'u1', 'title': '组局发起人', 'reason': '先喊人', 'evidence_refs': [first]}],
-            'relations': [], 'open_items': [], 'slang': []}
+            'open_items': [], 'slang': []}
 
 
 def test_full_day_snapshot_evidence_coverage_and_publication():
@@ -96,7 +97,7 @@ def test_full_day_snapshot_evidence_coverage_and_publication():
     assert page['participants'] and not page['coverage_complete'] and page['next_cursor'] == 2
     assert all('10001' not in str(m) for m in page['messages'])
     with pytest.raises(ValueError, match='refs must be real'):
-        repo.save(job['id'], job['lease_token'], {'report': {**data, 'summary_refs': [messages[2]['ref']]}}, False)
+        repo.save(job['id'], job['lease_token'], {'report': {**data, 'highlights': [{'text': '云萤看着', 'evidence_refs': [messages[2]['ref']]}]}}, False)
     rest = repo.events(job['id'], job['lease_token'], {'after': page['scan_cursor']})
     assert rest['coverage_complete']
     assert repo.events(job['id'], job['lease_token'], {'member': 'u2'}, 'member')['messages'][0]['text'] == '来！'

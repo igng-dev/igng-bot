@@ -89,38 +89,74 @@ def validator(read=None):
 
 
 def report(**overrides):
-    data = {'headline': '开黑约局的一天', 'summary': '阿青发起开黑，小白响应。', 'summary_refs': ['qq:1', 'qq:2'],
-            'mood': {'label': '热络', 'description': '大家很积极', 'certainty': 'inference', 'evidence_refs': ['qq:2']},
-            'topics': [{'title': '今晚开黑', 'summary': '约定九点。', 'participants': ['u1', 'u2', 'bot'], 'certainty': 'fact',
-                        'evidence_refs': ['qq:1', 'qq:7']}],
-            'quotes': [{'ref': 'qq:2', 'comment': '秒回'}],
-            'titles': [{'member': 'u1', 'title': '组局发起人', 'reason': '第一个喊人', 'evidence_refs': ['qq:1']}],
-            'relations': [{'members': ['u1', 'u2'], 'summary': '一呼一应', 'certainty': 'fact', 'evidence_refs': ['qq:2']}],
-            'open_items': [{'kind': 'plan', 'summary': '九点开黑', 'certainty': 'fact', 'evidence_refs': ['qq:7']}],
+    data = {'headline': '主要在约今晚九点开黑',
+            'highlights': [{'text': '阿青约今晚开黑，小白马上答应', 'evidence_refs': ['qq:1', 'qq:2']}],
+            'topics': [{'title': '今晚开黑', 'gist': '阿青喊人开黑，小白答应并叫上云萤，最后约在九点。',
+                        'points': [{'text': '阿青问今晚谁一起开黑', 'evidence_refs': ['qq:1']},
+                                   {'text': '阿青用语音说九点见', 'evidence_refs': ['qq:7']}],
+                        'outcome': {'status': 'settled', 'text': '九点开黑'},
+                        'participants': ['u1', 'u2', 'bot'], 'certainty': 'inference'}],
+            'quotes': [{'ref': 'qq:2', 'context': '小白在回应阿青问谁一起开黑'}],
+            'titles': [{'member': 'u1', 'title': '组局发起人', 'reason': '第一个喊人开黑', 'evidence_refs': ['qq:1']}],
+            'open_items': [{'kind': 'plan', 'summary': '阿青和小白九点开黑', 'certainty': 'fact', 'evidence_refs': ['qq:7']}],
             'slang': []}
     data.update(overrides)
     return data
 
 
+def topic(**overrides):
+    return {**report()['topics'][0], **overrides}
+
+
 def test_validator_accepts_evidence_and_copies_quotes_from_snapshot():
-    result = validator().validate(report(quotes=[{'ref': 'qq:2', 'comment': '秒回', 'text': '伪造原话'}]))
+    result = validator().validate(report(quotes=[{'ref': 'qq:2', 'context': '小白在回应阿青', 'text': '伪造原话'}]))
     assert result['quotes'][0]['text'] == '我来！' and result['quotes'][0]['speaker'] == 'u2'
-    markdown = render_markdown(result, {'u1': '阿青', 'u2': '小白', 'bot': '云萤'}, '2026-10-07 · Asia/Shanghai')
+    markdown = render_markdown(result, {'u1': '阿青', 'u2': '小白', 'bot': '云萤'}, '2026-10-07 · Asia/Shanghai', 'Asia/Shanghai')
     assert '阿青' in markdown and '组局发起人' in markdown and '（推断）' in markdown and 'u1' not in markdown
-    assert '伪造原话' not in markdown
+    assert '伪造原话' not in markdown and 'qq:' not in markdown
+    assert '### 1. 今晚开黑（00:00–00:06）' in markdown and '- 阿青问今晚谁一起开黑' in markdown
+    assert '结果：有结论，九点开黑' in markdown and '（小白在回应阿青）' in markdown
+
+
+def test_v2_report_keeps_v1_fields_for_existing_readers():
+    result = validator().validate(report())
+    assert result['version'] == 2 and result['relations'] == [] and 'mood' not in result
+    assert result['summary'] == '阿青约今晚开黑，小白马上答应' and result['summary_refs'] == ['qq:1', 'qq:2']
+    first = result['topics'][0]
+    assert first['evidence_refs'] == ['qq:1', 'qq:7'] and first['summary'].startswith(first['gist'])
+    assert first['time_range'] == {'from': '2026-10-06T16:00:00.000Z', 'to': '2026-10-06T16:06:00.000Z'}
+    assert result['quotes'][0]['comment'] == result['quotes'][0]['context']
 
 
 @pytest.mark.parametrize('overrides,message', [
-    ({'summary_refs': ['qq:999']}, 'refs must be real'),
+    ({'highlights': [{'text': '阿青约人', 'evidence_refs': ['qq:999']}]}, 'refs must be real'),
     ({'titles': [{'member': 'bot', 'title': '机器人', 'reason': 'x', 'evidence_refs': ['qq:5']}]}, 'cannot be the bot'),
     ({'titles': [{'member': 'u2', 'title': '组局', 'reason': 'x', 'evidence_refs': ['qq:1']}]}, 'by that member'),
     ({'quotes': [{'ref': 'qq:5'}]}, 'not the bot'),
     ({'topics': []}, 'topics must be a list of 1..10'),
-    ({'mood': {'label': '热', 'description': 'x', 'certainty': 'sure', 'evidence_refs': ['qq:1']}}, 'certainty'),
+    ({'highlights': []}, 'highlights must be a list of 1..5'),
+    ({'open_items': [{'kind': 'plan', 'summary': '九点', 'certainty': 'sure', 'evidence_refs': ['qq:7']}]}, 'certainty'),
     ({'extra': 1}, 'unknown report fields'),
+    ({'mood': {'label': '热络'}}, 'unknown report fields'),
     ({'titles': [{'member': 'u1', 'title': '一' * 17, 'reason': 'x', 'evidence_refs': ['qq:1']}]}, 'title must be text'),
+    ({'topics': [topic(points=[])]}, 'points must be a list of 1..6'),
+    ({'topics': [topic(outcome={'status': 'maybe'})]}, 'outcome.status'),
 ])
 def test_validator_rejections_are_specific(overrides, message):
+    with pytest.raises(Invalid, match=message):
+        validator().validate(report(**overrides))
+
+
+@pytest.mark.parametrize('overrides,message', [
+    ({'headline': '今天 u2 一直在约人'}, 'not the alias u2'),
+    ({'highlights': [{'text': '阿青和小白热烈讨论开黑', 'evidence_refs': ['qq:1']}]}, '热烈讨论'),
+    ({'highlights': [{'text': '阿青在 qq:1 约人', 'evidence_refs': ['qq:1']}]}, 'message refs'),
+    ({'topics': [topic(gist='阿青可能想开黑，小白似乎也想')]}, 'at most one hedge'),
+    ({'topics': [topic(gist='这是 inference 的结论')]}, 'certainty code'),
+    ({'quotes': [{'ref': 'qq:2', 'context': '体现了小白的热情'}]}, '体现了'),
+    ({'titles': [{'member': 'u1', 'title': '组局发起人', 'reason': '一' * 61, 'evidence_refs': ['qq:1']}]}, 'reason must be text'),
+])
+def test_prose_lint_rejects_what_readers_would_have_to_translate(overrides, message):
     with pytest.raises(Invalid, match=message):
         validator().validate(report(**overrides))
 
@@ -128,8 +164,8 @@ def test_validator_rejections_are_specific(overrides, message):
 def test_unread_messages_cannot_be_cited_and_drafts_may_be_partial():
     with pytest.raises(Invalid, match='read'):
         validator(read={'qq:1'}).validate(report())
-    partial = validator(read={'qq:1'}).validate({'topics': [{'title': '开黑', 'summary': '约局', 'participants': ['u1'],
-                                                          'certainty': 'fact', 'evidence_refs': ['qq:1']}]}, partial=True)
+    draft = topic(points=[{'text': '阿青问今晚谁一起开黑', 'evidence_refs': ['qq:1']}], participants=['u1'])
+    partial = validator(read={'qq:1'}).validate({'topics': [draft]}, partial=True)
     assert set(partial) == {'topics'}
     assert '安静' in render_empty('2026-10-07')
 

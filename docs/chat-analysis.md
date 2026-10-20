@@ -13,21 +13,26 @@
 - **证据**：每条结论必须引用本次运行**已读过**的当天消息 ref；金句只由模型给 ref，原文与说话人由服务端从快照摘录；称号只能给非机器人成员，且证据须含本人发言；最终提交前必须按时间顺序读完全天。校验失败的 400/409 原因回传给模型以便修正，5xx 细节不回传。
 - **往日线索**：`chat_previous` 只读本群此前最多 7 天已发布的 AI 日报的标题/摘要/话题名/待跟进，作为「后续」线索；证据仍须是当天消息。
 
-## 报告内容（`chat_analysis_runs.result`）
+## 报告内容（`chat_analysis_runs.result`，`version: 2`）
+
+读者是当天没看群的群成员：读完要能说出“今天聊了哪几件事、谁说了什么、最后怎么样”，不必再翻原始记录，也不必“翻译”AI 的话。所以 v2 用结构而不是散文承载信息：
 
 | 字段 | 内容 |
 | --- | --- |
-| `headline` / `summary` / `summary_refs` | 一句话标题、3~6 句概述及证据 |
-| `mood` | 氛围标签、描述、确定性、证据 |
-| `topics[]` | 1~10 个话题：标题、起因→发展→结论、参与者别名、确定性、证据 |
-| `quotes[]` | 0~8 条金句：`ref`、服务端摘录的 `text`/`speaker`/`at`/`source_id`、模型点评 |
-| `titles[]` | 0~10 个今日称号：成员别名、≤16 字称号、理由、证据（正面或中性，每人一个） |
-| `relations[]` | 0~8 条互动 |
+| `headline` | 一句话（≤50 字）说今天主要聊了什么，不追求文采 |
+| `highlights[]` | 1~5 条“今天最值得知道的事”，每条 ≤60 字并带证据 |
+| `topics[]` | 1~10 个话题：`title`（≤20 字名词短语）、`gist`（一句话 ≤80 字）、`points[]`（1~6 条按时间的经过，每条 ≤60 字并带证据）、`outcome`（`settled` / `open` / `none` + ≤40 字说明）、参与者别名、确定性；`evidence_refs` 与 `time_range` 由服务端按 points 的证据算出 |
+| `quotes[]` | 0~8 条金句：`ref`、服务端摘录的 `text`/`speaker`/`at`/`source_id`、模型写的 `context`（这句话在回应什么，≤80 字） |
+| `titles[]` | 0~10 个今日称号：成员别名、≤16 字称号、≤60 字的具体行为理由、证据（正面或中性，每人一个） |
 | `open_items[]` | 0~10 条待跟进：`question` / `plan` / `announcement` / `request` |
-| `slang[]` | 0~8 个新梗观察 |
+| `slang[]` | 0~8 个新梗，含一句白话解释 |
 | `names` | 别名 → 显示名（站点渲染用） |
 
-`certainty` 取 `fact` / `inference` / `speculation`。`markdown` 是服务端由结构化结果渲染的纯文本版本，正文不含号码与 ref。当天没有群友发言（只有机器人或全部撤回）时，Python 直接发布 `analysis='empty'` 的报告，不调用模型。
+v1 的 `mood` 与 `relations` 已去掉：它们天然产出“氛围融洽”“互动频繁”这类概括，回复/@ 关系由机械统计展示。为了让现有站点与往日线索不改也能显示，服务端派生 v1 字段：`summary`/`summary_refs`（由 highlights 拼出）、`topics[].summary`（gist + points + 结果）、`quotes[].comment`（等于 context）、`relations: []`。
+
+**写法校验**：除证据外，服务端还会拒绝读者需要“翻译”的正文——出现别名（`u3`）、消息 ref（`qq:123`）、`fact`/`inference` 等字段码、空话（“热烈讨论”“氛围融洽”“体现了”等固定词表）、单条超过一个“可能/似乎”、或超出长度。拒绝原因随 400 回传，模型改写后重交；`chat_observe` 草稿同样校验。
+
+`certainty` 取 `fact` / `inference` / `speculation`，由站点和 Markdown 统一加标注，模型不必在文字里堆限定词。`markdown` 是服务端由结构化结果渲染的纯文本版本（话题标题带报告时区的时间段），正文不含号码与 ref。当天没有群友发言（只有机器人或全部撤回）时，Python 直接发布 `analysis='empty'` 的报告，不调用模型。
 
 ## 状态机、调度与预算
 

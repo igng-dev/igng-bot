@@ -46,12 +46,13 @@ async def scenario():
                         ' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)', (group, sender, name, text, text, '[]', f'p-{n}', start + timedelta(hours=2, minutes=n)))
             refs.append(f'qq:{cur.lastrowid}')
     conn.close()
-    report = {'headline': '约局', 'summary': '阿青约开黑，小白响应。', 'summary_refs': refs,
-              'mood': {'label': '热络', 'description': '积极', 'certainty': 'inference', 'evidence_refs': [refs[1]]},
-              'topics': [{'title': '开黑', 'summary': '约局。', 'participants': ['u1', 'u2'], 'certainty': 'fact', 'evidence_refs': refs}],
-              'quotes': [{'ref': refs[1], 'comment': '秒回'}],
+    report = {'headline': '阿青约开黑，小白答应',
+              'highlights': [{'text': '阿青约今晚开黑，小白答应', 'evidence_refs': refs}],
+              'topics': [{'title': '开黑', 'gist': '阿青约开黑，小白答应。', 'points': [{'text': '阿青问今晚开不开黑', 'evidence_refs': refs}],
+                          'outcome': {'status': 'settled', 'text': '一起开黑'}, 'participants': ['u1', 'u2'], 'certainty': 'fact'}],
+              'quotes': [{'ref': refs[1], 'context': '小白在回应阿青'}],
               'titles': [{'member': 'u1', 'title': '组局发起人', 'reason': '先喊人', 'evidence_refs': [refs[0]]}],
-              'relations': [], 'open_items': [], 'slang': []}
+              'open_items': [], 'slang': []}
     observed = []
 
     async def model(request):
