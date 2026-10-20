@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import yaml from 'js-yaml';
-import { WorkModerationRuntime, client, settings, PROMPT } from '../src/work-moderation.js';
+import { WorkModerationRuntime, client, settings, PROMPT, EVIDENCE_LABELS } from '../src/work-moderation.js';
 import { harness, ScriptAdapter, toolResponse, textResponse, durableEvents } from './helpers.js';
 
 const config = { provider: 'script', model: 'script', outputTokens: 8192 };
@@ -52,6 +52,17 @@ test('scoped decisions pass through unchanged for chapter-level review', async (
     assert.deepEqual(submit.data.result.decisions, scopedResult.decisions);
     assert.equal(submit.data.result.decisions.length, 2);
     assert.equal(submit.data.result.decisions[1].scope, 'NODE:chapter1');
+  } finally { await runtime.close(); await ctx.fiber.dispose(); }
+});
+test('evidence may carry a site-wide label and the skill explains when to omit it', async () => {
+  assert.ok(EVIDENCE_LABELS.includes('GORE') && EVIDENCE_LABELS.includes('PRIVACY_DOXXING') && EVIDENCE_LABELS.includes('COPYRIGHT'));
+  assert.match(PROMPT, /拿不准用哪个标签时省略 label/);
+  const labelled = { snapshotHash: 'a'.repeat(64), policyVersion: 'works-v2', verdict: 'REJECTED', reason: '血腥', evidence: [{ unitId: 'body:0', hash: 'b'.repeat(64), rule: 'ILLEGAL_CONTENT', label: 'GORE', quote: '固定作品正文' }] };
+  const adapter = new ScriptAdapter([toolResponse('manifest', 'work_manifest', {}), toolResponse('read', 'work_read', { unitId: 'body:0' }), toolResponse('submit', 'work_submit', { result: labelled })]);
+  const { ctx } = await harness(adapter), fixture = apiFixture(), runtime = new WorkModerationRuntime(ctx, fixture.api, config), task = job({ policyVersion: 'works-v2' });
+  try {
+    assert.equal((await runtime.run(task)).submitted, true);
+    assert.equal(fixture.calls.find(call => call.action === 'submit').data.result.evidence[0].label, 'GORE');
   } finally { await runtime.close(); await ctx.fiber.dispose(); }
 });
 test('new versions resume one official work Session and repeat delivery does not duplicate native input', async () => {
