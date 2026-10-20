@@ -34,7 +34,7 @@ def settings(env=os.environ):
             'schedule_enabled': env.get('HISTORIAN_SCHEDULE', '1') == '1',
             'provider': env.get('HISTORIAN_PROVIDER', 'deepseek-official'),
             'model': env.get('HISTORIAN_MODEL', 'deepseek-v4-flash'),
-            'prompt_version': 'server-historian-v2',
+            'prompt_version': 'server-historian-v3',
             'max_steps': min(2048, max(1, int(env.get('HISTORIAN_MAX_STEPS', '512')))),
             'max_tokens': min(10000000, max(1000, int(env.get('HISTORIAN_TOKEN_BUDGET', '2000000')))),
             'max_seconds': min(14400, max(60, int(env.get('HISTORIAN_MAX_SECONDS', '3600')))),
@@ -143,7 +143,8 @@ class Service:
         except Conflict as error:
             return web.json_response({'error': str(error)}, status=409)
         except (ValueError, KeyError, TypeError) as error:
-            return web.json_response({'error': str(error)[:200]}, status=400)
+            # Validation detail goes back to the model so it can repair a rejected report.
+            return web.json_response({'error': str(error)[:600]}, status=400)
         except Exception as error:
             logger.error('historian capability failed: %s', type(error).__name__)
             return web.json_response({'error': 'historian temporarily unavailable'}, status=503)

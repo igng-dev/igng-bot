@@ -36,12 +36,13 @@ async def scenario():
     today=datetime.now(timezone.utc).date()
     weekly_label=(today-timedelta(days=today.weekday()+7)).isoformat()
     daily_label=(today-timedelta(days=3)).isoformat()
+    player_uuid=str(uuid4())
     conn=pymysql.connect(host='127.0.0.1',port=int(os.getenv('YUNYING_TEST_DB_PORT','33316')),user='root',database='yunying_v4_test',autocommit=True)
     with conn.cursor() as cur:
         cur.execute('CREATE TABLE IF NOT EXISTS chat_messages (id BIGINT AUTO_INCREMENT PRIMARY KEY,server_id INT,sent_at DATETIME(3),player_uuid VARCHAR(36),player_name VARCHAR(64),content TEXT,source VARCHAR(16),cancelled BOOLEAN)')
         cur.execute('CREATE TABLE IF NOT EXISTS player_event_logs (id BIGINT AUTO_INCREMENT PRIMARY KEY,server_id INT,occurred_at DATETIME(3),player_uuid VARCHAR(36),player_name VARCHAR(64),event_type VARCHAR(32),reason TEXT)')
         cur.execute('INSERT INTO chat_messages(server_id,sent_at,player_uuid,player_name,content,source,cancelled) VALUES(%s,%s,%s,%s,%s,%s,0)',
-                    (server,datetime.fromisoformat(weekly_label)+timedelta(hours=1),str(uuid4()),'Synthetic','合成玩家说你好。','paper'))
+                    (server,datetime.fromisoformat(weekly_label)+timedelta(hours=1),player_uuid,'Synthetic','合成玩家说你好。','paper'))
         event_id=f'mc:{server}:chat_messages:{cur.lastrowid}'
     conn.close()
     observed=[]
@@ -50,9 +51,15 @@ async def scenario():
         names=[t['name'] for t in body.get('tools',[])]
         assert names and all(name=='skill' or name.startswith('historian_') for name in names),names
         assert 'online_seconds' not in json.dumps(body),'mechanical statistics leaked to model'
+        # The model reads Chinese lines and aliases, never player UUIDs.
+        assert player_uuid not in json.dumps(body),'player UUID leaked to model'
         step=len(observed)
-        name,args=('historian_timeline',{'after':0}) if step==1 else ('historian_submit',{'observations':[{
-            'title':'问候','summary':'合成玩家发出问候。','certainty':'fact','evidence_event_ids':[event_id]}]})
+        if step==2:assert 'Synthetic 说：合成玩家说你好。' in json.dumps(body,ensure_ascii=False)
+        name,args=('historian_timeline',{'after':0}) if step==1 else ('historian_submit',{
+            'headline':'Synthetic 周一说了一句你好','highlights':[{'text':'Synthetic 在聊天里打了招呼','evidence_event_ids':[event_id]}],
+            'stories':[{'title':'打招呼','gist':'Synthetic 进服后在聊天里说了一句你好。','timeline':[
+                {'text':'Synthetic 说你好','evidence_event_ids':[event_id]}],'people':['p1'],
+                'outcome':{'status':'unknown','text':'记录里没有人回复'},'certainty':'fact'}],'server_notes':[]})
         response=web.StreamResponse(headers={'Content-Type':'text/event-stream'});await response.prepare(request)
         async def emit(kind,value):await response.write(('event: '+kind+'\ndata: '+json.dumps(value,ensure_ascii=False)+'\n\n').encode())
         await emit('message_start',{'type':'message_start','message':{'id':str(uuid4()),'type':'message','role':'assistant','model':'fixture','content':[],
@@ -127,6 +134,8 @@ async def scenario():
         try:
             with db.cursor() as cur:
                 cur.execute('SELECT COUNT(*) FROM historian_calls WHERE run_id=%s',(weekly['run_id'],));assert cur.fetchone()[0]>=3
+                cur.execute('SELECT markdown,report FROM historian_runs WHERE id=%s',(weekly['run_id'],));markdown,report=cur.fetchone()
+                assert markdown.startswith('# Synthetic 周一说了一句你好') and 'mc:' not in markdown and json.loads(report)['version']==2
                 cur.execute('SELECT current_run_id FROM historian_reports WHERE id=%s',(weekly['report_id'],));assert cur.fetchone()[0]==weekly['run_id']
         finally:db.close()
     finally:

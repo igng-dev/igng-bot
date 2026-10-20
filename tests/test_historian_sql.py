@@ -1,4 +1,5 @@
 """Opt-in real SQL, fixed loopback and synthetic evidence only."""
+import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -23,22 +24,42 @@ def repository():
                               'max_steps':20,'max_tokens':10000,'max_seconds':120,'output_tokens':1000})
 
 
-def start(repo,kind='daily',label='2026-01-05'):
+UID='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+RIVAL='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+
+
+def mc_event(table,n,at,**fields):
+    when='sent_at' if table=='chat_messages' else 'occurred_at'
+    return normalize(table,{'id':n,'server_id':190001,when:at,'player_name':'Synthetic','player_uuid':UID,
+                            'boot_id':'fixture-boot','capture_seq':n,**fields})
+
+
+def start(repo,kind='daily',label='2026-01-05',extra=()):
     created=repo.create(190001,kind,label,'Asia/Shanghai','site:fixture',str(uuid.uuid4()))
     # Other suites may leave pending jobs; claim only fixture-created jobs in this isolated suite.
     with repo.transaction() as cur:
         cur.execute('UPDATE historian_runs SET available_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 1 DAY) WHERE id<>%s AND status=\'pending\'',(created['run_id'],))
     run=repo.claim()
     assert run['id']==created['run_id']
-    event=normalize('chat_messages',{'id':1,'server_id':190001,'sent_at':run['period_from']+timedelta(hours=1),
-          'player_name':'Synthetic','player_uuid':'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','content':'合成原文',
-          'source':'paper','cancelled':False})
-    repo.snapshot(run['id'],run['lease_token'],[event],{'cutoff':datetime.now(timezone.utc).replace(tzinfo=None).isoformat(sep=' '),'event_count':1},{'chat':1})
+    base=run['period_from']
+    # PRESENCE feeds statistics only; it is kept out of the stored model-visible snapshot.
+    presence=mc_event('player_event_logs',1,base+timedelta(minutes=30),event_type='PRESENCE',world='world',x=1,y=64,z=2)
+    event=mc_event('chat_messages',1,base+timedelta(hours=1),content='合成原文',source='paper',cancelled=False)
+    events=sorted([presence,event,*[mc_event(table,n,base+timedelta(hours=1,minutes=n),**fields) for table,n,fields in extra]],
+                  key=lambda e:e['occurred_at'])
+    repo.snapshot(run['id'],run['lease_token'],events,{'cutoff':datetime.now(timezone.utc).replace(tzinfo=None).isoformat(sep=' '),'event_count':len(events)},{'chat':1})
     return run,event
 
 
-def final(repo,run,event):
-    data={'observations':[{'title':'合成事件','summary':'玩家发言。','certainty':'fact','evidence_event_ids':[event['event_id']]}]}
+def report(event_id,headline='Synthetic 发了一句话'):
+    return {'headline':headline,'highlights':[{'text':'Synthetic 说了一句合成原文','evidence_event_ids':[event_id]}],
+            'stories':[{'title':'一句发言','gist':'Synthetic 在聊天里说了一句话，没有人回复。',
+                        'timeline':[{'text':'Synthetic 说了一句合成原文','evidence_event_ids':[event_id]}],'people':['p1'],
+                        'outcome':{'status':'unknown','text':'记录里看不出后续'},'certainty':'fact'}],'server_notes':[]}
+
+
+def final(repo,run,event,headline='Synthetic 发了一句话'):
+    data=report(event['event_id'],headline)
     repo.events(run['id'],run['lease_token'],{'after':0})
     repo.save(run['id'],run['lease_token'],data,True)
     repo.finish(run['id'],run['lease_token'],True)
@@ -49,16 +70,16 @@ def test_report_run_idempotency_evidence_coverage_and_publication():
     same=repo.create(190001,'daily','2026-01-05','Asia/Shanghai','site:fixture',run['request_key'])
     assert same['run_id']==run['id']
     with pytest.raises(Conflict):repo.create(190001,'daily','2026-01-06','Asia/Shanghai','site:fixture',run['request_key'])
-    data={'observations':[{'title':'观察','summary':'原文','certainty':'fact','evidence_event_ids':[event['event_id']]}]}
+    data=report(event['event_id'])
     with pytest.raises(ValueError):repo.save(run['id'],run['lease_token'],data,True)
     with pytest.raises(Conflict):repo.events(run['id'],run['lease_token'],{'after':99})
     result=repo.events(run['id'],run['lease_token'],{'after':0,'limit':1})
     assert result['coverage_complete'] and 'statistics' not in result
     assert repo.events(run['id'],run['lease_token'],{'after':0,'limit':1})['events']==result['events']
-    assert repo.events(run['id'],run['lease_token'],{'event_id':event['event_id']},'context')['events'][0]['facts']['content']=='合成原文'
-    bad={'observations':[{**data['observations'][0],'evidence_event_ids':['mc:190001:chat_messages:999']}]}
+    assert repo.events(run['id'],run['lease_token'],{'ref':event['event_id']},'context')['events'][0]['line'].endswith('Synthetic 说：合成原文')
+    bad=report('mc:190001:chat_messages:999')
     with pytest.raises(ValueError):repo.save(run['id'],run['lease_token'],bad,True)
-    bad['observations'][0]['evidence_event_ids']=[event['event_id'].upper()]
+    bad=report(event['event_id'].upper())
     with pytest.raises(ValueError):repo.save(run['id'],run['lease_token'],bad,True)
     repo.save(run['id'],run['lease_token'],data,True);repo.finish(run['id'],run['lease_token'],True)
     with pytest.raises(Conflict):repo.save(run['id'],run['lease_token'],data,True)
@@ -178,3 +199,67 @@ def test_source_snapshot_keeps_original_context_and_excludes_late_rows_from_old_
     newer,_,new_manifest=source.snapshot(server,datetime(2026,1,1),datetime(2026,1,2))
     assert len(events)==2 and len(newer)==3
     assert int(new_manifest['watermarks']['chat_messages'])>int(manifest['watermarks']['chat_messages'])
+
+
+def test_readable_view_hides_presence_and_identifiers_and_keeps_coverage_over_visible_events():
+    repo=repository()
+    run,chat=start(repo,kind='weekly',label='2026-02-02',extra=[
+        ('player_event_logs',2,{'event_type':'JOIN'}),
+        ('player_event_logs',3,{'event_type':'DEATH','related_uuid':RIVAL,'related_name':'Rival','related_entity_type':'PLAYER',
+                                'damage_type':'minecraft:player_attack','cause':'ENTITY_ATTACK','world':'world','x':10,'y':64,'z':-5}),
+        ('player_event_logs',4,{'event_type':'PRESENCE','world':'world','x':10,'y':64,'z':-5})])
+    try:
+        with repo.transaction() as cur:
+            cur.execute('SELECT manifest FROM historian_runs WHERE id=%s',(run['id'],))
+            manifest=json.loads(cur.fetchone()['manifest'])
+            cur.execute("SELECT COUNT(*) n FROM historian_events WHERE run_id=%s AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.type'))='PRESENCE'",(run['id'],))
+            assert cur.fetchone()['n']==0
+        assert manifest['event_count']==3 and manifest['source_event_count']==5 and manifest['omitted_event_types']=={'PRESENCE':2}
+        first=repo.events(run['id'],run['lease_token'],{'after':0,'limit':2})
+        assert not first['coverage_complete'] and first['scan_cursor']==2
+        with pytest.raises(Conflict):repo.events(run['id'],run['lease_token'],{'after':3})
+        second=repo.events(run['id'],run['lease_token'],{'after':first['scan_cursor'],'limit':2})
+        assert second['coverage_complete'] and second['next_cursor'] is None
+        views=first['events']+second['events']
+        assert all(set(v)<={'ref','line','who'} for v in views)
+        dumped=json.dumps(first,ensure_ascii=False)+json.dumps(second,ensure_ascii=False)
+        for hidden in (UID,RIVAL,'fixture-boot','capture_seq','content_hash','PRESENCE','DEATH'):
+            assert hidden not in dumped
+        death=next(v for v in views if '杀死' in v['line'])
+        assert death['line'].endswith('Synthetic 被 Rival 杀死（主世界 10,64,-5）') and death['who']==['p1','p2']
+        assert {**first['roster'],**second['roster']}=={'p1':'Synthetic','p2':'Rival'}
+        assert [v['ref'] for v in repo.events(run['id'],run['lease_token'],{'player':'p2'},'player')['events']]==[death['ref']]
+        assert len(repo.events(run['id'],run['lease_token'],{'player':'synthetic'},'player')['events'])==3
+        with pytest.raises(ValueError):repo.events(run['id'],run['lease_token'],{'player':'p9'},'player')
+        assert [v['ref'] for v in repo.events(run['id'],run['lease_token'],{'query':'杀死'},'search')['events']]==[death['ref']]
+        # Lint rejects code-like prose with a reason the model can act on; the repaired text publishes.
+        bad=report(chat['event_id'],headline='p2 杀死了 p1')
+        with pytest.raises(ValueError,match='玩家代号'):repo.save(run['id'],run['lease_token'],bad,True)
+        good=report(chat['event_id'],headline='Rival 周一杀死了 Synthetic')
+        good['stories'][0]['timeline'].append({'text':'Synthetic 被 Rival 杀死','evidence_event_ids':[death['ref']]})
+        good['stories'][0]['people']=['p1','p2']
+        join=next(v for v in views if v['line'].endswith('进服'))
+        good['highlights']+=[{'text':'Synthetic 周一进服一次','evidence_event_ids':[join['ref']]},
+                             {'text':'Synthetic 被 Rival 杀死一次','evidence_event_ids':[death['ref']]}]
+        repo.save(run['id'],run['lease_token'],good,True)
+        repo.finish(run['id'],run['lease_token'],True)
+        with repo.transaction() as cur:
+            cur.execute('SELECT report,observations,markdown FROM historian_runs WHERE id=%s',(run['id'],))
+            row=cur.fetchone()
+        stored,observations=json.loads(row['report']),json.loads(row['observations'])
+        assert stored['version']==2 and stored['stories'][0]['people']==[{'alias':'p1','name':'Synthetic'},{'alias':'p2','name':'Rival'}]
+        assert [e['at'][:2] for e in stored['stories'][0]['timeline']]==['周一','周一']
+        assert [o['title'] for o in observations]==['本周概览','一句发言']
+        assert set(observations[1]['evidence_event_ids'])=={chat['event_id'],death['ref']}
+        assert row['markdown'].startswith('# Rival 周一杀死了 Synthetic') and 'mc:' not in row['markdown'] and UID not in row['markdown']
+        later,_=start(repo,kind='weekly',label='2026-02-09')
+        try:
+            digests=[r for r in repo.previous(later['id'],later['lease_token'],{'limit':7})['reports'] if r['run_id']==run['id']]
+            assert digests and digests[0]['headline']=='Rival 周一杀死了 Synthetic' and digests[0]['story_titles']==['一句发言']
+            assert 'mc:' not in json.dumps(digests,ensure_ascii=False,default=str)
+        finally:repo.finish(later['id'],later['lease_token'],False,'fixture complete')
+    finally:
+        with repo.transaction() as cur:
+            cur.execute("SELECT status FROM historian_runs WHERE id=%s",(run['id'],))
+            running=cur.fetchone()['status']=='running'
+        if running:repo.finish(run['id'],run['lease_token'],False,'fixture cleanup')
