@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from .events import encode, content_hash, instant
 from .period import period
+from . import readable
 
 
 PHASES = {'timeline_scan', 'event_investigation', 'context_review', 'daily_write', 'weekly_synthesis', 'report_check'}
@@ -118,6 +119,16 @@ class Repository:
                         "AND r.status='completed' AND r.ended_at<=%s ORDER BY p.period_start DESC,p.id DESC LIMIT 21",
                         (row['server_id'],row['timezone'],context_end,row['report_id'],manifest['cutoff']))
             manifest = {**manifest,'context_run_ids':[r['id'] for r in cur.fetchall()]}
+            # Statistics were already computed from the full source rows; the stored snapshot is what the
+            # model can scan, so coverage (scan_through vs event_count) only counts model-visible events.
+            hidden = {}
+            for event in events:
+                if event['type'] in readable.MODEL_HIDDEN_TYPES:
+                    hidden[event['type']] = hidden.get(event['type'], 0) + 1
+            events = [{**event, 'line': readable.describe(event, row['timezone'])} for event in events
+                      if event['type'] not in readable.MODEL_HIDDEN_TYPES]
+            manifest = {**manifest, 'view_version': readable.VIEW_VERSION, 'source_event_count': manifest.get('event_count', len(events) + sum(hidden.values())),
+                        'event_count': len(events), 'omitted_event_types': hidden, 'players': readable.roster(events)}
             for index in range(0, len(events), 200):
                 cur.executemany('INSERT INTO historian_events(run_id,ordinal,event_id,occurred_at,player_uuid,payload,content_hash) '
                                 'VALUES(%s,%s,%s,%s,%s,%s,%s)',
@@ -126,22 +137,31 @@ class Repository:
             cur.execute('UPDATE historian_runs SET manifest=%s,data_cutoff=%s,statistics=%s WHERE id=%s',
                         (encode(manifest), manifest['cutoff'], encode(statistics), run_id))
 
+    @staticmethod
+    def readable_manifest(row):
+        manifest = decode(row['manifest'])
+        if not manifest:
+            raise Conflict('snapshot not ready')
+        if manifest.get('view_version') != readable.VIEW_VERSION:
+            # Snapshots installed before the readable view keep raw payloads only; a retry takes a new snapshot.
+            raise Conflict('snapshot predates the readable event view; retry this report')
+        return manifest
+
     def events(self, run_id, token, args, mode='timeline'):
         limit = args.get('limit', 100)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise ValueError('page limit must be 1..200')
         with self.transaction() as cur:
             row = self.owned(cur, run_id, token)
-            manifest = decode(row['manifest'])
-            if not manifest:
-                raise Conflict('snapshot not ready')
+            manifest = self.readable_manifest(row)
+            people = readable.Roster(manifest.get('players'))
             values, clauses = [run_id], ['run_id=%s']
             scan = mode == 'timeline' and not any(args.get(k) for k in ('from', 'to'))
             after = args.get('after', 0)
             if not isinstance(after, int) or isinstance(after, bool) or after < 0:
                 raise ValueError('invalid event cursor')
             if mode == 'context':
-                cur.execute('SELECT ordinal FROM historian_events WHERE run_id=%s AND event_id=%s', (run_id, args.get('event_id')))
+                cur.execute('SELECT ordinal FROM historian_events WHERE run_id=%s AND event_id=%s', (run_id, args.get('ref') or args.get('event_id')))
                 anchor = cur.fetchone()
                 if not anchor:
                     raise ValueError('event outside current snapshot')
@@ -158,15 +178,22 @@ class Repository:
                     clauses.append(f'occurred_at{op}%s')
                     values.append(bound)
             if mode == 'player':
-                uid = str(uuid.UUID(args.get('player_uuid', '')))
-                clauses.append('(player_uuid=%s OR JSON_UNQUOTE(JSON_EXTRACT(payload,\'$.facts.related_uuid\'))=%s)')
-                values.extend([uid, uid])
+                # Aliases (p1 …) or exact names; UUIDs never round-trip through the model.
+                entry = people.resolve(args.get('player')) if args.get('player') is not None else None
+                uid = entry['uuid'] if entry else str(uuid.UUID(args.get('player_uuid', '')))
+                if uid:
+                    clauses.append('(player_uuid=%s OR JSON_UNQUOTE(JSON_EXTRACT(payload,\'$.facts.related_uuid\'))=%s)')
+                    values.extend([uid, uid])
+                else:
+                    clauses.append("player_uuid IS NULL AND (JSON_UNQUOTE(JSON_EXTRACT(payload,'$.player_name'))=%s "
+                                   "OR JSON_UNQUOTE(JSON_EXTRACT(payload,'$.facts.related_name'))=%s)")
+                    values.extend([entry['name'], entry['name']])
             if mode == 'search':
                 query = args.get('query')
                 if not isinstance(query, str) or not 1 <= len(query) <= 120:
-                    raise ValueError('invalid chat search')
-                clauses.extend(["JSON_UNQUOTE(JSON_EXTRACT(payload,'$.type'))='CHAT'",
-                                "LOCATE(%s,JSON_UNQUOTE(JSON_EXTRACT(payload,'$.facts.content')))>0"])
+                    raise ValueError('invalid search text')
+                # The Chinese line contains chat text, death causes, places and advancement titles.
+                clauses.append("LOCATE(%s,JSON_UNQUOTE(JSON_EXTRACT(payload,'$.line')))>0")
                 values.append(query)
             cur.execute('SELECT ordinal,event_id,payload FROM historian_events WHERE ' + ' AND '.join(clauses) + ' ORDER BY ordinal LIMIT %s',
                         (*values, limit + 1))
@@ -179,7 +206,10 @@ class Repository:
                     raise Conflict('coverage scan cannot skip an unread chronological gap')
                 through = max(row['scan_through'], page[-1]['ordinal'] if page else after)
                 cur.execute('UPDATE historian_runs SET scan_through=%s WHERE id=%s', (through, run_id))
-            return {'ok': True, 'events': [decode(e['payload']) for e in page],
+            views = [readable.view(decode(e['payload']), people, row['timezone']) for e in page]
+            names = {alias for item in views for alias in item.get('who', [])}
+            return {'ok': True, 'events': views,
+                    'roster': {p['alias']: p['name'] for p in people.players if p['alias'] in names},
                     'next_cursor': page[-1]['ordinal'] if len(found) > limit else None,
                     'scan_cursor': page[-1]['ordinal'] if scan and page else row['scan_through'],
                     'coverage_complete': (max(row['scan_through'],page[-1]['ordinal']) if scan and page else row['scan_through']) >= manifest['event_count'],
@@ -196,54 +226,48 @@ class Repository:
             page = ids[offset:offset+limit]
             if not page:
                 return {'ok':True,'reports':[],'next_cursor':None}
-            cur.execute("SELECT p.id,p.period_start,p.kind,r.id run_id,r.markdown,r.observations FROM historian_reports p "
+            cur.execute("SELECT p.id,p.period_start,p.kind,r.id run_id,r.report,r.observations FROM historian_reports p "
                         "JOIN historian_runs r ON r.report_id=p.id AND r.status='completed' "
                         f"WHERE r.id IN ({','.join(['%s']*len(page))}) ORDER BY p.period_start DESC,p.id DESC", page)
-            return {'ok': True, 'reports': [{**r, 'observations': decode(r['observations'], [])} for r in cur.fetchall()],
+            return {'ok': True, 'reports': [{'id': r['id'], 'period_start': r['period_start'], 'kind': r['kind'], 'run_id': r['run_id'],
+                                             **readable.digest(decode(r['report']), decode(r['observations'], []))} for r in cur.fetchall()],
                     'next_cursor':offset+limit if offset+limit<len(ids) else None,
                     'warning': 'previous prose is a lead, not a replacement for original evidence'}
 
-    def observations(self, cur, run_id, values):
-        if not isinstance(values, list) or len(values) > 80:
-            raise ValueError('invalid observations')
-        result = []
-        for item in values:
-            if not isinstance(item, dict) or item.get('certainty') not in {'fact', 'inference', 'speculation'}:
-                raise ValueError('observation requires a certainty classification')
-            title, summary, refs = item.get('title'), item.get('summary'), item.get('evidence_event_ids')
-            if not isinstance(title, str) or not 1 <= len(title) <= 200 or not isinstance(summary, str) or not 1 <= len(summary) <= 6000:
-                raise ValueError('invalid observation text')
-            if (not isinstance(refs, list) or not 1 <= len(refs) <= 50 or
-                    any(not isinstance(ref,str) or not 1<=len(ref)<=128 for ref in refs) or len(set(refs)) != len(refs)):
-                raise ValueError('observation requires distinct raw evidence')
-            placeholders = ','.join(['%s'] * len(refs))
-            cur.execute(f'SELECT event_id FROM historian_receipts WHERE run_id=%s AND event_id IN ({placeholders})', (run_id, *refs))
-            if {r['event_id'] for r in cur.fetchall()} != set(refs):
-                raise ValueError('evidence must be real, in scope and read by this run')
-            result.append({'title': title, 'summary': summary, 'certainty': item['certainty'], 'evidence_event_ids': refs})
-        return result
+    def evidence_times(self, cur, run_id, refs):
+        """Evidence must be real, in this snapshot and already read by this run; returns occurred_at per ref."""
+        times = {}
+        for index in range(0, len(refs), 200):
+            chunk = refs[index:index + 200]
+            placeholders = ','.join(['%s'] * len(chunk))
+            cur.execute(f'SELECT e.event_id,e.occurred_at FROM historian_receipts r JOIN historian_events e '
+                        f'ON e.run_id=r.run_id AND e.event_id=r.event_id WHERE r.run_id=%s AND r.event_id IN ({placeholders})',
+                        (run_id, *chunk))
+            times.update({r['event_id']: r['occurred_at'] for r in cur.fetchall()})
+        missing = [ref for ref in refs if ref not in times]
+        if missing:
+            raise ValueError(f'evidence must be real, in scope and read by this run: {missing[0]}'
+                             + (f' (+{len(missing) - 1} more)' if len(missing) > 1 else ''))
+        return times
 
     def save(self, run_id, token, data, final=False):
         with self.transaction() as cur:
             row = self.owned(cur, run_id, token)
-            observations = self.observations(cur, run_id, data.get('observations'))
+            manifest = self.readable_manifest(row)
+            count = manifest.get('event_count', 0)
+            report = readable.validate(data, readable.Roster(manifest.get('players')), count, final)
+            report = readable.timed(report, self.evidence_times(cur, run_id, readable.references(report)), row['timezone'])
+            # The existing site reads v1 observations; they are derived, the v2 report is stored whole.
+            observations = readable.observations(report)
             if not final:
-                cur.execute('UPDATE historian_runs SET observations=%s WHERE id=%s', (encode(observations), run_id))
+                cur.execute('UPDATE historian_runs SET observations=%s,report=%s WHERE id=%s', (encode(observations), encode(report), run_id))
                 return {'ok': True}
-            manifest = decode(row['manifest'], {})
-            if row['scan_through'] < manifest.get('event_count', 1):
+            if row['scan_through'] < count:
                 raise Conflict('full chronological coverage is required before final submission')
-            # Markdown is generated from validated structured observations, not an unreferenced essay.
-            intro = f"服务器 {row['server_id']} · {row['period_start']} · {row['timezone']}"
-            if manifest.get('event_count', 0) and not observations:
-                raise ValueError('nonempty period needs evidence-backed observations')
-            labels = {'fact': '明确事实', 'inference': '有依据的推断', 'speculation': '不确定的推测'}
-            markdown = intro + '\n\n' + '\n\n'.join(f"## {o['title']}\n\n[{labels[o['certainty']]}] {o['summary']}\n\n证据："+
-                                                     ', '.join(o['evidence_event_ids']) for o in observations)
-            if not observations:
-                markdown += '本周期可用记录中没有可供调查的服务器事件；这不证明服务器没有活动。'
-            cur.execute('UPDATE historian_runs SET observations=%s,markdown=%s,phase=\'report_check\' WHERE id=%s',
-                        (encode(observations), markdown, run_id))
+            # Markdown is generated from the validated structure, never an unreferenced essay.
+            markdown = readable.markdown(report, row['server_id'], row['period_start'], row['timezone'], count)
+            cur.execute('UPDATE historian_runs SET observations=%s,report=%s,markdown=%s,phase=\'report_check\' WHERE id=%s',
+                        (encode(observations), encode(report), markdown, run_id))
             return {'ok': True, 'draft_saved': True, 'requires_native_turn_completion': True}
 
     def display(self, cur, row):
