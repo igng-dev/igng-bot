@@ -12,6 +12,8 @@ export const PROMPT = `你是独立作品审核 Agent，只判断本次固定版
 对每个IMAGE单元调用work_media：受控视觉模型检查固定hash的原图，返回画面描述、OCR与疑点；它不决定作品发布。图片证据须附本轮receiptId并精确引用observation原文。
 历史读过、历史通过或摘要记得都不能代替本轮读取。新版本必须重新按清单检查，禁止跳过长篇和漫画后半部分。
 只能引用当前已读单元的真实 hash 与原文，拒绝必须有具体规则和可验证证据；不确定侵权不得凭空定罪。
+每条证据可附 label（站点统一标签），须落在所属 rule 之内：ILLEGAL_CONTENT 对应 POLITICAL_RED_LINE、SEXUAL_MINOR、TERROR_EXTREMISM、SEXUAL_EXPLICIT、GORE、ILLEGAL_GOODS、FRAUD_GAMBLING、THREAT、SELF_HARM、HATE、HARASSMENT、SPAM_DIVERSION、IMPERSONATION；PRIVACY_VIOLATION 对应 PRIVACY_DOXXING；COPYRIGHT_EVIDENCE 对应 COPYRIGHT。拿不准用哪个标签时省略 label，不要猜。
+虚构情节中的冲突、反派言行、历史与战争题材本身不违规；不要因为使用 AI 创作而拒绝。
 联网搜索只查公开法规/审核原则，不能向搜索服务发送未公开正文、标题、个人资料或作品原文。
 通过须覆盖完整清单，技术故障、视觉不可用、预算耗尽不能自动通过，也不能当作内容拒绝。
 清单中的每个必检范围（scope）都必须给出独立结论：WORK 是作品资料（名称、封面、简介、声明），NODE:<id> 是单个章/话及其图片。
@@ -64,7 +66,9 @@ function attemptMessageId(runId) {
   const hex = createHash('sha256').update('work-attempt:' + runId).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
-const EVIDENCE = { type: 'array', maxItems: 50, items: { type: 'object', additionalProperties: false, properties: { unitId: { type: 'string' }, hash: { type: 'string' }, rule: { type: 'string', enum: ['ILLEGAL_CONTENT', 'PRIVACY_VIOLATION', 'COPYRIGHT_EVIDENCE'] }, quote: { type: 'string', maxLength: 2000 }, receiptId: { type: 'string', maxLength: 64 } }, required: ['unitId', 'hash', 'rule', 'quote'] } };
+// 站点统一标签（igng-sites docs/moderation-architecture.md §3）；站点校验 label 与 rule 一致。
+export const EVIDENCE_LABELS = Object.freeze(['POLITICAL_RED_LINE', 'SEXUAL_MINOR', 'TERROR_EXTREMISM', 'SEXUAL_EXPLICIT', 'GORE', 'ILLEGAL_GOODS', 'FRAUD_GAMBLING', 'THREAT', 'SELF_HARM', 'HATE', 'HARASSMENT', 'SPAM_DIVERSION', 'IMPERSONATION', 'PRIVACY_DOXXING', 'COPYRIGHT']);
+const EVIDENCE = { type: 'array', maxItems: 50, items: { type: 'object', additionalProperties: false, properties: { unitId: { type: 'string' }, hash: { type: 'string' }, rule: { type: 'string', enum: ['ILLEGAL_CONTENT', 'PRIVACY_VIOLATION', 'COPYRIGHT_EVIDENCE'] }, label: { type: 'string', enum: EVIDENCE_LABELS }, quote: { type: 'string', maxLength: 2000 }, receiptId: { type: 'string', maxLength: 64 } }, required: ['unitId', 'hash', 'rule', 'quote'] } };
 const TOOL_SCHEMAS = {
   work_manifest: { properties: {} },
   work_read: { properties: { unitId: { type: 'string', maxLength: 180 } }, required: ['unitId'] },
