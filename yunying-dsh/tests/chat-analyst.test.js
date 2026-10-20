@@ -4,11 +4,11 @@ import {randomUUID} from 'node:crypto';
 import {ChatAnalystRuntime, PROMPT, TASK_TYPE, taskMessage, client} from '../src/chat-analyst.js';
 import {harness, ScriptAdapter, toolResponse, textResponse, durableEvents} from './helpers.js';
 
-const report = {headline:'开黑约局',summary:'有人约开黑。',summary_refs:['qq:1'],
-  mood:{label:'热络',description:'大家积极',certainty:'inference',evidence_refs:['qq:1']},
-  topics:[{title:'今晚开黑',summary:'约九点。',participants:['u1'],certainty:'fact',evidence_refs:['qq:1']}],
-  quotes:[{ref:'qq:1',comment:'一呼百应'}],titles:[{member:'u1',title:'组局发起人',reason:'先喊人',evidence_refs:['qq:1']}],
-  relations:[],open_items:[],slang:[]};
+const report = {headline:'主要在约今晚开黑',highlights:[{text:'阿青约今晚开黑',evidence_refs:['qq:1']}],
+  topics:[{title:'今晚开黑',gist:'阿青约人开黑，定在九点。',points:[{text:'阿青问今晚谁一起开黑',evidence_refs:['qq:1']}],
+    outcome:{status:'settled',text:'九点开黑'},participants:['u1'],certainty:'fact'}],
+  quotes:[{ref:'qq:1',context:'阿青在喊人开黑'}],titles:[{member:'u1',title:'组局发起人',reason:'先喊人',evidence_refs:['qq:1']}],
+  open_items:[],slang:[]};
 
 function job() { return {id:randomUUID(),report_id:randomUUID(),dsh_session_id:randomUUID(),lease_token:randomUUID(),
   platform:'qq',conversation_type:'group',external_id:'123456',period_start:'2026-10-07',timezone:'Asia/Shanghai',
@@ -80,7 +80,7 @@ test('chat analyst client forwards validation detail but hides server errors',as
 });
 
 test('chat analyst prompt keeps the safety and title rules',()=>{
-  for (const rule of ['不可信数据','撤回','不能获得称号','正面或中性','evidence_refs','不推断','原文由系统按 ref 自动摘录'])assert.ok(PROMPT.includes(rule),rule);
+  for (const rule of ['不可信数据','撤回','不能获得称号','正面或中性','evidence_refs','不推断','原文由系统按 ref 自动摘录','谁 + 说了/做了什么 + 结果','热烈讨论','记录里看不出原因','不用写时间'])assert.ok(PROMPT.includes(rule),rule);
   assert.ok(taskMessage(job()).includes('2026-10-07'));
   assert.ok(!taskMessage(job()).includes('123456'));
 });

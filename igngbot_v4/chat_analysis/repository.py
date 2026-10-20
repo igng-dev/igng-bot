@@ -302,6 +302,7 @@ class Repository:
             for found in cur.fetchall():
                 result = decode(found['result'], {}) or {}
                 reports.append({'date': str(found['period_start']), 'headline': result.get('headline'), 'summary': result.get('summary'),
+                                'highlights': [h.get('text') for h in result.get('highlights', [])],
                                 'topics': [t.get('title') for t in result.get('topics', [])],
                                 'open_items': [o.get('summary') for o in result.get('open_items', [])]})
             return {'ok': True, 'reports': reports, 'next_cursor': offset + limit if offset + limit < len(ids) else None,
@@ -344,7 +345,7 @@ class Repository:
                 cur.execute('UPDATE chat_analysis_runs SET draft=%s WHERE id=%s', (encode(draft), run_id))
                 return {'ok': True, 'draft_sections': sorted(draft)}
             names = self._names(manifest)
-            markdown = render_markdown(result, names, self.header(row))
+            markdown = render_markdown(result, names, self.header(row), row['timezone'])
             cur.execute("UPDATE chat_analysis_runs SET result=%s,markdown=%s,analysis='ai',phase='report_check' WHERE id=%s",
                         (encode({**result, 'names': {a: names[a] for a in names}}), markdown, run_id))
             return {'ok': True, 'draft_saved': True, 'requires_native_turn_completion': True}
