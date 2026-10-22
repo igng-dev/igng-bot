@@ -75,6 +75,27 @@ test('live turns project into MySQL rows that reconstruct in order', async () =>
   } finally { await runtime.close(); await ctx.fiber.dispose(); }
 });
 
+test('model latency spans start at their own step instead of the preceding tool', async () => {
+  const adapter = new ScriptAdapter(), { ctx } = await harness(adapter), store = new FixtureStore();
+  const runtime = new SocialRuntime(ctx, store, testSettings(), async () => ({ ok: true }));
+  try {
+    await runtime.load('group:1001');
+    const conv = runtime.conversations.get('group:1001');
+    const args = () => ({ key: conv.state.key, token: conv.state.agentToken });
+    adapter.script.push(() => toolResponse('observe-latency', 'qq_get_unread_messages', args()), textResponse(''));
+    await runtime.accept(event('latency-step', 'group:1001', { atBot: true, text: '你好' }));
+    await settle(runtime);
+    await conv.latencyWrite;
+    const spans = [...store.latencySpans.values()];
+    const tool = spans.find(span => span.spanType === 'tool_call');
+    const model = spans.filter(span => span.spanType === 'model_attempt').at(-1);
+    assert.ok(tool, 'tool span exists');
+    assert.ok(model, 'second model span exists');
+    assert.ok(model.startedAt >= tool.endedAt, 'model attempt does not include the preceding tool time');
+    assert.ok(model.endedAt - model.startedAt < 1000, 'model attempt duration is bounded to its own step');
+  } finally { await runtime.close(); await ctx.fiber.dispose(); }
+});
+
 test('restart backfills the projection from the official log without duplicates', async () => {
   const store = new FixtureStore();
   const first = await harness();

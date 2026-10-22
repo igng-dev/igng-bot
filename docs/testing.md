@@ -205,6 +205,27 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 未做：NAS 24 小时压缩率/费用观测与真实 QQ 对话验收；部署后需继续观察 compaction/turn、压缩后 pressure 和发送延迟。
 
+## 2026-10-22 模型耗时按 step 记账
+
+`model_attempt` 的 p95 曾出现 310 秒的假象：`accounting.js` 只在 `request/header` / `request/context` 更新请求起点，step 2 及以后没有 header 时沿用 turn 开始时间，把前面的 `qq_wait_for_messages` 与 compaction 时间算进了模型调用。
+
+修复：
+
+- `step/start` 记录本 step 的边界并清空上一 step 的请求/重试起点；
+- `request/header` 仍作为更精确的请求起点；
+- `llm/retry-started` 记录重试起点，失败 attempt 不再从 turn 开始计时；
+- `startedAt` 改为 `retryStartedAt ?? requestStartedAt ?? stepStartedAt ?? task.started`，`job_started_at` 仍保留 turn/compaction 起点。
+
+`NativeAccounting` 同时服务 historian、chat-analyst、slang-curator、work-moderation，修复对全部 Profile 的耗时字段生效；token 用量与计费金额不变。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `node --test --test-concurrency=1 yunying-dsh/tests/accounting.test.js yunying-dsh/tests/transcript.test.js` | **20 passed**；含 step 2、header、retry 和真实 Native latency span 对齐。 |
+| `npm --prefix yunying-dsh test`（离线，Node24.18.0） | **124 tests, 119 passed, 5 skipped**（opt-in DB）；其余套件无新增失败。 |
+| `python -m pytest tests -q`（本地 scratch CPython3.12.13，离线） | **210 passed, 42 skipped**。 |
+
+未做：NAS 部署后的生产样本核对；部署后抽 20 个 step≥2 的 span，与 `step/start → assistant/message` 对照。
+
 ## 梗 / 网络用语知识库（2026-10-12）
 
 详见 [功能、权限、预算与运维边界](slang-knowledge-base.md)。本地环境为共享 venv CPython3.14、Node24.18.0、固定官方 DSH、独立 loopback MariaDB11.8.6（33316）、缓存解包 ffmpeg8.0.1；数据库数据和模型 HTTP 全部为合成 fixture。未连接 NAS、真实 QQ、创作者或付费服务。
