@@ -4,6 +4,28 @@ from unittest.mock import patch
 from igngbot_v3.onebot_client import OneBotClient
 
 
+def test_connection_status_reflects_open_close_and_stop():
+    config = SimpleNamespace(
+        ONEBOT_NAME="fixture",
+        ONEBOT_WS_URL="ws://fixture",
+        ONEBOT_ACCESS_TOKEN="",
+    )
+    client = OneBotClient(config, lambda _message: None)
+
+    assert client.status()["connected"] is False
+    client.self_id = 12345
+    client._on_open(None)
+    assert client.status()["connected"] is True
+    assert client.status()["self_id"] == "12345"
+
+    client._on_close(None, 1000, "bye")
+    assert client.status()["connected"] is False
+
+    client._on_open(None)
+    client.stop()
+    assert client.status()["connected"] is False
+
+
 def test_websocket_client_sends_authorization_as_header_line():
     config = SimpleNamespace(
         ONEBOT_NAME="fixture",

@@ -25,6 +25,9 @@ sync_config() {
   nas "mkdir -p '$NAS_ROOT/dsh-runtime' '$NAS_ROOT/v4-backups' '$NAS_ROOT/broker-work'; chmod 700 '$NAS_ROOT/v4-backups'; chown 1000:1001 '$NAS_ROOT/dsh-runtime' '$NAS_ROOT/broker-work'"
   nas "if [ ! -s '$NAS_ROOT/.v4-rollback-image' ]; then docker inspect --format '{{.Config.Image}}' \$(cd '$NAS_ROOT' && docker compose ps -q bot) > '$NAS_ROOT/.v4-rollback-image'; test -s '$NAS_ROOT/.v4-rollback-image'; cp '$NAS_ROOT/docker-compose.yml' '$NAS_ROOT/v4-backups/docker-compose.v3.yml'; cp '$NAS_ROOT/.env' '$NAS_ROOT/v4-backups/.env.v3'; chmod 600 '$NAS_ROOT/v4-backups/.env.v3'; fi"
   scp -q -o BatchMode=yes -o StrictHostKeyChecking=yes "$COMPOSE_DIR/docker-compose.yml" "$COMPOSE_DIR/docker-compose.v4.yml" "$NAS_TARGET:$NAS_ROOT/"
+  nas "mkdir -p '$NAS_ROOT/napcat'"
+  scp -rpq -o BatchMode=yes -o StrictHostKeyChecking=yes "$COMPOSE_DIR/napcat/." "$NAS_TARGET:$NAS_ROOT/napcat/"
+  nas "chmod 755 '$NAS_ROOT/napcat/run-snowluma-after-login.sh'; chmod 644 '$NAS_ROOT/napcat/pt-login-probe.py' '$NAS_ROOT/napcat/supervisord.conf'"
   local staged_env
   staged_env="$(mktemp)"
   chmod 600 "$staged_env"
@@ -66,8 +69,10 @@ case "${1:-}" in
   sync) sync_config;;
   images) images;;
   up) up;;
+  napcat) sync_config; nas "cd '$NAS_ROOT' && $compose up -d --no-build napcat && $compose ps napcat";;
+  watchdog) bash "$REPO_DIR/deploy/deploy-nas.sh" watchdog;;
   status) nas "cd '$NAS_ROOT' && $compose ps";;
   logs) nas "cd '$NAS_ROOT' && $compose logs -f --tail=100 bot broker yunying";;
   rollback) rollback;;
-  *) echo 'Usage: deploy-v4-nas.sh sync|images|up|status|logs|rollback' >&2; exit 1;;
+  *) echo 'Usage: deploy-v4-nas.sh sync|images|up|napcat|watchdog|status|logs|rollback' >&2; exit 1;;
 esac

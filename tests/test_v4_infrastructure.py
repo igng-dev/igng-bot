@@ -10,8 +10,60 @@ from PIL import Image
 from igngbot_v4.settings import Settings, conversation_key, signed_conversation
 from igngbot_v4.journal import ingress_identity
 from igngbot_v4.views import message_view, row_images
-from igngbot_v4.main import Infrastructure, normalize_notice
+from igngbot_v4.main import Infrastructure, _close_notifier, normalize_notice
 from igngbot_v3.onebot_client import OneBotClient
+
+
+def test_shutdown_closes_notifier_and_never_uses_missing_stop():
+    class Notifier:
+        def __init__(self):
+            self.closed = 0
+
+        async def close(self):
+            self.closed += 1
+
+    class BrokenNotifier:
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    async def scenario():
+        notifier = Notifier()
+        await _close_notifier(notifier)
+        await _close_notifier(None)
+        assert notifier.closed == 1
+        # A failing notifier must not abort the remaining infrastructure cleanup.
+        await _close_notifier(BrokenNotifier())
+
+    asyncio.run(scenario())
+
+
+def test_health_payload_exposes_onebot_state_and_keeps_db_failures_at_503():
+    app = Infrastructure.__new__(Infrastructure)
+    app._stopping = False
+    app.conn = MagicMock()
+    app.client = MagicMock()
+    app.client.status.return_value = {
+        "connected": True,
+        "running": True,
+        "self_id": "12345",
+        "retry_delay": 1,
+        "consecutive_failures": 0,
+    }
+
+    payload, status = app.health_payload()
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["onebot"]["connected"] is True
+
+    del app.client
+    payload, status = app.health_payload()
+    assert status == 200
+    assert payload["onebot"] == {"connected": False}
+
+    app.conn.ping.side_effect = RuntimeError("database unavailable")
+    payload, status = app.health_payload()
+    assert status == 503
+    assert payload == {"ok": False}
 
 
 def test_canonical_conversation_and_durable_event_dedup_identity():
