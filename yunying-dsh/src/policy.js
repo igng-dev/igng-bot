@@ -27,7 +27,12 @@ export function settings(env = process.env) {
     provider: env.YUNYING_MODEL_PROVIDER || 'deepseek-official', model: env.YUNYING_MODEL || 'deepseek-v4-flash',
     maxTokens: integer(env.YUNYING_MAX_TOKENS, 256, 32768, 4096),
     nicknames: (env.YUNYING_NICKNAMES || '云萤,莹宝').split(',').map(s => s.trim()).filter(Boolean),
-    batchWindowMs: 8000, preSleepWaitMs: 300000, minQuietMs: 10000,
+    batchWindowMs: 8000,
+    // Donor pre-sleep observation window. Keep the 300s default; operators may
+    // lower it only for a test group after observing the post-compaction reply
+    // latency. The tool prompt and dive credit still use this same value.
+    preSleepWaitMs: integer(env.YUNYING_PRE_SLEEP_WAIT_MS, 60000, 300000, 300000),
+    minQuietMs: 10000,
     // One tool call may finish the donor's whole pre-sleep observation window
     // instead of returning partial credit the model has to chain. The donor
     // prompt still receives the same result fields; only the number of model

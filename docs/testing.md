@@ -226,6 +226,22 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 未做：NAS 部署后的生产样本核对；部署后抽 20 个 step≥2 的 span，与 `step/start → assistant/message` 对照。
 
+## 2026-10-22 wait 观察窗口配置边界
+
+`qq_wait_for_messages` 的 300 秒沉睡前观察是 donor 行为，不是 compaction 性能问题。本轮只暴露受控配置，不改变生产默认值：
+
+- `YUNYING_PRE_SLEEP_WAIT_MS`：60000–300000，默认 300000；同时进入 `qq_get_prompt` 的 `recommendations.preSleepWaitMs`。
+- 生产 `.env.v4.example` 保留 300000；只有测试群验证“回复延迟、漏回、潜水行为”后才考虑调低。
+- 不改 donor Prompt 字节，不把 wait 与 compaction 修复混在一起。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `node --test --test-concurrency=1 yunying-dsh/tests/policy.test.js yunying-dsh/tests/social.test.js` | **15 passed**；默认值、边界校验和既有 wait 语义均通过。 |
+| `npm --prefix yunying-dsh test`（离线，Node24.18.0） | **126 tests, 121 passed, 5 skipped**（opt-in DB）；其余套件无新增失败。 |
+| `python -m pytest tests -q`（本地 scratch CPython3.12.13，离线） | **210 passed, 42 skipped**。 |
+
+未做：真实测试群的 wait 缩短 A/B；生产仍使用 300000。
+
 ## 梗 / 网络用语知识库（2026-10-12）
 
 详见 [功能、权限、预算与运维边界](slang-knowledge-base.md)。本地环境为共享 venv CPython3.14、Node24.18.0、固定官方 DSH、独立 loopback MariaDB11.8.6（33316）、缓存解包 ffmpeg8.0.1；数据库数据和模型 HTTP 全部为合成 fixture。未连接 NAS、真实 QQ、创作者或付费服务。
