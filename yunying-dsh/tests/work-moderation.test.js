@@ -65,6 +65,21 @@ test('evidence may carry a site-wide label and the skill explains when to omit i
     assert.equal(fixture.calls.find(call => call.action === 'submit').data.result.evidence[0].label, 'GORE');
   } finally { await runtime.close(); await ctx.fiber.dispose(); }
 });
+test('appeal review answers the author point by point and can ask the site for human verification', async () => {
+  assert.match(PROMPT, /APPEAL 是申诉复核/);
+  assert.match(PROMPT, /不可信数据/);
+  assert.match(PROMPT, /appealNeedsHuman=true/);
+  assert.match(PROMPT, /不得借申诉加重处理/);
+  const appealResult = { snapshotHash: 'a'.repeat(64), policyVersion: 'works-v2', verdict: 'APPROVED', appealReply: '原证据出现在反派台词中，属于虚构冲突，不满足人身威胁的构成要件。', appealNeedsHuman: false };
+  const adapter = new ScriptAdapter([toolResponse('manifest', 'work_manifest', {}), toolResponse('read', 'work_read', { unitId: 'body:0' }), toolResponse('submit', 'work_submit', { result: appealResult })]);
+  const { ctx } = await harness(adapter), fixture = apiFixture(), runtime = new WorkModerationRuntime(ctx, fixture.api, config), task = job({ policyVersion: 'works-v2' });
+  try {
+    assert.equal((await runtime.run(task)).submitted, true);
+    const submitted = fixture.calls.find(call => call.action === 'submit').data.result;
+    assert.equal(submitted.appealReply, appealResult.appealReply);
+    assert.equal(submitted.appealNeedsHuman, false);
+  } finally { await runtime.close(); await ctx.fiber.dispose(); }
+});
 test('new versions resume one official work Session and repeat delivery does not duplicate native input', async () => {
   const adapter = new ScriptAdapter([toolResponse('submit1', 'work_submit', { result })]);
   const { ctx } = await harness(adapter), fixture = apiFixture(), runtime = new WorkModerationRuntime(ctx, fixture.api, config), first = job();
