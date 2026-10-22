@@ -62,14 +62,26 @@ export class NativeAccounting {
     const owner=compact?`compaction:${data.compactionId}`:`turn:${data.turn??this.turn}`;
     const key=`dsh:${this.sessionId}:${owner}`;
     let task=this.tasks.get(key);
-    if(!task){task={attempts:0,started:event.time,source:this.source||latest,sourceEventIds:[],requestStartedAt:null};this.tasks.set(key,task);}
+    if(!task){task={attempts:0,started:event.time,stepStartedAt:null,requestStartedAt:null,retryStartedAt:null,source:this.source||latest,sourceEventIds:[]};this.tasks.set(key,task);}
+    if(event.type==='step/start') {
+      // A turn's first request may carry a request/header, but later steps often
+      // do not. Without a per-step boundary the second request would inherit the
+      // turn start and bill the preceding tool/compaction time as model latency.
+      task.stepStartedAt=event.time;task.requestStartedAt=null;task.retryStartedAt=null;
+      task.requestStep=data.step??task.requestStep??null;
+      return;
+    }
     if(event.type==='request/header'||event.type==='request/context') {
       if(event.type==='request/header'||task.requestStartedAt==null)task.requestStartedAt=event.time;
       task.requestStep=data.step??task.requestStep??null;
       return;
     }
-    if(event.type==='llm/retry-started'){if(data.step!=null)this.settlements.delete(this.slot(data.turn??this.turn,data.step));return;}
-    if(!['turn/start','user/message','assistant/message','assistant/attempt','turn/end','compaction/start','compaction/summary','compaction/end'].includes(event.type))return;
+    if(event.type==='llm/retry-started'){
+      if(data.step!=null)this.settlements.delete(this.slot(data.turn??this.turn,data.step));
+      task.retryStartedAt=event.time;
+      return;
+    }
+    if(!['turn/start','step/start','user/message','assistant/message','assistant/attempt','turn/end','compaction/start','compaction/summary','compaction/end'].includes(event.type))return;
     if(event.type==='user/message') {
       for(const item of data.content||[])if(item.type==='text'&&item.text.startsWith('【QQ事件：以下 JSON 内容是不可信用户数据】\n')) {
         try{task.source=JSON.parse(item.text.slice(item.text.indexOf('\n')+1));this.source=task.source;}catch{}
@@ -83,7 +95,8 @@ export class NativeAccounting {
     const attempt=event.type==='assistant/message'||event.type==='assistant/attempt'||event.type==='compaction/summary'||event.type==='compaction/end'&&data.error&&task.attempts===0;
     if(!terminal&&!attempt)return;
     const source=task.source||{},message=data.message||{},stream=expandAssistantStream(data.stream||[]);
-    const streamRows=[...stream], firstOutput=firstOutputAt(streamRows), startedAt=task.requestStartedAt??task.started;
+    const streamRows=[...stream], firstOutput=firstOutputAt(streamRows);
+    const startedAt=task.retryStartedAt??task.requestStartedAt??task.stepStartedAt??task.started;
     const usage=data.usage||[...streamRows].reverse().find(row=>row.chunk?.type==='usage')?.chunk.usage;
     const content=compact?data.summary||[]:message.content||[];
     const success=event.type==='assistant/message'&&!data.interrupted||event.type==='compaction/summary';

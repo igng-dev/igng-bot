@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {NativeAccounting,tokenBreakdown,traceIdForTask} from '../src/accounting.js';
 
 const accounting=()=>new NativeAccounting('session-1','group:1001',{model:'config-model',provider:'config-provider'});
-const message=(seq,{turn=1,step=1,usage,stream,source,interrupted}={})=>({seq,time:1000+seq,type:'assistant/message',
+const message=(seq,{turn=1,step=1,usage,stream,source,interrupted,time=1000+seq}={})=>({seq,time,type:'assistant/message',
   data:{turn,step,message:{id:`m-${seq}`,source:source??{kind:'model',provider:'newapi',model:'cc/deepseek/deepseek-v4.1-flash'},content:[{type:'text',text:'ok'}]},usage,stream,...(interrupted?{interrupted:true}:{})}});
 
 test('token breakdown carves reasoning out of output and keeps buckets additive',()=>{
@@ -73,6 +73,41 @@ test('a different step is a separate attempt, not a replacement',()=>{
   acct.apply(message(1,{step:1,usage:{inputTokens:10,outputTokens:5}}));
   const next=acct.apply(message(2,{step:2,usage:{inputTokens:12,outputTokens:6}}));
   assert.equal(next.supersedes_seq,undefined);
+});
+
+test('later steps start at their own step boundary when no request header follows',()=>{
+  const acct=accounting();
+  acct.apply({seq:1,time:1000,type:'turn/start',data:{turn:1}});
+  acct.apply({seq:2,time:1001,type:'step/start',data:{turn:1,step:1}});
+  acct.apply(message(3,{turn:1,step:1,time:1050,usage:{inputTokens:10,outputTokens:5}}));
+  acct.apply({seq:4,time:2000,type:'step/start',data:{turn:1,step:2}});
+  const record=acct.apply(message(5,{turn:1,step:2,time:2050,usage:{inputTokens:12,outputTokens:6}}));
+  assert.equal(record.job_started_at,1000);
+  assert.equal(record.started_at,2000);
+  assert.equal(record.duration_ms,50);
+});
+
+test('a request header after the step boundary is the precise model start',()=>{
+  const acct=accounting();
+  acct.apply({seq:1,time:1000,type:'turn/start',data:{turn:1}});
+  acct.apply({seq:2,time:2000,type:'step/start',data:{turn:1,step:2}});
+  acct.apply({seq:3,time:2010,type:'request/header',data:{header:{config:{provider:'newapi',model:'model'}}}});
+  const record=acct.apply(message(4,{turn:1,step:2,time:2050,usage:{inputTokens:12,outputTokens:6}}));
+  assert.equal(record.started_at,2010);
+  assert.equal(record.duration_ms,40);
+});
+
+test('a retry starts at the retry boundary, not the turn or first attempt',()=>{
+  const acct=accounting();
+  acct.apply({seq:1,time:1000,type:'turn/start',data:{turn:1}});
+  acct.apply({seq:2,time:2000,type:'step/start',data:{turn:1,step:2}});
+  acct.apply({seq:3,time:2100,type:'llm/retry-started',data:{turn:1,step:2}});
+  const record=acct.apply({seq:4,time:2150,type:'assistant/attempt',data:{turn:1,step:2,
+    message:{id:'attempt-1',source:{kind:'model',provider:'newapi',model:'model'},content:[]},
+    usage:{inputTokens:12,outputTokens:0}}});
+  assert.equal(record.job_started_at,1000);
+  assert.equal(record.started_at,2100);
+  assert.equal(record.duration_ms,50);
 });
 
 test('compaction summaries are separate billed calls',()=>{
