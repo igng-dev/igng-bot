@@ -154,6 +154,19 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 新增 Node 回归：`progress.test.js` 覆盖模式选择/文本截断/心跳文案、转发只发中间步骤且不发收尾文本、每轮上限、心跳计数与轮末停止、`off` 全关。本机 Node 为 v22.22.1（`engines>=24`，部署镜像与 CI 为 Node24）；真实模型风格、真实 QQ 心跳送达与 NAS 长时运行仍未验收。
 
+### Gemini 原生进度工具（2026-10-22）
+
+为 `YUNYING_MODELS_WITHOUT_PROGRESS` 中的模型增加本地 `progress_note(text)` 工具：模型在搜索、打开网页、处理视频等耗时动作前调用，运行时在 `tool/call` 事件中复用现有 `sendProgress` 发送，随后才执行真实工具；每轮最多 2 条、间隔至少 8 秒、单条截断 80 字符，刚发过 note 的 30 秒内不补泛化心跳。工具不需要 QQ capability token，但仍受 agent/session guard、聊天模式、禁言和发送账本约束；心跳保留为兜底。提示词仅在 silent 模型下注入，不改 donor Prompt 字节。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `npm --prefix yunying-dsh run check` | 通过。 |
+| `npm --prefix yunying-dsh test`（Node24.18.0，共享 node_modules，离线） | **117 tests, 112 passed, 5 skipped**（5 条为真实 MySQL opt-in）。 |
+| `bash scripts/privacy-scan.sh`、`bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh`、`git diff --check` | 通过。 |
+| 生产网关同款 `gemini-flash` 最小冒烟（临时脚本，不执行工具） | 同一 step 返回 `progress_note(text="稍等，我查一下东京现在的天气。")` + `web_search`，证明单字段工具可被真实模型调用。 |
+
+新增 Node 回归在 `progress.test.js`：helper 覆盖 silent 判定/note 截断/30 秒心跳避让；native 测试覆盖工具免 token 本地执行、进度经 `/send` 发出、8 秒间隔抑制第二条、刚发 note 后不发心跳。未做：NAS 部署、真实 QQ 群送达、长时间运行与真实用户 A/B 验收；PR CI 结果见 PR 描述。
+
 ## Token 消耗治理：压缩策略、等待链、注入上限与步骤预算
 
 2026-10-07 生产诊断发现单群会话累计 9744 万未缓存输入 token、单日网关账单 $69.76：`llm-pi-ai` 声明 `contextWindow: 65536` 时，官方 `compaction-basic` 默认 `headroomTokens: 65536` 使 `contextWindow − maxTokens − headroom` 为负，主动压缩被静默跳过，历史涨到每次请求 37 万 token；每个工具步骤（尤其 `qq_wait_for_messages` 的链式续等）都重发整段 Session。修复不换模型、不改 donor Prompt 字节、不调触发频率：

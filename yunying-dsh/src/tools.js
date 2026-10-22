@@ -7,6 +7,7 @@ import { safeFetch } from '../donor/qq-bridge/safe-fetch.js';
 import { authorize, PolicyError, bounded, integer, safeNetworkQuery } from './policy.js';
 import { CATEGORY_TTL_HOURS } from './knowledge.js';
 import { rankSlang } from './slang.js';
+import { PROGRESS_NOTE_TOOL, progressNoteEnabled } from './progress.js';
 const descriptions = JSON.parse(readFileSync(new URL('../donor/qq-bridge/tool-descriptions.json', import.meta.url)));
 const str = description => ({ type: 'string', description });
 const num = description => ({ type: 'integer', description });
@@ -28,7 +29,7 @@ export function registerTools(ctx, runtime) {
   const { state, store, config, infra } = runtime;
   const names = new Set(['skill']);
   const actor = () => ({ key:state.key, sessionId:state.sessionId, seenSeqs:state.modelSeenSeqs, qqs:state.actorQqs() });
-  const register = (name, properties, required, execute, extras = {}, description) => {
+  const register = (name, properties, required, execute, extras = {}, description, local = false) => {
     const definition = {
       name, description: description || descriptions[name] || name,
       parameters: object(properties, required),
@@ -36,7 +37,10 @@ export function registerTools(ctx, runtime) {
       timeoutMs: name.includes('wait_for_messages') ? 735000 : name.includes('send') ? 120000 : name.includes('web_') ? 45000 : 30000,
       // DSH's tool scheduler supplies exclusive mutation ordering and cooperative cancellation.
       async execute(args, exec) {
-        authorize(state, args, exec); exec.signal.throwIfAborted();
+        // Local-only tools still pass the agent/session guard below; they do not
+        // need a QQ capability token because they only acknowledge a local action.
+        if (!local) authorize(state, args, exec);
+        exec.signal.throwIfAborted();
         await runtime.refreshPolicy();
         if (!store.healthy || !runtime.permitted()) throw new PolicyError('会话权限已关闭或运行实例已失去权限');
         try{
@@ -60,6 +64,14 @@ export function registerTools(ctx, runtime) {
     return definition;
   };
   const standard = (name, properties, execute, extra = {}, required = [], description) => register(name, {...props,...properties}, ['key','token',...required], execute, extra, description);
+  // Silent models (Gemini Flash on the current gateway) do not emit interim
+  // assistant text by default. Give them an explicit, local tool whose text is
+  // carried as tool arguments; runtime.progressEvent sends it before the real
+  // tool runs. It is never a final reply and never requires the session token.
+  if (progressNoteEnabled(config)) register(PROGRESS_NOTE_TOOL, {
+    text: str('给群友看的一句进度，最多40字；只在本轮搜索/打开网页/看视频等耗时动作前调用')
+  }, ['text'], async () => ({ ok:true, accepted:true }), { timeoutMs:10000 },
+  '在真正开始联网搜索、打开网页、处理视频等耗时动作前，给群友留一句能看到的过程进度。只用于这类动作；普通看群、等待、发表情、记忆和最终答复不要调用。它不是回复，不会代替 qq_send_message。', true);
   standard('qq_get_prompt', {}, async () => ({ ok:true, key:state.key,
     role:{ role:'云萤', content:'你是云萤，长期在线的 QQ 群友。按原始二代仿真规则参与。', version:1 },
     recommendations: { defaultInfinite:true, sleepMinMs:300000, sleepMaxMs:7200000, probability:.20,

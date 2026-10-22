@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SocialRuntime } from '../src/runtime.js';
-import { progressMode, heartbeatText, forwardableText, emptyProgress, countToolCall, isReplyTool, isSubstantiveTool } from '../src/progress.js';
+import { PROGRESS_NOTE_TOOL, progressMode, progressNoteEnabled, progressNoteText, heartbeatAllowed, heartbeatText, forwardableText, emptyProgress, countToolCall, isProgressNoteTool, isReplyTool, isSubstantiveTool } from '../src/progress.js';
 import { FixtureStore,harness,ScriptAdapter,testSettings,textResponse,toolResponse,textToolResponse,event,settle } from './helpers.js';
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
@@ -9,14 +9,28 @@ test('progress helpers: mode selection, bounded text and heartbeat wording',()=>
  assert.equal(progressMode({progressReports:'auto',progressModelsWithout:new Set(['silent']),model:'silent'}),'heartbeat');
  assert.equal(progressMode({progressReports:'auto',progressModelsWithout:new Set(),model:'deepseek-v4-flash'}),'forward');
  assert.equal(progressMode({progressReports:'off',progressModelsWithout:new Set(['silent']),model:'silent'}),'off');
+ assert.equal(progressNoteEnabled({progressReports:'auto',progressModelsWithout:new Set(['silent']),model:'silent'}),true);
+ assert.equal(progressNoteEnabled({progressReports:'auto',progressModelsWithout:new Set(),model:'deepseek-v4-flash'}),false);
+ assert.equal(progressNoteEnabled({progressReports:'off',progressModelsWithout:new Set(['silent']),model:'silent'}),false);
  // Reasoning is not process output and blank text is not worth a message.
  assert.equal(forwardableText([{type:'reasoning',text:'内部推理不算'},{type:'text',text:'  '}]),null);
  assert.equal(forwardableText([{type:'text',text:'查一下最近的记录'}]),'查一下最近的记录');
  const cut=forwardableText([{type:'text',text:'字'.repeat(500)}]);
  assert.equal(cut.length,400);assert.ok(cut.endsWith('…'));
+ assert.equal(progressNoteText('  我查一下这个  '),'我查一下这个');
+ assert.equal(progressNoteText('  \n '),null);
+ const longNote=progressNoteText('字'.repeat(200));
+ assert.equal(longNote.length,80);assert.ok(longNote.endsWith('…'));
+ assert.equal(isProgressNoteTool(PROGRESS_NOTE_TOOL),true);
+ assert.equal(isProgressNoteTool('web_search'),false);
  const progress=emptyProgress(3,1000);
  assert.equal(progress.substantive,false);
+ assert.equal(progress.notes,0);
  assert.equal(heartbeatText(progress,31000),'还在处理（已 30 秒），稍等。');
+ assert.equal(heartbeatAllowed(progress,{progressNoteHoldMs:30000},1000),true);
+ progress.notes=1;progress.lastNoteAt=1000;
+ assert.equal(heartbeatAllowed(progress,{progressNoteHoldMs:30000},10000),false);
+ assert.equal(heartbeatAllowed(progress,{progressNoteHoldMs:30000},32000),true);
  countToolCall(progress,'qq_get_unread_messages');
  assert.equal(progress.substantive,false,'social bookkeeping is not announced');
  countToolCall(progress,'web_search');
@@ -55,6 +69,33 @@ test('forward mode keeps the per-turn cap',async()=>{
   await runtime.accept(event('forward-2','group:1001',{atBot:true}));await settle(runtime);await pause(10);
   assert.equal(sent.length,1);assert.equal(sent[0].body.message,'第一条进度');
  }finally{await runtime.close();await ctx.fiber.dispose();}
+});
+
+test('silent model progress_note sends user-facing text and holds the fallback heartbeat',async()=>{
+ const {ctx,adapter}=await harness();const store=new FixtureStore(),sent=[];
+ const gate=Promise.withResolvers();
+ const runtime=new SocialRuntime(ctx,store,{...testSettings(),progressModelsWithout:new Set(['script']),progressIntervalMs:20,progressMaxNotesPerTurn:2},async(path,body)=>{sent.push({path,body});return {ok:true,message_id:'9010'};});
+ try{
+  const conv=await runtime.load('group:1001');
+  conv.webSearch=async()=>({query:'今天天气',results:[],untrusted:true});
+  const args={key:conv.state.key,token:conv.state.agentToken};
+  const noteTool=conv.handle.agent.ctx.tools.schemas(conv.handle.agent).find(tool=>tool.name===PROGRESS_NOTE_TOOL);
+  assert.ok(noteTool,'silent models receive the dedicated progress tool');
+  const direct=await conv.handle.agent.ctx.tools.execute({agent:conv.handle.agent,callId:'note-direct',name:PROGRESS_NOTE_TOOL,arguments:{text:'直接测试'},signal:new AbortController().signal});
+  assert.equal(direct.isError,false,'progress_note is local and does not need key/token');
+  adapter.script.push(toolResponse('note-1',PROGRESS_NOTE_TOOL,{text:'我查一下这个'}),toolResponse('note-2',PROGRESS_NOTE_TOOL,{text:'第二条不该发'}),toolResponse('search-1','web_search',{...args,query:'今天天气'}),async()=>{await gate.promise;return textResponse('最终答复不会自动发送');});
+  await runtime.accept(event('note-turn-1','group:1001',{atBot:true}));
+  await pause(40);
+  const notes=sent.filter(item=>item.body.requestId.includes(':note:'));
+  assert.equal(notes.length,1,'the per-turn gap suppresses a second immediate note');
+  assert.equal(notes[0].body.message,'我查一下这个');
+  assert.ok(notes[0].body.requestId.startsWith('progress:'));
+  const firstSystem=adapter.requests[0].messages.filter(message=>message.role==='system').flatMap(message=>message.content).filter(part=>part.type==='text').map(part=>part.text).join('\n');
+  assert.ok(firstSystem.includes('【过程进度】'),'the silent-model prompt teaches when to call the tool');
+  assert.equal(sent.filter(item=>item.body.requestId.includes(':hb:')).length,0,'a fresh note holds the generic heartbeat');
+  assert.ok(!JSON.stringify(sent).includes('最终答复'));
+  gate.resolve();await settle(runtime);await pause(20);
+ }finally{gate.resolve();await runtime.close();await ctx.fiber.dispose();}
 });
 
 test('heartbeat stays quiet while a social turn only reads and replies',async()=>{

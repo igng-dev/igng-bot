@@ -58,6 +58,10 @@ export function settings(env = process.env) {
     progressModelsWithout: new Set((env.YUNYING_MODELS_WITHOUT_PROGRESS || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean)),
     progressIntervalMs: integer(env.YUNYING_PROGRESS_INTERVAL_MS, 5000, 300000, 30000),
     progressMinGapMs: 8000, progressMaxForwardPerTurn: 6, progressMaxHeartbeatPerTurn: 20,
+    // Silent models get a dedicated user-facing progress tool. Keep it rarer
+    // than forwarded text: at most two notes per turn and no note within 8s of
+    // the previous one. A fresh note also holds generic heartbeats for 30s.
+    progressMaxNotesPerTurn: 2, progressNoteMinGapMs: 8000, progressNoteHoldMs: 30000,
     // Style learning is autonomous but rate-limited. These are conservative
     // starting points, not claims about an objectively correct learning rate.
     styleRevisionCooldownMs: integer(env.YUNYING_STYLE_COOLDOWN_MS, 0, 7 * 24 * 60 * 60 * 1000, 30 * 60 * 1000),

@@ -10,7 +10,7 @@ import { compactModelMessage, serializeModelData } from '../donor/qq-bridge/qq-m
 import { allowed, bounded, canonicalKey, PolicyError } from './policy.js';
 import { renderStyle } from './style.js';
 import { projectEvent, toolResultMode } from './transcript.js';
-import { countToolCall, emptyProgress, forwardableText, heartbeatText, isReplyTool, isStyleTool, progressMode } from './progress.js';
+import { countToolCall, emptyProgress, forwardableText, heartbeatAllowed, heartbeatText, isProgressNoteTool, isReplyTool, isStyleTool, progressMode, progressNoteEnabled, progressNoteText } from './progress.js';
 import { renderKnowledge, shouldConsultKnowledge } from './knowledge.js';
 import { SlangContext } from './slang.js';
 const donorPreset = yaml.load(readFileSync(new URL('../donor/qq-bridge/agent.cordis.yml',import.meta.url),'utf8'));
@@ -142,6 +142,8 @@ export class SocialRuntime {
         const muteInfo = state.muteStatus();
         return muteInfo.isMuted ? `【禁言感知】你当前已被群管理员禁言，还剩约 ${muteInfo.remainingSeconds} 秒解禁。禁言期间你无法发送文本消息，但可以标记已读或设置唤醒条件。` : '';
       }});
+      if(progressNoteEnabled(this.config,this.config.model)) scoped.systemPrompt.section({name:'yunying:progress',order:5,text:
+        '【过程进度】在真正开始联网搜索、打开网页、处理视频等可能超过几秒的动作前，先调用 progress_note，用一句不超过 40 字的自然中文告诉群友你正在做什么（例如“我查一下这个”）。这条会作为过程进度单独显示在群里，不是正式回复。普通看群、等待、发表情、记忆、发送消息不要调用；一轮最多 2 条；不要写“我调用了 xx 工具”，也不要用它代替 qq_send_message 的最终答复。搜索前仍然不需要先发正式回复。'});
       scoped.on('system-prompt/assemble',async (assembly,context,next)=>{
         if(context?.scope?.id===state.sessionId){
           await refreshStyle(runtime);
@@ -415,10 +417,13 @@ export class SocialRuntime {
     else if(event.type==='tool/call'){
       if(runtime.progress){
         const name=String(data.name||'');
-        countToolCall(runtime.progress,name);
-        // The reply is already on its way to the chat, so a heartbeat after this
-        // would only report work the other person has already seen finish.
-        if(isReplyTool(name))runtime.progress.quiet=true;
+        if(isProgressNoteTool(name))this.sendToolProgress(runtime,data);
+        else {
+          countToolCall(runtime.progress,name);
+          // The reply is already on its way to the chat, so a heartbeat after this
+          // would only report work the other person has already seen finish.
+          if(isReplyTool(name))runtime.progress.quiet=true;
+        }
       }
     }
     else if(event.type==='assistant/message')this.forwardProgress(runtime,event);
@@ -445,13 +450,28 @@ export class SocialRuntime {
       if(runtime.progress!==progress||progress.quiet)return;
       // Keep checking until the turn ends. A social turn may only start a search
       // after the first interval, and a wait only pauses the announcement.
-      const announce=this.permitted(runtime)&&!runtime.state.waiting&&progress.substantive&&!progress.styleOnly&&progress.heartbeats<this.config.progressMaxHeartbeatPerTurn;
+      const announce=this.permitted(runtime)&&!runtime.state.waiting&&progress.substantive&&!progress.styleOnly
+        &&progress.heartbeats<this.config.progressMaxHeartbeatPerTurn&&heartbeatAllowed(progress,this.config);
       if(announce){
         progress.heartbeats++;
         await this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:hb:${progress.heartbeats}`,heartbeatText(progress));
       }
       if(runtime.progress===progress&&!progress.quiet)this.armHeartbeat(runtime);
     });
+  }
+  sendToolProgress(runtime,data) {
+    // The model called progress_note. This event is emitted before its tool
+    // handler runs, so the note reaches QQ before the real search/fetch/video
+    // work starts. Keep it user-facing, rate-limited and never a reply.
+    const progress=runtime.progress;
+    if(runtime.progressMode!=='heartbeat'||!progress||this.stopping||!this.permitted(runtime)||runtime.state.waiting||progress.quiet)return;
+    if(progress.notes>=(this.config.progressMaxNotesPerTurn??2))return;
+    const now=Date.now();
+    if(now-progress.lastNoteAt<(this.config.progressNoteMinGapMs??8000))return;
+    let args;try{args=JSON.parse(data.arguments||'{}');}catch{return;}
+    const text=progressNoteText(args.text);if(!text)return;
+    progress.notes++;progress.lastNoteAt=now;
+    void this.sendProgress(runtime,`${runtime.state.sessionId}:${progress.turn}:note:${progress.notes}`,text).catch(error=>this.report(error));
   }
   forwardProgress(runtime,event) {
     if(runtime.progressMode!=='forward')return;
