@@ -31,6 +31,7 @@ python -m pip install -r requirements-dev.txt
 | `YUNYING_PROGRESS_INTERVAL_MS` | 心跳间隔毫秒，5000–300000，默认 30000。仅命中清单的模型启用；本轮必须出现过搜索或视频类工具、尚未发出回复、且会话仍有发言权，才会发送。读未读、发消息、等待、记忆这些社交动作不触发心跳。 |
 | `YUNYING_PROGRESS_REPORTS` | `auto`（默认）或 `off`；`off` 同时关闭过程报告转发与心跳。 |
 | `YUNYING_WAIT_CHAIN_MS` | 0–600000，默认 600000。`purpose="messages"` 的沉睡前观察在一次工具调用内最多连续等待这么久（实际以工具 735s 超时为上限）：模型为"按剩余时间继续等待"产生的每次续等不再各占一个整段 Session 的模型步骤；`0` 关闭链式等待（回到每次只等 `timeoutMs`）。 |
+| `YUNYING_PRE_SLEEP_WAIT_MS` | 60000–300000，默认 300000。沉睡前观察窗口；同时进入 `qq_get_prompt` 的 `recommendations.preSleepWaitMs`。生产保持 donor 默认，只有测试群验证回复延迟、漏回和潜水行为后才考虑降低；不属于 compaction 修复，不能用它替代 `YUNYING_WAIT_CHAIN_MS`。 |
 | `YUNYING_BOOTSTRAP_INJECT_LIMIT` | 0–500，默认 20。启动/恢复时最多把最近多少条未投递事件重放进原生 Session；更早的积压留在社会状态里，由未读/历史工具按需读取，不再永久抬高每次请求的上下文。显式 @/回复永远投递。 |
 | `YUNYING_MAX_STEPS_PER_TURN` | 4–200，默认 30。单轮模型步骤上限（安全网）：超过后取消该轮并保留 Inbox，由既有提醒/调度路径收尾。 |
 | `DSH_HOME` | 持久目录，包含官方 Profile、Session、附件与派生索引；生产必须挂卷并备份。 |
