@@ -104,14 +104,23 @@
 # window; on a smaller declared window they resolve to a negative pressure
 # budget and the plugin skips proactive compaction entirely (it only recovers
 # after a provider-confirmed overflow), which is how one Session grew past
-# 370k tokens per request. Trigger near 52k of a 262144-token window and keep
-# the most recent 16k verbatim; the donor's V2 context manager kept only
-# ~1600 tokens of message history, so this stays far more generous.
+# 370k tokens per request.
+#
+# DSH prices retained messages with a fixed 4-characters/token heuristic. That
+# underestimates this Chinese QQ profile by roughly 1.8x, while compaction is
+# triggered by the provider's real input count. The earlier 0.2 / 16k policy
+# therefore left the post-compaction floor (system + tools + retained tail)
+# at about 50k of a 52k trigger: every tool step compacted once or twice and
+# still stayed above threshold. At 0.4 the trigger is ~105k, and retaining 8k
+# (roughly 14k provider tokens) leaves enough headroom for a real reduction.
+# This is still far more history than the donor V2 context manager (~1600
+# tokens), and well below the 262144-token window, so it cannot reintroduce the
+# 370k overflow.
 - id: compaction-basic
   config:
-    thresholdRatio: 0.2
+    thresholdRatio: 0.4
     headroomTokens: 16384
-    retainTokens: 16384
+    retainTokens: 8192
     maxTokens: 16384
 - insert:
     - id: yunying-social

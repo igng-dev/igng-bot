@@ -81,7 +81,7 @@ DSH 官方 `llm-pi-ai` 已包含在固定 CLI 依赖中。可以在 `$DSH_HOME/p
           maxRetries: 2
 ```
 
-设置 `YUNYING_MODEL_PROVIDER=yunying-gateway`、`YUNYING_MODEL=gemini-flash`。示例 URL 为占位；key 仅通过已有 `.env` 注入。`contextWindow` 必须与该 route 实际可用的上下文容量一致：官方 `compaction-basic` 用它计算压力预算，声明过小（例如 65536）时 `contextWindow − maxTokens − headroomTokens` 为负，主动压缩会被静默跳过，只剩溢出后的强制恢复，历史因此可以涨到每次请求 37 万 token。YunYing bundle patch 同时为 `compaction-basic` 设置显式策略（`thresholdRatio: 0.2`、`headroomTokens: 16384`、`retainTokens: 16384`），在 262144 窗口下约 52k 触发、保留最近 16k；V2 donor 的 ContextManager 只保留约 1600 token 消息历史，因此这仍比二代宽松得多。
+设置 `YUNYING_MODEL_PROVIDER=yunying-gateway`、`YUNYING_MODEL=gemini-flash`。示例 URL 为占位；key 仅通过已有 `.env` 注入。`contextWindow` 必须与该 route 实际可用的上下文容量一致：官方 `compaction-basic` 用它计算压力预算，声明过小（例如 65536）时 `contextWindow − maxTokens − headroomTokens` 为负，主动压缩会被静默跳过，只剩溢出后的强制恢复，历史因此可以涨到每次请求 37 万 token。YunYing bundle patch 同时为 `compaction-basic` 设置显式策略（`thresholdRatio: 0.4`、`headroomTokens: 16384`、`retainTokens: 8192`、`maxTokens: 16384`），在 262144 窗口下约 105k 触发；DSH 的 4 字符/token 估算会低估中文 QQ 内容，因此保留量不能贴着触发阈值。当前值在压缩后仍留有约 40k 以上的估算余量，又远低于 262144 窗口，既避免每一步重复压缩，也不会重新引入 37 万 token 溢出。V2 donor 的 ContextManager 只保留约 1600 token 消息历史，当前保留量仍比二代宽松。部署前可用 `node scripts/check-yunying-compaction-config.mjs [profile patch]` 做只读预检；线上 operator patch 与本 bundle patch 必须保持一致。
 
 聊天模式沿用 `group_configs.is_chat_mode`。`/聊天模式` 由群 owner/admin 或 bot 管理员幂等切换；也可显式 `/聊天模式 开启|关闭`。网站现有 `isChatMode` PATCH 写同一字段，无须新建配置表。关闭时普通来信仍记录、可供已呼叫的 Agent 读取，但只允许明确 @ 或回复云萤开始模型轮次；名字提问和普通拍一拍不构成关闭模式的呼叫。
 

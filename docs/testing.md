@@ -186,6 +186,25 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 新增 Node 回归：durable 消息不再携带 `key`/重复 `plain`/false 默认值；bootstrap 只重放最近窗口且旧积压仍在社会状态；链式等待在一次工具调用内满足；单轮步骤预算取消后模型请求数有界。未做：NAS 生产部署、真实模型/QQ 验收、大历史会话首次压缩的线上耗时与费用观测。
 
+## 2026-10-22 Compaction 风暴修复
+
+生产近 7 天记录显示约 420 次 compaction、417 次可配对前后请求：压缩前 input 中位数 54,156、压缩后 53,402，中位只减少 636 tokens；170 次压缩后反而更大，394 次仍在 48k 以上。旧策略 `thresholdRatio: 0.2` 在 262144 窗口下约 52,428 触发，已经贴着压缩后的地板，导致工具步骤前反复压缩，单轮最高 33 次。
+
+修复不 fork DSH、不改 donor Prompt 字节：
+
+- `yunying-dsh/cordis.patch.yml` 与线上 operator patch 统一为 `thresholdRatio: 0.4`、`headroomTokens: 16384`、`retainTokens: 8192`、`maxTokens: 16384`；约 105k 触发，保留量和固定 prompt/tools 之间留出真实余量。
+- 新增 `scripts/check-yunying-compaction-config.mjs`：只读解析 bundle YAML 或 operator JSON，校验阈值、保留量和余量；线上 patch 与 bundle 可用同一脚本预检。
+- 新增 `yunying-dsh/tests/profile-config.test.js`：覆盖新策略、CLI 预检和旧 0.2 策略被拒绝。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `node --test yunying-dsh/tests/profile-config.test.js` | **3 passed**。 |
+| `npm --prefix yunying-dsh test`（离线，Node24.18.0，本地 scratch node_modules） | **120 tests, 115 passed, 5 skipped**（opt-in 数据库用例）。 |
+| `python -m pytest tests -q`（本地 scratch CPython3.12.13 venv，离线） | **210 passed, 42 skipped**。 |
+| `npm --prefix yunying-dsh run check`、`bash -n`、`sh -n`、`bash scripts/privacy-scan.sh`、`git diff --check` | 通过。 |
+
+未做：NAS 24 小时压缩率/费用观测与真实 QQ 对话验收；部署后需继续观察 compaction/turn、压缩后 pressure 和发送延迟。
+
 ## 梗 / 网络用语知识库（2026-10-12）
 
 详见 [功能、权限、预算与运维边界](slang-knowledge-base.md)。本地环境为共享 venv CPython3.14、Node24.18.0、固定官方 DSH、独立 loopback MariaDB11.8.6（33316）、缓存解包 ffmpeg8.0.1；数据库数据和模型 HTTP 全部为合成 fixture。未连接 NAS、真实 QQ、创作者或付费服务。
