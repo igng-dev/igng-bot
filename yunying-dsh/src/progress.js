@@ -8,11 +8,18 @@
 // Final answers stay tool-only: assistant text without tool calls is never
 // auto-sent, so the model keeps sole ownership of what is a real reply.
 //
+// A silent model can also call the dedicated `progress_note` tool before a
+// substantive action. That note is user-facing progress, not a reply, and gets
+// the same permission/ledger treatment as forwarded text. The heartbeat remains
+// a fallback when the model forgets or the tool is unavailable.
+//
 // A heartbeat is a stand-in for work the chat can see taking a long time
 // (looking something up, reading a page, handling a video). Ordinary social
 // tools — reading unread, sending, waiting, memory — never justify one, even
 // when the turn itself runs longer than the interval.
 export const PROGRESS_TEXT_LIMIT = 400;
+export const PROGRESS_NOTE_LIMIT = 80;
+export const PROGRESS_NOTE_TOOL = 'progress_note';
 const SEARCH_TOOLS = new Set(['web_search', 'web_fetch', 'mcp__web-search-safe__web_search', 'mcp__web-search-safe__web_fetch']);
 const STYLE_TOOLS = new Set(['style_read', 'style_patch']);
 const SUBSTANTIVE_TOOLS = new Set(['qq_video_open', 'qq_video_probe', 'qq_video_extract_frames', 'qq_video_extract_audio', 'qq_video_transcode', 'qq_send_artifact']);
@@ -22,10 +29,32 @@ export function progressMode(config, model = config.model) {
   return config.progressModelsWithout?.has?.(model) ? 'heartbeat' : 'forward';
 }
 
+/** Whether the silent-model path should advertise the dedicated progress tool. */
+export function progressNoteEnabled(config, model = config.model) {
+  return progressMode(config, model) === 'heartbeat';
+}
+
 export function emptyProgress(turn, now = Date.now()) {
   return { turn, startedAt: now, steps: 0, commands: 0, searches: 0,
     substantive: false, quiet: false, styleOnly: null,
-    lastForwardAt: 0, forwarded: 0, heartbeats: 0 };
+    lastForwardAt: 0, forwarded: 0, heartbeats: 0, notes: 0, lastNoteAt: 0 };
+}
+
+/** A short, user-facing note from the dedicated progress tool. */
+export function isProgressNoteTool(name) {
+  return name === PROGRESS_NOTE_TOOL;
+}
+
+export function progressNoteText(value) {
+  const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  if (text.length < 2) return null;
+  return text.length <= PROGRESS_NOTE_LIMIT ? text : text.slice(0, PROGRESS_NOTE_LIMIT - 1) + '…';
+}
+
+/** A fresh note holds ordinary heartbeats for a while to avoid duplicate updates. */
+export function heartbeatAllowed(progress, config, now = Date.now()) {
+  if (!progress.notes) return true;
+  return now - progress.lastNoteAt >= (Number(config.progressNoteHoldMs) || 0);
 }
 
 /** Whether this tool is work a chat should hear about, rather than bookkeeping. */
@@ -38,6 +67,9 @@ export function isStyleTool(name) {
 }
 
 export function countToolCall(progress, name) {
+  // The note is a reporting action, not evidence of work the chat should see
+  // announced again by a heartbeat.
+  if (isProgressNoteTool(name)) return;
   if (isStyleTool(name)) progress.styleOnly = progress.styleOnly !== false;
   else progress.styleOnly = false;
   if (SEARCH_TOOLS.has(name)) progress.searches++;
