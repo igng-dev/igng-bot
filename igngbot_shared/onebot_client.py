@@ -64,7 +64,6 @@ class OneBotClient:
         return {
             "connected": bool(self._connected),
             "running": bool(self._running),
-            "self_id": str(self.self_id) if self.self_id not in (None, "") else None,
             "retry_delay": int(self._retry_delay),
             "consecutive_failures": int(self._consecutive_failures),
         }

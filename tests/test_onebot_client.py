@@ -13,10 +13,9 @@ def test_connection_status_reflects_open_close_and_stop():
     client = OneBotClient(config, lambda _message: None)
 
     assert client.status()["connected"] is False
-    client.self_id = 12345
+    assert "self_id" not in client.status()
     client._on_open(None)
     assert client.status()["connected"] is True
-    assert client.status()["self_id"] == "12345"
 
     client._on_close(None, 1000, "bye")
     assert client.status()["connected"] is False

@@ -23,4 +23,8 @@ else
     echo "watchdog cron installed"
 fi
 
-"$WATCHDOG" --check
+if "$WATCHDOG" --check; then
+    echo "bridge check: healthy"
+else
+    echo "bridge check: unhealthy (cron installed; the next checks will recover or alert)" >&2
+fi

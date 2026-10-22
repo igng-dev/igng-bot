@@ -32,7 +32,7 @@ log() {
 
 env_value() {
     key=$1
-    value=$(sed -n "s/^${key}=//p" "$NAS_ROOT/.env" 2>/dev/null | tail -n 1)
+    value=$(sed -n "s/^${key}=//p" "$NAS_ROOT/.env" 2>/dev/null | tail -n 1 | tr -d '\r')
     case "$value" in
         \"*\") value=${value#\"}; value=${value%\"} ;;
         \'*\') value=${value#\'}; value=${value%\'} ;;
