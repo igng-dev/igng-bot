@@ -49,6 +49,16 @@ MCP/ACP 及通用网络能力。禁用入口降低暴露面，不代表依赖漏
 - `yunying-dsh/tests/work-moderation.test.js` 新增多域透传用例（`scoped decisions pass through unchanged for chapter-level review`）。
 - 未连接真实付费模型；真实影子验收仍待显式执行。
 
+## 阶段 7：按用途复核（举报 / 申诉）
+
+- `work_manifest` 的 `purpose` 区分常规审核（SUBMIT）、举报复核（REPORT）与申诉复核（APPEAL）；提示词分别说明：举报只是线索，
+  申诉复核要先核对原证据、再对照标签含义与语境判断，并把作者的每个论点归类回应，措辞与情绪不影响结论。
+- 申诉任务的 manifest 附带 `appeal`（原处置与作者申诉，站点契约见 `igng-sites/docs/work-moderation.md`「申诉复核」），全部按不可信数据处理。
+- `work_submit` 的 `result` 新增可选 `appealReply`（≤2000 字，逐点回应作者）与 `appealNeedsHuman`（结论取决于授权、本人信息等内容外事实时置 true，站点转人工）。
+  只复核原处置涉及的问题，不得借申诉加重处理。是否恢复、是否转人工由站点按申诉规则决定（撤销 S2 及以上、第 N 次仍维持都转人工）。
+- `yunying-dsh/tests/work-moderation.test.js` 新增 `appeal review answers the author point by point and can ask the site for human verification`。
+- 未连接真实付费模型；真实影子验收仍待显式执行。
+
 ## 尚未完成
 
 统一管理中心、影子/灰度/回滚验收仍属后续阶段；当前不要启用 active 消费。
