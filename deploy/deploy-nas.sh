@@ -11,6 +11,7 @@
 #   ./deploy-nas.sh image     build the bot image on the build host, import on NAS
 #   ./deploy-nas.sh sync      sync compose files + vendored media service to the NAS
 #   ./deploy-nas.sh up        sync, import image, and start the stack
+#   ./deploy-nas.sh watchdog  sync and install the host bridge watchdog (cron)
 #   ./deploy-nas.sh status    show service status and recent logs
 #   ./deploy-nas.sh down      stop the stack (data and volumes are preserved)
 #   ./deploy-nas.sh logs      follow bot logs
@@ -45,6 +46,13 @@ cmd_sync() {
     "$COMPOSE_DIR/docker-compose.yml" \
     "$COMPOSE_DIR/.env" \
     "$NAS_TARGET:$NAS_ROOT/"
+
+  log "Syncing NapCat login-gated startup files"
+  nas "mkdir -p '$NAS_ROOT/napcat'"
+  scp -rp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+    "$COMPOSE_DIR/napcat/." \
+    "$NAS_TARGET:$NAS_ROOT/napcat/"
+  nas "chmod 755 '$NAS_ROOT/napcat/run-snowluma-after-login.sh'; chmod 644 '$NAS_ROOT/napcat/pt-login-probe.py' '$NAS_ROOT/napcat/supervisord.conf'"
 
   log "Vendoring media service from $SITE_DIR"
   local media_src="$SITE_DIR/services/igng-bot-media"
@@ -123,6 +131,17 @@ cmd_status() {
   nas "cd '$NAS_ROOT' && docker compose logs --tail=30 bot" || true
 }
 
+cmd_watchdog() {
+  log "Syncing bridge watchdog and probe"
+  nas "mkdir -p '$NAS_ROOT/watchdog/state'"
+  scp -p -o BatchMode=yes -o StrictHostKeyChecking=yes \
+    "$REPO_DIR/deploy/nas/igngbot-bridge-watchdog.sh" \
+    "$REPO_DIR/deploy/nas/install-nas-watchdog.sh" \
+    "$COMPOSE_DIR/napcat/pt-login-probe.py" \
+    "$NAS_TARGET:$NAS_ROOT/watchdog/"
+  nas "chmod 755 '$NAS_ROOT/watchdog/igngbot-bridge-watchdog.sh' '$NAS_ROOT/watchdog/install-nas-watchdog.sh'; chmod 644 '$NAS_ROOT/watchdog/pt-login-probe.py'; NAS_ROOT='$NAS_ROOT' sh '$NAS_ROOT/watchdog/install-nas-watchdog.sh'"
+}
+
 cmd_down() {
   log "Stopping stack (volumes and data are preserved)"
   nas "cd '$NAS_ROOT' && docker compose down"
@@ -133,11 +152,12 @@ cmd_logs() {
 }
 
 case "${1:-}" in
-  image)  cmd_image ;;
-  sync)   cmd_sync ;;
-  up)     cmd_up ;;
-  status) cmd_status ;;
-  down)   cmd_down ;;
-  logs)   cmd_logs ;;
+  image)    cmd_image ;;
+  sync)     cmd_sync ;;
+  up)       cmd_up ;;
+  status)   cmd_status ;;
+  watchdog) cmd_watchdog ;;
+  down)     cmd_down ;;
+  logs)     cmd_logs ;;
   *)      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

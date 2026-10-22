@@ -31,6 +31,21 @@ from .views import message_view, row_images, safe_structure
 logger = logging.getLogger("yunying.infrastructure")
 
 
+async def _close_notifier(notifier):
+    """Close the optional MC ticket notifier without aborting the rest of shutdown.
+
+    McTicketNotifier exposes ``close()``.  A previous shutdown path called a
+    non-existent ``stop()`` and raised AttributeError, skipping runner/HTTP/DB
+    cleanup and making every stop look like a crash to Docker.
+    """
+    if notifier is None:
+        return
+    try:
+        await notifier.close()
+    except Exception:
+        logger.exception("Failed to close MC ticket notifier")
+
+
 def _utc_now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -950,6 +965,20 @@ class Infrastructure:
             mirrored = await mirror_native_record(record_id, historical_record(record_id, payload))
         return {"ok": bool(mirrored), "callLogId": call_id}
 
+    def health_payload(self):
+        """Return the readiness body without treating a bridge outage as a DB failure."""
+        try:
+            self.conn.ping(reconnect=False)
+        except Exception:
+            return {"ok": False}, 503
+        client = getattr(self, "client", None)
+        onebot = client.status() if client is not None else {"connected": False}
+        return {
+            "ok": not getattr(self, "_stopping", False),
+            "version": "4.0.0",
+            "onebot": onebot,
+        }, 200
+
     async def run(self):
         self.loop = asyncio.get_running_loop()
         self.db.connect()
@@ -970,11 +999,8 @@ class Infrastructure:
                                             storage=self.storage, config=self.config)
         app = web.Application(client_max_size=4 * 1024 * 1024)
         async def health(_request):
-            try:
-                self.conn.ping(reconnect=False)
-                return web.json_response({"ok": not self._stopping, "version": "4.0.0"})
-            except Exception:
-                return web.json_response({"ok": False}, status=503)
+            payload, status = self.health_payload()
+            return web.json_response(payload, status=status)
         app.router.add_get("/health", health)
         app.router.add_post("/terminal/{action}", self.api)
         app.router.add_post("/{capability}", self.api)
@@ -1013,8 +1039,7 @@ class Infrastructure:
             worker.cancel()
             config_worker.cancel()
             await asyncio.gather(recorder, worker, config_worker, return_exceptions=True)
-            if notifier:
-                await notifier.stop()
+            await _close_notifier(notifier)
             if self.terminal:
                 await self.terminal.close()
             await runner.cleanup()

@@ -107,6 +107,14 @@ services:
       - napcat-data:/app/snowluma-data
       - napcat-qq-config:/app/.config
       - napcat-qq-data:/app/.local/share
+      # Do not start SnowLuma in the same breath as QQ.  The stock entrypoint
+      # starts both together; on 2026-10-20 and the 2026-10-21 reboot the hook
+      # attached before QQ restored its session, missed the login event, and
+      # left OneBot offline while both processes looked healthy.  The wrapper
+      # waits for the local PT login probe before exec'ing SnowLuma.
+      - ./napcat/supervisord.conf:/etc/supervisord.conf:ro
+      - ./napcat/run-snowluma-after-login.sh:/opt/igngbot/run-snowluma-after-login.sh:ro
+      - ./napcat/pt-login-probe.py:/opt/igngbot/pt-login-probe.py:ro
       # Read-only attachment tree at the exact path the bot uses, so artifacts
       # stored by the bot can be sent as file:// media through OneBot.
       - ${BOT_STORAGE_ROOT:-/vol2/1000/Docker/igngbot/data/message_logs}:/data/message_logs:ro

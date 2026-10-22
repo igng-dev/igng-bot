@@ -15,6 +15,7 @@ class OneBotClient:
         self.notice_callback = notice_callback
         self.ws = None
         self._running = False
+        self._connected = False
         self.self_id = None
         self._retry_delay = 1
         self._max_retry_delay = 300
@@ -36,6 +37,7 @@ class OneBotClient:
                 reason = "connection closed"
             finally:
                 self.ws = None
+                self._connected = False
 
             if not self._running:
                 break
@@ -53,8 +55,18 @@ class OneBotClient:
 
     def stop(self):
         self._running = False
+        self._connected = False
         if self.ws:
             self.ws.close()
+
+    def status(self):
+        """Snapshot for the infrastructure /health endpoint and the NAS watchdog."""
+        return {
+            "connected": bool(self._connected),
+            "running": bool(self._running),
+            "retry_delay": int(self._retry_delay),
+            "consecutive_failures": int(self._consecutive_failures),
+        }
 
     def _connect(self):
         access_token = str(getattr(self.config, "ONEBOT_ACCESS_TOKEN", "") or "").strip()
@@ -155,6 +167,7 @@ class OneBotClient:
             logger.error(f"Error processing message: {e}", exc_info=True)
 
     def _on_open(self, ws):
+        self._connected = True
         self._retry_delay = 1
         self._consecutive_failures = 0
         logger.info("Connected to %s WebSocket", self.config.ONEBOT_NAME)
@@ -168,6 +181,7 @@ class OneBotClient:
             self._last_error_log = now
 
     def _on_close(self, ws, close_status_code, close_msg):
+        self._connected = False
         now = time.monotonic()
         if now - self._last_close_log >= 30:
             logger.info("WebSocket closed (%s): %s", close_status_code, close_msg)
