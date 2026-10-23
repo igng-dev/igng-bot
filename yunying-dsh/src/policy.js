@@ -61,6 +61,10 @@ export function settings(env = process.env) {
     // configured silent-model list falls back to a bounded heartbeat instead.
     progressReports: (()=>{const mode=(env.YUNYING_PROGRESS_REPORTS||'auto').trim().toLowerCase();if(!['auto','off'].includes(mode))throw new Error('unsupported progress reports mode');return mode;})(),
     progressModelsWithout: new Set((env.YUNYING_MODELS_WITHOUT_PROGRESS || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean)),
+    // The interval heartbeat is a fallback for silent models that forget to call
+    // progress_note. `off` keeps the tool and its progress notes but stops the
+    // mechanical "still working / searches counted" timer entirely.
+    progressHeartbeats: (()=>{const mode=(env.YUNYING_PROGRESS_HEARTBEATS||'auto').trim().toLowerCase();if(!['auto','off'].includes(mode))throw new Error('unsupported progress heartbeats mode');return mode;})(),
     progressIntervalMs: integer(env.YUNYING_PROGRESS_INTERVAL_MS, 5000, 300000, 30000),
     progressMinGapMs: 8000, progressMaxForwardPerTurn: 6, progressMaxHeartbeatPerTurn: 20,
     // Silent models get a dedicated user-facing progress tool. Keep it rarer
