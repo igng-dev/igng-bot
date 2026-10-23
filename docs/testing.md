@@ -167,6 +167,19 @@ YUNYING_TEST_DB=yunying_v4_test YUNYING_RUN_PROFILE_SMOKE=1 python -m pytest tes
 
 新增 Node 回归在 `progress.test.js`：helper 覆盖 silent 判定/note 截断/30 秒心跳避让；native 测试覆盖工具免 token 本地执行、进度经 `/send` 发出、8 秒间隔抑制第二条、刚发 note 后不发心跳。未做：NAS 部署、真实 QQ 群送达、长时间运行与真实用户 A/B 验收；PR CI 结果见 PR 描述。
 
+### 只关机械心跳、保留 Gemini 过程进度（2026-10-23）
+
+线上 `gemini-flash` 已稳定调用 `progress_note`（2026-10-23 当天 5 次），但 `YUNYING_MODELS_WITHOUT_PROGRESS` 同时保留 30 秒心跳兜底：生产 `message_logs` 近 7 天有 7 条「正在查资料…搜了 N 次」，24 小时内 2 条，最近一条 14:29 紧跟在 14:28 的 note 之后，属于重复播报。新增 `YUNYING_PROGRESS_HEARTBEATS`（`auto` 默认 / `off`）：`off` 不再为本轮装载心跳计时器，但 silent 模型仍获得 `progress_note`，提示词与 note 的发送逻辑不变；`YUNYING_PROGRESS_REPORTS=off` 仍是全关。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `node --test tests/progress.test.js`（Node24.18.0，本机 scratch + 共享 node_modules） | **9 passed, 0 failed**；新增「heartbeat can be turned off while progress_note keeps speaking」覆盖 note 正常发出、心跳 0 条且不装载计时器。 |
+| `npm test`（离线） | **127 tests, 122 passed, 5 skipped, 0 failed**（5 条为真实 MySQL opt-in）。 |
+| `npm run check` | 通过。 |
+| `bash -n deploy/deploy-nas.sh deploy/deploy-v4-nas.sh`、`sh -n scripts/run-yunying-profile.sh`、`bash scripts/privacy-scan.sh`、`git diff --check` | 通过。 |
+
+未做：真实 QQ 长时运行 A/B；`progress_note` 在模型忘记调用时不再有任何兜底进度，这是该开关的预期取舍。
+
 ## Token 消耗治理：压缩策略、等待链、注入上限与步骤预算
 
 2026-10-07 生产诊断发现单群会话累计 9744 万未缓存输入 token、单日网关账单 $69.76：`llm-pi-ai` 声明 `contextWindow: 65536` 时，官方 `compaction-basic` 默认 `headroomTokens: 65536` 使 `contextWindow − maxTokens − headroom` 为负，主动压缩被静默跳过，历史涨到每次请求 37 万 token；每个工具步骤（尤其 `qq_wait_for_messages` 的链式续等）都重发整段 Session。修复不换模型、不改 donor Prompt 字节、不调触发频率：

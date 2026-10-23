@@ -10,7 +10,7 @@ import { compactModelMessage, serializeModelData } from '../donor/qq-bridge/qq-m
 import { allowed, bounded, canonicalKey, PolicyError } from './policy.js';
 import { renderStyle } from './style.js';
 import { projectEvent, toolResultMode } from './transcript.js';
-import { countToolCall, emptyProgress, forwardableText, heartbeatAllowed, heartbeatText, isProgressNoteTool, isReplyTool, isStyleTool, progressMode, progressNoteEnabled, progressNoteText } from './progress.js';
+import { countToolCall, emptyProgress, forwardableText, heartbeatAllowed, heartbeatEnabled, heartbeatText, isProgressNoteTool, isReplyTool, isStyleTool, progressMode, progressNoteEnabled, progressNoteText } from './progress.js';
 import { renderKnowledge, shouldConsultKnowledge } from './knowledge.js';
 import { SlangContext } from './slang.js';
 const donorPreset = yaml.load(readFileSync(new URL('../donor/qq-bridge/agent.cordis.yml',import.meta.url),'utf8'));
@@ -433,7 +433,7 @@ export class SocialRuntime {
     this.stopProgress(runtime);
     if(runtime.progressMode==='off'||this.stopping)return;
     runtime.progress=emptyProgress(turn);
-    if(runtime.progressMode==='heartbeat')this.armHeartbeat(runtime);
+    if(runtime.progressMode==='heartbeat'&&heartbeatEnabled(this.config))this.armHeartbeat(runtime);
   }
   stopProgress(runtime) {
     this.clearTimer(runtime,'progress');

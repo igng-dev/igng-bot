@@ -29,7 +29,8 @@ python -m pip install -r requirements-dev.txt
 | `DEEPSEEK_SEARCH_BASE_URL` | 可选，官方搜索独立端点，默认 `https://api.deepseek.com/anthropic/v1`；不会自动沿用模型 BASE_URL。 |
 | `YUNYING_MODELS_WITHOUT_PROGRESS` | 逗号分隔的模型清单：这些模型默认不会在任务中途输出进度文字，除固定间隔心跳回退外，还会获得 `progress_note` 工具；模型在搜索/网页/视频等耗时动作前调用它时，`text` 作为具体进度发出。未列出的模型（如默认 DeepSeek）把带工具调用的中间步骤文本转发为过程报告。 |
 | `YUNYING_PROGRESS_INTERVAL_MS` | 心跳间隔毫秒，5000–300000，默认 30000。仅命中清单的模型启用；本轮必须出现过搜索或视频类工具、尚未发出回复、且会话仍有发言权，才会发送。读未读、发消息、等待、记忆这些社交动作不触发心跳。 |
-| `YUNYING_PROGRESS_REPORTS` | `auto`（默认）或 `off`；`off` 同时关闭过程报告转发与心跳。 |
+| `YUNYING_PROGRESS_HEARTBEATS` | `auto`（默认）或 `off`；`off` 只关闭固定间隔心跳，清单模型的 `progress_note` 与未列模型的过程文字转发都保留。适合模型已经稳定调用 `progress_note`、不想再看到「正在查资料…搜了 N 次」机械计数的部署。 |
+| `YUNYING_PROGRESS_REPORTS` | `auto`（默认）或 `off`；`off` 同时关闭过程报告转发、`progress_note` 与心跳。 |
 | `YUNYING_WAIT_CHAIN_MS` | 0–600000，默认 600000。`purpose="messages"` 的沉睡前观察在一次工具调用内最多连续等待这么久（实际以工具 735s 超时为上限）：模型为"按剩余时间继续等待"产生的每次续等不再各占一个整段 Session 的模型步骤；`0` 关闭链式等待（回到每次只等 `timeoutMs`）。 |
 | `YUNYING_PRE_SLEEP_WAIT_MS` | 60000–300000，默认 300000。沉睡前观察窗口；同时进入 `qq_get_prompt` 的 `recommendations.preSleepWaitMs`。生产保持 donor 默认，只有测试群验证回复延迟、漏回和潜水行为后才考虑降低；不属于 compaction 修复，不能用它替代 `YUNYING_WAIT_CHAIN_MS`。 |
 | `YUNYING_BOOTSTRAP_INJECT_LIMIT` | 0–500，默认 20。启动/恢复时最多把最近多少条未投递事件重放进原生 Session；更早的积压留在社会状态里，由未读/历史工具按需读取，不再永久抬高每次请求的上下文。显式 @/回复永远投递。 |
@@ -39,7 +40,7 @@ python -m pip install -r requirements-dev.txt
 
 过程报告：带工具调用的中间步骤文本按模型清单分流——未列出的模型转发过程文字（每轮最多 6 条、间隔至少 8 秒、单条截断 400 字符），清单中的模型在本轮做过搜索或视频处理、且还没把回复发出去时，由心跳回退（每轮最多 20 条，文案只说「正在查资料」或「还在处理」）。普通闲聊、点名、主动冒泡不会报心跳。
 
-清单中的模型同时获得 `progress_note(text)` 工具：只应在真正开始联网搜索、打开网页、处理视频等耗时动作前调用，`text` 会被当作面向群友的具体过程进度发出（每轮最多 2 条、间隔至少 8 秒、单条截断 80 字符），刚发过 note 的 30 秒内不再补泛化心跳。它不是最终回复，普通看群/等待/发表情/记忆不调用；心跳保留为模型忘记调用时的兜底。
+清单中的模型同时获得 `progress_note(text)` 工具：只应在真正开始联网搜索、打开网页、处理视频等耗时动作前调用，`text` 会被当作面向群友的具体过程进度发出（每轮最多 2 条、间隔至少 8 秒、单条截断 80 字符），刚发过 note 的 30 秒内不再补泛化心跳。它不是最终回复，普通看群/等待/发表情/记忆不调用；心跳默认保留为模型忘记调用时的兜底，设 `YUNYING_PROGRESS_HEARTBEATS=off` 可只关掉这个机械兜底。
 
 两者都走固定 `/send` capability，仍受聊天模式/直接呼叫窗口与发送账本约束；收尾答复始终只经 `qq_send_message` 工具发送，不自动转发。名字点到走合批窗口，不与 @、私聊一样立即唤醒；回复检查只在发出的内容像问句或没说完时安排。
 

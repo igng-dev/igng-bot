@@ -34,6 +34,11 @@ export function progressNoteEnabled(config, model = config.model) {
   return progressMode(config, model) === 'heartbeat';
 }
 
+/** Whether the interval fallback heartbeat is allowed to run. */
+export function heartbeatEnabled(config) {
+  return config.progressHeartbeats !== 'off';
+}
+
 export function emptyProgress(turn, now = Date.now()) {
   return { turn, startedAt: now, steps: 0, commands: 0, searches: 0,
     substantive: false, quiet: false, styleOnly: null,
